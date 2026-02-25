@@ -6,11 +6,18 @@ use std::os::raw::c_char;
 use crate::cfg_eval::TargetDescription;
 use crate::resolve::resolve_workspace;
 
+/// The cargo binary path baked in at build time from the Nix store.
+/// Falls back to "cargo" (from PATH) when not set, e.g. during local development.
+const BUILTIN_CARGO_PATH: &str = match option_env!("CARGO_NIX_PLUGIN_CARGO_PATH") {
+    Some(p) => p,
+    None => "cargo",
+};
+
 /// Input from the Nix side — the entire attrset serialized as JSON.
 ///
 /// Two modes:
 /// 1. Explicit: `metadata` + `cargoLock` provided (pure, no subprocess)
-/// 2. Subprocess: `manifestPath` + `cargoPath` provided (shells out to cargo)
+/// 2. Subprocess: `manifestPath` provided (shells out to compiled-in cargo)
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginInput {
@@ -20,8 +27,6 @@ struct PluginInput {
     cargo_lock: Option<String>,
     /// Path to Cargo.toml (mode 2 — subprocess)
     manifest_path: Option<String>,
-    /// Path to cargo binary (required with manifest_path)
-    cargo_path: Option<String>,
     target: TargetDescription,
     #[serde(default = "default_root_features")]
     root_features: Vec<String>,
@@ -52,11 +57,7 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
             (metadata.clone(), cargo_lock.to_string())
         }
         (None, Some(manifest_path)) => {
-            let cargo_path = input
-                .cargo_path
-                .as_deref()
-                .ok_or("'cargoPath' is required when 'manifestPath' is provided.")?;
-            let metadata_json = run_cargo_metadata(cargo_path, manifest_path)?;
+            let metadata_json = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest_path)?;
             let manifest_dir = std::path::Path::new(manifest_path)
                 .parent()
                 .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
@@ -182,16 +183,12 @@ mod tests {
     #[test]
     #[ignore]
     fn subprocess_resolves_own_workspace() {
-        let cargo_path = std::env::var("CARGO")
-            .or_else(|_| which_cargo())
-            .expect("cargo not found — set CARGO env var");
         let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
         let input = PluginInput {
             metadata: None,
             cargo_lock: None,
             manifest_path: Some(manifest_path.to_string()),
-            cargo_path: Some(cargo_path),
             target: linux_x86_64(),
             root_features: vec!["default".to_string()],
         };
@@ -208,20 +205,5 @@ mod tests {
         assert!(has_serde, "expected serde in resolved crates");
     }
 
-    fn which_cargo() -> Result<String, std::env::VarError> {
-        std::process::Command::new("which")
-            .arg("cargo")
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    String::from_utf8(o.stdout)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                } else {
-                    None
-                }
-            })
-            .ok_or(std::env::VarError::NotPresent)
-    }
+
 }

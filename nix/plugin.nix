@@ -3,6 +3,7 @@
   stdenv,
   nixComponents,
   rustPlatform,
+  cargo,
   pkg-config,
   cmake,
   boost,
@@ -14,8 +15,9 @@ let
     pname = "cargo-nix-plugin-core";
     version = "0.1.0";
     src = ../rust;
-    useFetchCargoVendor = true;
     cargoHash = "sha256-L4bbQGLZBuTb/ZshMWRGDaCCs+ZiylcynfMGx1BWdwI=";
+    # Bake in the cargo store path so the plugin can shell out at eval time
+    CARGO_NIX_PLUGIN_CARGO_PATH = "${cargo}/bin/cargo";
   };
 in
 stdenv.mkDerivation {
