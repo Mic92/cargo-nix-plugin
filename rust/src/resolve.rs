@@ -321,16 +321,24 @@ fn get_sha256(pkg: &Package, lockfile_hashes: &LockfileHashes) -> Option<String>
 /// Expand resolved features through the feature map to find all activated
 /// optional deps. Handles both `dep:foo` syntax and implicit activation
 /// (feature name matching an optional dep name).
+///
+/// Returns a set of **effective dep names** — the rename if present, otherwise
+/// the package name. This is what Cargo uses in `dep:` references and allows
+/// disambiguating between multiple deps with the same package name but
+/// different renames (e.g., tokio-rustls-023 vs tokio-rustls-026).
 fn activated_optional_deps(
     pkg: &Package,
     resolved_features: &[String],
 ) -> std::collections::HashSet<String> {
     let feature_map = &pkg.features;
-    let optional_dep_names: std::collections::HashSet<String> = pkg
+
+    // Collect the "effective name" of each optional dep — the rename if present,
+    // otherwise the package name. This is what Cargo uses in `dep:` references.
+    let optional_dep_effective_names: std::collections::HashSet<String> = pkg
         .dependencies
         .iter()
         .filter(|d| d.optional)
-        .map(|d| d.name.clone())
+        .map(|d| d.rename.as_ref().unwrap_or(&d.name).clone())
         .collect();
 
     // Expand features transitively
@@ -343,14 +351,22 @@ fn activated_optional_deps(
             continue;
         }
 
-        // "dep:foo" directly activates optional dep "foo"
+        // "dep:foo" directly activates optional dep "foo" (where foo is the effective name)
         if let Some(dep_name) = feat.strip_prefix("dep:") {
             activated.insert(dep_name.to_string());
             continue;
         }
 
-        // A feature with the same name as an optional dep implicitly activates it
-        if optional_dep_names.contains(&feat) {
+        // Handle "dep_name/feature" syntax: activates the dep
+        if let Some((dep_part, _feature_part)) = feat.split_once('/') {
+            if optional_dep_effective_names.contains(dep_part) {
+                activated.insert(dep_part.to_string());
+            }
+            // Don't continue — still need to follow feature rules below
+        }
+
+        // A feature with the same name as an optional dep (effective name) implicitly activates it
+        if optional_dep_effective_names.contains(&feat) {
             activated.insert(feat.clone());
         }
 
@@ -403,9 +419,14 @@ fn resolve_dependencies(
             }
         }
 
-        // Skip optional deps that are not activated by resolved features
-        if dep.optional && !activated_opt_deps.contains(&dep.name) {
-            continue;
+        // Skip optional deps that are not activated by resolved features.
+        // Use the effective name (rename if present, else package name) to
+        // disambiguate multiple deps with the same package name.
+        if dep.optional {
+            let effective = dep.rename.as_ref().unwrap_or(&dep.name);
+            if !activated_opt_deps.contains(effective.as_str()) {
+                continue;
+            }
         }
 
         let normalized = normalize_name(&dep.name);
