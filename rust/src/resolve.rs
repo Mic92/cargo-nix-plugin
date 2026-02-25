@@ -318,6 +318,53 @@ fn get_sha256(pkg: &Package, lockfile_hashes: &LockfileHashes) -> Option<String>
         .cloned()
 }
 
+/// Expand resolved features through the feature map to find all activated
+/// optional deps. Handles both `dep:foo` syntax and implicit activation
+/// (feature name matching an optional dep name).
+fn activated_optional_deps(
+    pkg: &Package,
+    resolved_features: &[String],
+) -> std::collections::HashSet<String> {
+    let feature_map = &pkg.features;
+    let optional_dep_names: std::collections::HashSet<String> = pkg
+        .dependencies
+        .iter()
+        .filter(|d| d.optional)
+        .map(|d| d.name.clone())
+        .collect();
+
+    // Expand features transitively
+    let mut seen = std::collections::HashSet::new();
+    let mut queue: Vec<String> = resolved_features.to_vec();
+    let mut activated = std::collections::HashSet::new();
+
+    while let Some(feat) = queue.pop() {
+        if !seen.insert(feat.clone()) {
+            continue;
+        }
+
+        // "dep:foo" directly activates optional dep "foo"
+        if let Some(dep_name) = feat.strip_prefix("dep:") {
+            activated.insert(dep_name.to_string());
+            continue;
+        }
+
+        // A feature with the same name as an optional dep implicitly activates it
+        if optional_dep_names.contains(&feat) {
+            activated.insert(feat.clone());
+        }
+
+        // Follow feature rules
+        if let Some(rules) = feature_map.get(&feat) {
+            for rule in rules {
+                queue.push(rule.clone());
+            }
+        }
+    }
+
+    activated
+}
+
 fn resolve_dependencies(
     pkg: &Package,
     node: Option<&&cargo_metadata::Node>,
@@ -333,6 +380,8 @@ fn resolve_dependencies(
     let Some(node) = node else {
         return (deps, build_deps, dev_deps);
     };
+
+    let activated_opt_deps = activated_optional_deps(pkg, resolved_features);
 
     // Build a lookup of node deps: normalized name -> Vec<(PackageId, dep_name_in_node)>
     let mut node_dep_lookup: HashMap<String, Vec<(&PackageId, &str)>> = HashMap::new();
@@ -354,8 +403,8 @@ fn resolve_dependencies(
             }
         }
 
-        // Check optional: skip if not enabled by resolved features
-        if dep.optional && !resolved_features.contains(&dep.name) {
+        // Skip optional deps that are not activated by resolved features
+        if dep.optional && !activated_opt_deps.contains(&dep.name) {
             continue;
         }
 

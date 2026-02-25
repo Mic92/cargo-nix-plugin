@@ -185,11 +185,12 @@ let
         else
           self.crates.${dep.packageId};
 
-      # buildRustCrate expects dependencies as a flat list of derivations
+      # Dependencies are already filtered by the Rust resolver:
+      # platform-incompatible and inactive optional deps are excluded.
       dependencies = map depDrv (crateInfo.dependencies or [ ]);
       buildDependencies = map depDrv (crateInfo.buildDependencies or [ ]);
 
-      # Renames have the form: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
+      # Renames: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
       renamedDeps = lib.filter (d: d ? rename && d.rename != null) (
         (crateInfo.dependencies or [ ]) ++ (crateInfo.buildDependencies or [ ])
       );
