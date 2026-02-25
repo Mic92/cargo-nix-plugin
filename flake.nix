@@ -53,6 +53,9 @@
           cargoNixFile = "${crate2nix-torture}/Cargo.nix";
         };
 
+        # Optional: helper for generating metadata JSON explicitly.
+        # Not needed when using the automatic subprocess mode (just pass src).
+        # Useful for offline/pure evaluation workflows.
         generate-metadata = pluginPkgs.writeShellApplication {
           name = "generate-metadata";
           runtimeInputs = [ pluginPkgs.cargo ];

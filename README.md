@@ -6,8 +6,8 @@ primop.
 
 ## What It Does
 
-- Parses `cargo metadata` JSON and `Cargo.lock` in compiled Rust code
-- Resolves the dependency graph and features at native speed
+- Resolves Cargo workspaces at native speed — either by shelling out to
+  `cargo metadata` automatically, or by parsing pre-provided metadata JSON
 - Pre-evaluates `cfg()` target expressions for the requested platform
 - Returns a Nix attrset compatible with `buildRustCrate`
 - Eliminates the `crate2nix generate` step and the 50K-100K line `Cargo.nix`
@@ -29,21 +29,65 @@ Or use the flake output:
 }
 ```
 
-## Generate Metadata
+## Usage
 
-Run once whenever dependencies change:
+### Simple (automatic)
+
+Just point at your workspace root — the plugin calls `cargo metadata` for you:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;  # must contain Cargo.toml + Cargo.lock
+};
+```
+
+This shells out to `cargo metadata --format-version 1 --locked` during Nix
+evaluation. It uses the user's `CARGO_HOME` cache, so it's near-instant when
+dependencies have been fetched before. Network access is required on first use.
+
+### Explicit (pure, offline)
+
+For pure evaluation or CI without network, pre-generate the metadata:
 
 ```bash
 cargo metadata --format-version 1 --locked > metadata.json
 ```
 
-Or use the provided helper:
+Then pass it explicitly:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  metadata = builtins.readFile ./metadata.json;
+  cargoLock = builtins.readFile ./Cargo.lock;
+  src = ./.;
+};
+```
+
+A helper is also available:
 
 ```bash
 nix run .#generate-metadata -- > metadata.json
 ```
 
-## Example flake.nix
+## Example
+
+Evaluate with the plugin loaded via `--option`:
+
+```bash
+nix-instantiate --eval \
+  --option plugin-files "$(nix build .#cargo-nix-plugin --print-out-paths)/lib/nix/plugins/libcargo_nix_plugin.so" \
+  -E '(import ./lib { pkgs = import <nixpkgs> {}; src = ./.; }).workspaceMembers'
+```
+
+Or in `nix.conf` / `~/.config/nix/nix.conf`:
+
+```ini
+plugin-files = /path/to/libcargo_nix_plugin.so
+```
+
+### flake.nix
 
 ```nix
 {
@@ -54,16 +98,10 @@ nix run .#generate-metadata -- > metadata.json
 
   outputs = { self, nixpkgs, cargo-nix-plugin }:
     let
-      pkgs = import nixpkgs {
-        system = "x86_64-linux";
-        config.plugin-files =
-          "${cargo-nix-plugin.packages.x86_64-linux.cargo-nix-plugin}/lib/nix/plugins/libcargo_nix_plugin.so";
-      };
+      pkgs = import nixpkgs { system = "x86_64-linux"; };
 
-      cargoNix = import "${cargo-nix-plugin}/lib" {
+      cargoNix = cargo-nix-plugin.lib {
         inherit pkgs;
-        metadata = builtins.readFile ./metadata.json;
-        cargoLock = builtins.readFile ./Cargo.lock;
         src = ./.;
       };
     in {
@@ -78,10 +116,11 @@ nix run .#generate-metadata -- > metadata.json
    serializes the Nix input attrset to JSON via `printValueAsJSON`, calls the
    Rust FFI, and converts the JSON result back to Nix values via `parseJSON`.
 
-2. **Rust core** (~600 lines): Parses `cargo metadata` JSON using the
-   `cargo_metadata` crate, extracts `Cargo.lock` checksums (hex → SRI),
-   evaluates `cfg()` expressions using `cargo-platform`, resolves dependencies,
-   and returns the full crate graph as JSON.
+2. **Rust core** (~700 lines): In automatic mode, runs `cargo metadata` as a
+   subprocess; in explicit mode, parses provided JSON directly. Extracts
+   `Cargo.lock` checksums (hex → SRI), evaluates `cfg()` expressions using
+   `cargo-platform`, resolves dependencies, and returns the full crate graph
+   as JSON.
 
 3. **Nix wrapper** (`lib/default.nix`): Takes the plugin output and calls
    `buildRustCrate` for each crate with dependencies wired as built derivations.

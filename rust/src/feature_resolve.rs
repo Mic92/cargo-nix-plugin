@@ -194,27 +194,15 @@ mod tests {
         let mut packages = HashMap::new();
         packages.insert(
             "A".to_string(),
-            make_package(
-                &[("default", &[])],
-                &[("c", "C", false, &["x"])],
-                &[],
-            ),
+            make_package(&[("default", &[])], &[("c", "C", false, &["x"])], &[]),
         );
         packages.insert(
             "B".to_string(),
-            make_package(
-                &[("default", &[])],
-                &[("c", "C", false, &["y"])],
-                &[],
-            ),
+            make_package(&[("default", &[])], &[("c", "C", false, &["y"])], &[]),
         );
         packages.insert(
             "C".to_string(),
-            make_package(
-                &[("default", &[]), ("x", &[]), ("y", &[])],
-                &[],
-                &[],
-            ),
+            make_package(&[("default", &[]), ("x", &[]), ("y", &[])], &[], &[]),
         );
         let result = resolve_features(
             &packages,
@@ -263,24 +251,13 @@ mod tests {
         let mut packages = HashMap::new();
         packages.insert(
             "A".to_string(),
-            make_package(
-                &[("default", &[])],
-                &[("b", "B", false, &["x"])],
-                &[],
-            ),
+            make_package(&[("default", &[])], &[("b", "B", false, &["x"])], &[]),
         );
         packages.insert(
             "B".to_string(),
-            make_package(
-                &[("x", &["c/y"])],
-                &[("c", "C", false, &[])],
-                &[],
-            ),
+            make_package(&[("x", &["c/y"])], &[("c", "C", false, &[])], &[]),
         );
-        packages.insert(
-            "C".to_string(),
-            make_package(&[("y", &[])], &[], &[]),
-        );
+        packages.insert("C".to_string(), make_package(&[("y", &[])], &[], &[]));
         let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let b_feats = result.get("B").unwrap();
         assert!(b_feats.contains("x"), "B missing x: {:?}", b_feats);
@@ -295,11 +272,7 @@ mod tests {
         let mut packages = HashMap::new();
         packages.insert(
             "A".to_string(),
-            make_package(
-                &[("default", &[])],
-                &[("b", "B", true, &[])],
-                &[],
-            ),
+            make_package(&[("default", &[])], &[("b", "B", true, &[])], &[]),
         );
         packages.insert(
             "B".to_string(),
@@ -307,7 +280,11 @@ mod tests {
         );
         let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let b_feats = result.get("B").unwrap();
-        assert!(b_feats.contains("default"), "B missing default: {:?}", b_feats);
+        assert!(
+            b_feats.contains("default"),
+            "B missing default: {:?}",
+            b_feats
+        );
         assert!(b_feats.contains("net"), "B missing net: {:?}", b_feats);
     }
 }

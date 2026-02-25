@@ -53,6 +53,18 @@ else               → pass manifestPath + cargoPath to plugin (new)
 
 `src` is always required (used for local crate source resolution). `cargoLock` and `metadata` become optional — only needed for the explicit/pure path.
 
+### 6. Use the user's real CARGO_HOME
+
+The subprocess inherits the user's `CARGO_HOME` (defaults to `~/.cargo`). This is typically already warm from normal `cargo build`/`cargo check` usage, making `cargo metadata --locked` near-instant. No temp dir, no custom cache location.
+
+### 7. Error messages hint at explicit metadata fallback
+
+When cargo fails (network, missing lockfile, etc.), the plugin error includes cargo's stderr plus a hint: "Pass `metadata` explicitly for offline/pure usage." This guides users to the escape hatch.
+
+### 8. Subprocess path not tested in network-free Nix builds
+
+Existing Nix-based tests (eval-test, torture-test) stay on the explicit metadata path since they run in sandbox without network. The subprocess path is tested via a Rust `#[ignore]` integration test that requires cargo on PATH.
+
 ## Risks / Trade-offs
 
 - **[Cold CARGO_HOME]** → First invocation downloads registry index + crate tarballs. Mitigated: this is the same cost as running `cargo metadata` manually. Subsequent evals hit cache. Users who need pure eval can still pass explicit metadata.
@@ -61,4 +73,4 @@ else               → pass manifestPath + cargoPath to plugin (new)
 
 - **[cargo version coupling]** → Plugin depends on `cargo metadata` JSON format stability. Mitigated: format version 1 has been stable for years, and we pin the cargo version via Nix.
 
-- **[Error reporting]** → If cargo fails (network error, missing lockfile), the error surfaces through the plugin. Mitigated: capture stderr from cargo and include it in the Nix eval error message.
+- **[Error reporting]** → If cargo fails (network error, missing lockfile), the error surfaces through the plugin. Mitigated: capture stderr from cargo, include it in the Nix eval error, and hint at the explicit metadata fallback.

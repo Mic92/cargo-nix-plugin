@@ -59,9 +59,7 @@ mod tests {
 
     #[test]
     fn hex_to_sri_all_zeros() {
-        let sri = hex_to_sri(
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
+        let sri = hex_to_sri("0000000000000000000000000000000000000000000000000000000000000000");
         assert_eq!(sri, "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
     }
 

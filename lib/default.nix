@@ -1,6 +1,14 @@
 # Nix wrapper that connects the cargo-nix-plugin output to buildRustCrate.
 #
-# Usage:
+# Usage (automatic — shells out to cargo during eval):
+#   let
+#     cargoNix = import ./lib {
+#       inherit pkgs;
+#       src = ./.;  # workspace root with Cargo.toml + Cargo.lock
+#     };
+#   in cargoNix.workspaceMembers
+#
+# Usage (explicit — pure, no subprocess):
 #   let
 #     cargoNix = import ./lib {
 #       inherit pkgs;
@@ -14,9 +22,11 @@
   pkgs ? import <nixpkgs> { },
   lib ? pkgs.lib,
   stdenv ? pkgs.stdenv,
-  # Required: output of `cargo metadata --format-version 1 --locked`
+  # Optional: output of `cargo metadata --format-version 1 --locked`
+  # If omitted, the plugin shells out to cargo automatically.
   metadata ? null,
-  # Required: contents of Cargo.lock
+  # Optional: contents of Cargo.lock (required when metadata is provided)
+  # If omitted with metadata=null, read from src/Cargo.lock automatically.
   cargoLock ? null,
   # Required: workspace source root
   src ? null,
@@ -87,12 +97,24 @@ let
 
   resolvedTarget = if target != null then target else defaultTarget;
 
-  # Call the plugin builtin
-  resolved = builtins.resolveCargoWorkspace {
-    inherit metadata cargoLock;
-    target = resolvedTarget;
-    inherit rootFeatures;
-  };
+  # Call the plugin builtin — auto-detect mode based on metadata presence
+  resolved = builtins.resolveCargoWorkspace (
+    {
+      target = resolvedTarget;
+      inherit rootFeatures;
+    }
+    // (
+      if metadata != null then
+        {
+          inherit metadata cargoLock;
+        }
+      else
+        {
+          manifestPath = "${src}/Cargo.toml";
+          cargoPath = "${pkgs.cargo}/bin/cargo";
+        }
+    )
+  );
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl

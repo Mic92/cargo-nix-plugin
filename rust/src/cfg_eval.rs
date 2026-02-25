@@ -106,8 +106,7 @@ mod tests {
     #[test]
     fn cfg_any_matches() {
         let platform =
-            Platform::from_str("cfg(any(target_os = \"windows\", target_os = \"linux\"))")
-                .unwrap();
+            Platform::from_str("cfg(any(target_os = \"windows\", target_os = \"linux\"))").unwrap();
         assert!(matches_target(&platform, &linux_x86_64()));
     }
 

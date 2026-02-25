@@ -100,8 +100,8 @@ pub fn resolve_workspace(
     target: &TargetDescription,
     _root_features: &[String],
 ) -> Result<WorkspaceResult, String> {
-    let metadata: Metadata =
-        serde_json::from_str(metadata_json).map_err(|e| format!("Failed to parse metadata: {e}"))?;
+    let metadata: Metadata = serde_json::from_str(metadata_json)
+        .map_err(|e| format!("Failed to parse metadata: {e}"))?;
 
     let lockfile_hashes = parse_lockfile(cargo_lock);
 
@@ -121,11 +121,8 @@ pub fn resolve_workspace(
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
     // Build node lookup by ID (for resolved features)
-    let nodes_by_id: HashMap<&PackageId, &cargo_metadata::Node> = resolve
-        .nodes
-        .iter()
-        .map(|n| (&n.id, n))
-        .collect();
+    let nodes_by_id: HashMap<&PackageId, &cargo_metadata::Node> =
+        resolve.nodes.iter().map(|n| (&n.id, n)).collect();
 
     // Build shortened ID lookup
     let short_ids: HashMap<&PackageId, String> = metadata
@@ -162,9 +159,7 @@ pub fn resolve_workspace(
         let is_workspace_member = workspace_member_ids.contains(&pkg.id);
 
         // Get resolved features from cargo's resolve
-        let resolved_features: Vec<String> = node
-            .map(|n| n.features.clone())
-            .unwrap_or_default();
+        let resolved_features: Vec<String> = node.map(|n| n.features.clone()).unwrap_or_default();
 
         // Determine source
         let source = resolve_source(pkg, &lockfile_hashes, is_workspace_member);
@@ -173,14 +168,20 @@ pub fn resolve_workspace(
         let sha256 = get_sha256(pkg, &lockfile_hashes);
 
         // Resolve dependencies by joining package deps with node deps
-        let (dependencies, build_dependencies, dev_dependencies) =
-            resolve_dependencies(pkg, node, &short_ids, &pkgs_by_id, target, &resolved_features);
+        let (dependencies, build_dependencies, dev_dependencies) = resolve_dependencies(
+            pkg,
+            node,
+            &short_ids,
+            &pkgs_by_id,
+            target,
+            &resolved_features,
+        );
 
         // Extract build targets
         let lib_target = pkg.targets.iter().find(|t| {
-            t.kind
-                .iter()
-                .any(|k| k == "lib" || k == "cdylib" || k == "dylib" || k == "rlib" || k == "proc-macro")
+            t.kind.iter().any(|k| {
+                k == "lib" || k == "cdylib" || k == "dylib" || k == "rlib" || k == "proc-macro"
+            })
         });
 
         let build_target = pkg
@@ -209,7 +210,11 @@ pub fn resolve_workspace(
         let lib_crate_types: Vec<String> = pkg
             .targets
             .iter()
-            .filter(|t| t.kind.iter().any(|k| k.ends_with("lib") || k == "proc-macro"))
+            .filter(|t| {
+                t.kind
+                    .iter()
+                    .any(|k| k.ends_with("lib") || k == "proc-macro")
+            })
             .flat_map(|t| t.crate_types.iter().cloned())
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
@@ -372,7 +377,10 @@ fn resolve_dependencies(
             continue;
         };
 
-        let short = short_ids.get(resolved_id).cloned().unwrap_or_else(|| resolved_id.repr.clone());
+        let short = short_ids
+            .get(resolved_id)
+            .cloned()
+            .unwrap_or_else(|| resolved_id.repr.clone());
 
         let rename = dep.rename.as_ref().map(|r| normalize_name(r));
 
@@ -401,9 +409,7 @@ fn resolve_dependencies(
 
 /// Get a source file path relative to the package directory.
 fn relative_src_path(src_path: &camino::Utf8Path, manifest_path: &camino::Utf8Path) -> String {
-    let pkg_dir = manifest_path
-        .parent()
-        .unwrap_or(camino::Utf8Path::new("."));
+    let pkg_dir = manifest_path.parent().unwrap_or(camino::Utf8Path::new("."));
     src_path
         .strip_prefix(pkg_dir)
         .unwrap_or(src_path)
@@ -435,8 +441,13 @@ mod tests {
         let metadata = include_str!("../tests/fixtures/metadata.json");
         let cargo_lock = include_str!("../tests/fixtures/Cargo.lock");
 
-        let result = resolve_workspace(metadata, cargo_lock, &linux_x86_64(), &["default".to_string()])
-            .expect("resolve_workspace failed");
+        let result = resolve_workspace(
+            metadata,
+            cargo_lock,
+            &linux_x86_64(),
+            &["default".to_string()],
+        )
+        .expect("resolve_workspace failed");
 
         // 1798 packages in metadata, should have entries for all of them
         assert!(
@@ -454,7 +465,10 @@ mod tests {
         );
 
         // Spot-check: serde should exist and have features
-        let serde = result.crates.values().find(|c| c.crate_name == "serde" && c.version.starts_with("1.0"));
+        let serde = result
+            .crates
+            .values()
+            .find(|c| c.crate_name == "serde" && c.version.starts_with("1.0"));
         assert!(serde.is_some(), "serde 1.0.x not found");
         let serde = serde.unwrap();
         assert!(serde.features.contains_key("default"));
@@ -469,7 +483,10 @@ mod tests {
         );
 
         // Spot-check: local crate has no sha256
-        let local = result.crates.values().find(|c| c.crate_name == "internal-crate-001");
+        let local = result
+            .crates
+            .values()
+            .find(|c| c.crate_name == "internal-crate-001");
         assert!(local.is_some(), "internal-crate-001 not found");
         let local = local.unwrap();
         assert!(local.sha256.is_none(), "local crate should not have sha256");
