@@ -1,0 +1,18 @@
+[package]
+name = "cargo-nix-plugin-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+cargo_metadata = "0.18"
+cargo-platform = "0.1"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["unbounded_depth"] }
+base64 = "0.22"
+
+[dev-dependencies]
