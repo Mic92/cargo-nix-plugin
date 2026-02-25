@@ -42,6 +42,6 @@ stdenv.mkDerivation {
   meta = {
     description = "Nix plugin for resolving Cargo workspaces";
     license = lib.licenses.mit;
-    platforms = lib.platforms.linux;
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }
