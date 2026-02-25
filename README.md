@@ -73,15 +73,21 @@ nix run .#generate-metadata -- > metadata.json
 
 ## Example
 
-Evaluate with the plugin loaded via `--option`:
+The plugin must be loaded by the same Nix version it was compiled against
+(see [Compatibility](#compatibility)). Evaluate with the plugin loaded via
+`--option`:
 
 ```bash
-nix-instantiate --eval \
-  --option plugin-files "$(nix build .#cargo-nix-plugin --print-out-paths)/lib/nix/plugins/libcargo_nix_plugin.so" \
+PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
+NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+
+$NIX/bin/nix-instantiate --eval \
+  --option plugin-files "$PLUGIN/lib/nix/plugins/libcargo_nix_plugin.so" \
   -E '(import ./lib { pkgs = import <nixpkgs> {}; src = ./.; }).workspaceMembers'
 ```
 
-Or in `nix.conf` / `~/.config/nix/nix.conf`:
+Or permanently in `nix.conf` / `~/.config/nix/nix.conf` (only if your system
+Nix matches the plugin's build version):
 
 ```ini
 plugin-files = /path/to/libcargo_nix_plugin.so
@@ -144,7 +150,27 @@ The wrapper auto-detects this from `stdenv.hostPlatform`.
 
 ## Compatibility
 
-- **Nix**: 2.33+ (plugin API)
+- **Nix**: The plugin must be loaded by the **same Nix version** it was compiled
+  against. The plugin links against `nix-expr` at build time, and the Nix plugin
+  ABI is not stable across versions. If you see errors like
+  `expected a set but found a set`, you have a version mismatch between the
+  plugin and the evaluating `nix` binary. The flake builds against
+  `nixComponents_2_33`, so use Nix 2.33.x to evaluate:
+
+  ```bash
+  # Get the matching nix
+  NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+  PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
+
+  $NIX/bin/nix build .#myPackage \
+    --option plugin-files "$PLUGIN/lib/nix/plugins/libcargo_nix_plugin.so"
+  ```
+
+- **Platforms**: The plugin builds for `x86_64-linux`, `aarch64-linux`,
+  `aarch64-darwin`, and `x86_64-darwin`. The compiled-in `cargo` binary is
+  always for the **build** platform, so the plugin can shell out to
+  `cargo metadata` during evaluation regardless of the target platform.
+
 - **Rust**: Uses `cargo_metadata` 0.18, `cargo-platform` 0.1
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`
