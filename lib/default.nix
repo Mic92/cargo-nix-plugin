@@ -30,6 +30,10 @@
   cargoLock ? null,
   # Required: workspace source root
   src ? null,
+  # Optional: path to cargo binary for subprocess mode.
+  # Must be executable on the evaluating machine (not the target).
+  # Defaults to pkgs.cargo which works for native builds.
+  cargoPath ? "${pkgs.cargo}/bin/cargo",
   # Optional: function to create buildRustCrate for a given pkgs
   buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
   # Optional: default crate overrides
@@ -111,7 +115,7 @@ let
       else
         {
           manifestPath = "${src}/Cargo.toml";
-          cargoPath = "${pkgs.cargo}/bin/cargo";
+          inherit cargoPath;
         }
     )
   );
