@@ -575,4 +575,213 @@ mod tests {
         });
         assert!(has_rename, "expected at least one renamed dependency");
     }
+
+    /// Helper: build a minimal Package with the given optional deps and feature map.
+    /// Each dep entry is (package_name, rename_or_none, optional).
+    fn make_package(
+        deps: &[(&str, Option<&str>, bool)],
+        features: &[(&str, &[&str])],
+    ) -> Package {
+        let dep_json: Vec<serde_json::Value> = deps
+            .iter()
+            .map(|(name, rename, optional)| {
+                serde_json::json!({
+                    "name": name,
+                    "source": "registry+https://github.com/rust-lang/crates.io-index",
+                    "req": "*",
+                    "kind": null,
+                    "optional": optional,
+                    "uses_default_features": true,
+                    "features": [],
+                    "target": null,
+                    "rename": rename,
+                    "registry": null,
+                    "path": null
+                })
+            })
+            .collect();
+
+        let feature_map: serde_json::Map<String, serde_json::Value> = features
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    serde_json::Value::Array(
+                        v.iter()
+                            .map(|s| serde_json::Value::String(s.to_string()))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect();
+
+        serde_json::from_value(serde_json::json!({
+            "name": "test-pkg",
+            "version": "0.1.0",
+            "id": "path+file:///test#test-pkg@0.1.0",
+            "source": null,
+            "dependencies": dep_json,
+            "targets": [{
+                "kind": ["lib"],
+                "crate_types": ["lib"],
+                "name": "test-pkg",
+                "src_path": "/test/src/lib.rs",
+                "edition": "2021",
+                "doc": true,
+                "doctest": true,
+                "test": true
+            }],
+            "features": feature_map,
+            "manifest_path": "/test/Cargo.toml",
+            "edition": "2021",
+        }))
+        .expect("failed to construct test Package")
+    }
+
+    /// Helper: given a package and resolved features, return the effective names
+    /// of optional deps that would pass the filter (simulating the filter check
+    /// in resolve_dependencies without needing a full Node).
+    fn filtered_optional_dep_effective_names(
+        pkg: &Package,
+        resolved_features: &[String],
+    ) -> Vec<String> {
+        let activated = activated_optional_deps(pkg, resolved_features);
+        pkg.dependencies
+            .iter()
+            .filter(|dep| {
+                if !dep.optional {
+                    return true;
+                }
+                let effective = dep.rename.as_ref().unwrap_or(&dep.name);
+                activated.contains(effective.as_str())
+            })
+            .map(|dep| dep.rename.as_ref().unwrap_or(&dep.name).clone())
+            .collect()
+    }
+
+    /// Regression: dep:name syntax must expand through the feature map
+    /// to activate optional deps. Before the fix, bzip2's "default" feature
+    /// enabling "dep:libbz2-rs-sys" did not activate libbz2-rs-sys.
+    #[test]
+    fn dep_syntax_activates_optional_dep() {
+        let pkg = make_package(
+            &[("libbz2-rs-sys", None, true)],
+            &[("default", &["dep:libbz2-rs-sys"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["default".into()]);
+        assert!(
+            result.contains(&"libbz2-rs-sys".to_string()),
+            "dep:libbz2-rs-sys should activate libbz2-rs-sys, got: {result:?}"
+        );
+    }
+
+    /// Regression: dep:name syntax with renamed deps must use the rename,
+    /// not the package name. actix-tls's "rustls-0_23" feature enables
+    /// "dep:tokio-rustls-026" where tokio-rustls-026 is a rename of tokio-rustls.
+    #[test]
+    fn dep_syntax_activates_renamed_optional_dep() {
+        let pkg = make_package(
+            &[("tokio-rustls", Some("tokio-rustls-026"), true)],
+            &[("rustls-0_23", &["dep:tokio-rustls-026"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["rustls-0_23".into()]);
+        assert!(
+            result.contains(&"tokio-rustls-026".to_string()),
+            "dep:tokio-rustls-026 should include the renamed dep, got: {result:?}"
+        );
+    }
+
+    /// Regression: when multiple optional deps share the same package name
+    /// but have different renames, only the one referenced by features should
+    /// be included. actix-tls depends on tokio-rustls 4 times with different
+    /// renames; only tokio-rustls-026 should pass the filter for rustls-0_23.
+    #[test]
+    fn only_referenced_rename_included_among_same_package_deps() {
+        let pkg = make_package(
+            &[
+                ("tokio-rustls", Some("tokio-rustls-023"), true),
+                ("tokio-rustls", Some("tokio-rustls-024"), true),
+                ("tokio-rustls", Some("tokio-rustls-025"), true),
+                ("tokio-rustls", Some("tokio-rustls-026"), true),
+            ],
+            &[
+                ("rustls-0_20", &["dep:tokio-rustls-023"]),
+                ("rustls-0_21", &["dep:tokio-rustls-024"]),
+                ("rustls-0_22", &["dep:tokio-rustls-025"]),
+                ("rustls-0_23", &["dep:tokio-rustls-026"]),
+            ],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["rustls-0_23".into()]);
+        assert_eq!(
+            result,
+            vec!["tokio-rustls-026"],
+            "only tokio-rustls-026 should be included, got: {result:?}"
+        );
+    }
+
+    /// Implicit activation: a feature with the same name as an optional dep
+    /// (using the effective name = rename if present) activates it.
+    #[test]
+    fn implicit_activation_by_feature_name_matching_dep() {
+        let pkg = make_package(
+            &[("serde", None, true)],
+            &[("default", &["serde"]), ("serde", &["dep:serde"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["default".into()]);
+        assert!(
+            result.contains(&"serde".to_string()),
+            "feature 'serde' should implicitly activate optional dep 'serde'"
+        );
+    }
+
+    /// Transitive feature expansion: feature A enables B which enables dep:C.
+    #[test]
+    fn transitive_feature_expansion_activates_dep() {
+        let pkg = make_package(
+            &[("zstd-sys", None, true)],
+            &[
+                ("default", &["compression"]),
+                ("compression", &["dep:zstd-sys"]),
+            ],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["default".into()]);
+        assert!(
+            result.contains(&"zstd-sys".to_string()),
+            "transitive feature chain should activate zstd-sys"
+        );
+    }
+
+    /// dep/feature syntax (e.g. "serde/derive") should activate the dep.
+    #[test]
+    fn dep_slash_feature_syntax_activates_dep() {
+        let pkg = make_package(
+            &[("serde", None, true)],
+            &[("serde_derive", &["serde/derive"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["serde_derive".into()]);
+        assert!(
+            result.contains(&"serde".to_string()),
+            "serde/derive should activate optional dep serde"
+        );
+    }
+
+    /// Non-activated optional deps must not appear.
+    #[test]
+    fn unactivated_optional_dep_excluded() {
+        let pkg = make_package(
+            &[("tokio", None, true), ("serde", None, false)],
+            &[("async", &["dep:tokio"])],
+        );
+        // "async" not in resolved features, so tokio should be excluded
+        let result = filtered_optional_dep_effective_names(&pkg, &[]);
+        assert!(
+            !result.contains(&"tokio".to_string()),
+            "tokio should NOT be included without its feature, got: {result:?}"
+        );
+        // serde (non-optional) should still be there
+        assert!(
+            result.contains(&"serde".to_string()),
+            "non-optional serde should always be included"
+        );
+    }
 }
