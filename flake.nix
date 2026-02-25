@@ -3,10 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    crate2nix-torture = {
+      url = "git+ssh://forgejo@git.ntd.one/anthropic/crate2nix-torture.git";
+      flake = false;
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, crate2nix-torture }:
     let
       # Plugin targets linux (Nix plugins are .so shared libs)
       pluginSystem = "x86_64-linux";
@@ -40,6 +44,13 @@
           plugin = self.packages.${pluginSystem}.cargo-nix-plugin;
           testFixtures = ./rust/tests/fixtures;
           wrapperLib = ./lib;
+        };
+
+        benchmark = pluginPkgs.callPackage ./tests/benchmark.nix {
+          plugin = self.packages.${pluginSystem}.cargo-nix-plugin;
+          benchFixtures = ./tests/bench-fixtures;
+          nixpkgsPath = nixpkgs;
+          cargoNixFile = "${crate2nix-torture}/Cargo.nix";
         };
 
         generate-metadata = pluginPkgs.writeShellApplication {

@@ -51,7 +51,7 @@
 - [x] 10.1 Write test flake.nix for torture workspace using plugin + wrapper with custom `buildRustCrateForPkgs` and injected native deps
 - [x] 10.2 Verify `nix eval` produces derivations for all 224 workspace members without errors
 - [ ] 10.3 Build at least one workspace member end-to-end
-- [ ] 10.4 Benchmark: `nix eval` time of plugin+wrapper vs 99K-line Cargo.nix
+- [x] 10.4 Benchmark: `nix eval` time of plugin+wrapper vs 99K-line Cargo.nix
 
 ## 11. Documentation and Packaging
 

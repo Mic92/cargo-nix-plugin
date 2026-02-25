@@ -95,26 +95,27 @@ let
   };
 
   # Source resolution: given a crate's source info, produce a src path
+  # buildRustCrate always needs a src — for crates-io it uses fetchurl
   resolveSrc =
     crateInfo:
-    if crateInfo.source == null then
-      null
-    else if crateInfo.source.type == "local" then
-      # Filter source to just this crate's directory relative to workspace root
-      let
-        # The path is absolute from cargo metadata; we need it relative to src
-        # For now, use src directly (workspace members share the workspace src)
-      in
+    let
+      sourceType = crateInfo.source.type or "local";
+    in
+    if sourceType == "local" then
       src
-    else if crateInfo.source.type == "crates-io" then
-      null # buildRustCrate handles fetching via sha256
-    else if crateInfo.source.type == "git" then
+    else if sourceType == "crates-io" then
+      pkgs.fetchurl {
+        name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
+        url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
+        sha256 = crateInfo.sha256;
+      }
+    else if sourceType == "git" then
       builtins.fetchGit {
         url = crateInfo.source.url;
         rev = crateInfo.source.rev;
       }
     else
-      null;
+      src;
 
   # Build a crate using buildRustCrate
   # Memoization via the `self` pattern (builtByPackageId)
@@ -143,52 +144,67 @@ let
     let
       crateInfo = resolved.crates.${packageId};
 
-      # Wire dependencies as built derivations
-      mapDeps =
-        deps:
-        map (
-          dep:
-          let
-            depCrateInfo = resolved.crates.${dep.packageId} or null;
-            # proc-macro crates must be built for the build platform
-            built =
-              if depCrateInfo != null && depCrateInfo.procMacro then
-                self.build.crates.${dep.packageId}
-              else
-                self.crates.${dep.packageId};
-          in
-          {
-            inherit (dep) name;
-            drv = built;
-            rename = dep.rename or null;
-          }
-        ) deps;
+      # Resolve a dependency to its built derivation
+      depDrv =
+        dep:
+        let
+          depCrateInfo = resolved.crates.${dep.packageId} or null;
+        in
+        # proc-macro crates must be built for the build platform
+        if depCrateInfo != null && (depCrateInfo.procMacro or false) then
+          self.build.crates.${dep.packageId}
+        else
+          self.crates.${dep.packageId};
 
-      dependencies = mapDeps (crateInfo.dependencies or [ ]);
-      buildDependencies = mapDeps (crateInfo.buildDependencies or [ ]);
+      # buildRustCrate expects dependencies as a flat list of derivations
+      dependencies = map depDrv (crateInfo.dependencies or [ ]);
+      buildDependencies = map depDrv (crateInfo.buildDependencies or [ ]);
+
+      # Renames have the form: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
+      renamedDeps = lib.filter (d: d ? rename && d.rename != null) (
+        (crateInfo.dependencies or [ ]) ++ (crateInfo.buildDependencies or [ ])
+      );
+      crateRenames =
+        let
+          grouped = lib.groupBy (dep: dep.name) renamedDeps;
+          versionAndRename = dep: {
+            inherit (dep) rename;
+            version = (resolved.crates.${dep.packageId}).version;
+          };
+        in
+        lib.mapAttrs (_name: builtins.map versionAndRename) grouped;
 
       crateSrc = resolveSrc crateInfo;
     in
-    buildRustCrate ({
+    buildRustCrate (
+      {
         crateName = crateInfo.crateName;
         version = crateInfo.version;
-        edition = crateInfo.edition;
-        sha256 = crateInfo.sha256;
+        edition = crateInfo.edition or "2021";
+        sha256 = crateInfo.sha256 or "";
         src = crateSrc;
         authors = crateInfo.authors or [ ];
-        dependencies = dependencies;
-        buildDependencies = buildDependencies;
+        inherit dependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
-        build = crateInfo.build;
-        libPath = crateInfo.libPath or null;
-        libName = crateInfo.libName or null;
         procMacro = crateInfo.procMacro or false;
-        links = crateInfo.links or null;
         crateBin = crateInfo.crateBin or [ ];
+      }
+      // lib.optionalAttrs ((crateInfo.build or null) != null) {
+        build = crateInfo.build;
+      }
+      // lib.optionalAttrs ((crateInfo.libPath or null) != null) {
+        libPath = crateInfo.libPath;
+      }
+      // lib.optionalAttrs ((crateInfo.libName or null) != null) {
+        libName = crateInfo.libName;
+      }
+      // lib.optionalAttrs ((crateInfo.links or null) != null) {
+        links = crateInfo.links;
       }
       // lib.optionalAttrs (crateInfo.libCrateTypes or [ ] != [ ]) {
         type = crateInfo.libCrateTypes;
-      });
+      }
+    );
 
   builtCrates = mkBuiltByPackageIdByPkgs pkgs;
 

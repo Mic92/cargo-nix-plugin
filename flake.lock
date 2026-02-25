@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "crate2nix-torture": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1772035878,
+        "narHash": "sha256-sfXI+E+NBsHORj3YhqLYCHdpqPJ6K2Av2vE7/zC43KY=",
+        "ref": "refs/heads/main",
+        "rev": "982efa95328b891855ca7c2f8cb4dd1096a34eb8",
+        "revCount": 62,
+        "type": "git",
+        "url": "ssh://forgejo@git.ntd.one/anthropic/crate2nix-torture.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://forgejo@git.ntd.one/anthropic/crate2nix-torture.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1771923393,
@@ -18,6 +34,7 @@
     },
     "root": {
       "inputs": {
+        "crate2nix-torture": "crate2nix-torture",
         "nixpkgs": "nixpkgs"
       }
     }
