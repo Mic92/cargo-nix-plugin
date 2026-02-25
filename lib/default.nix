@@ -121,9 +121,17 @@ let
     crateInfo:
     let
       sourceType = crateInfo.source.type or "local";
+      # For local crates: compute relative path from workspace root
+      # source.path is absolute (e.g. /nix/store/.../harmonia/harmonia-client)
+      # workspaceRoot is absolute (e.g. /nix/store/.../harmonia)
+      workspaceRoot = resolved.workspaceRoot;
+      sourcePath = crateInfo.source.path or workspaceRoot;
+      # Strip workspace root prefix to get relative path (e.g. "harmonia-client")
+      relPath = lib.removePrefix (workspaceRoot + "/") sourcePath;
+      isSubdir = relPath != sourcePath && relPath != "";
     in
     if sourceType == "local" then
-      src
+      if isSubdir then src + "/${relPath}" else src
     else if sourceType == "crates-io" then
       pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";

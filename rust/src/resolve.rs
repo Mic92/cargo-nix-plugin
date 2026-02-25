@@ -11,11 +11,13 @@ use crate::lockfile::{parse_lockfile, LockfileHashes};
 
 /// The result of resolving a cargo workspace.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceResult {
     /// packageId of the root crate, or null for pure workspaces
     pub root: Option<String>,
+    /// Absolute path to the workspace root directory
+    pub workspace_root: String,
     /// Workspace member name -> packageId
-    #[serde(rename = "workspaceMembers")]
     pub workspace_members: BTreeMap<String, String>,
     /// packageId -> CrateInfo
     pub crates: BTreeMap<String, CrateInfo>,
@@ -255,6 +257,7 @@ pub fn resolve_workspace(
 
     Ok(WorkspaceResult {
         root,
+        workspace_root: metadata.workspace_root.to_string(),
         workspace_members,
         crates,
     })
