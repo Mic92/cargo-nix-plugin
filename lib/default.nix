@@ -32,8 +32,9 @@
   src ? null,
   # Optional: function to create buildRustCrate for a given pkgs
   buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
-  # Optional: default crate overrides
-  defaultCrateOverrides ? pkgs.defaultCrateOverrides,
+  # Optional: crate overrides
+  # If omitted, the default crate overrides from nixpkgs will be used
+  crateOverrides ? null,
   # Optional: features to enable
   rootFeatures ? [ "default" ],
   # Optional: target platform description (auto-detected from stdenv)
@@ -155,10 +156,7 @@ let
         let
           base = buildRustCrateForPkgs cratePkgs;
         in
-        if defaultCrateOverrides != pkgs.defaultCrateOverrides then
-          base.override { defaultCrateOverrides = defaultCrateOverrides; }
-        else
-          base;
+        if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
       self = {
         crates = lib.mapAttrs (packageId: _: buildCrate self cratePkgs buildRustCrate packageId) resolved.crates;

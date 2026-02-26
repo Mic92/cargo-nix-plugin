@@ -17,7 +17,7 @@ let
     src = ../rust;
     cargoHash = "sha256-L4bbQGLZBuTb/ZshMWRGDaCCs+ZiylcynfMGx1BWdwI=";
     # Bake in the cargo store path so the plugin can shell out at eval time
-    CARGO_NIX_PLUGIN_CARGO_PATH = "${cargo}/bin/cargo";
+    CARGO_NIX_PLUGIN_CARGO_PATH = lib.getExe cargo;
   };
 in
 stdenv.mkDerivation {
