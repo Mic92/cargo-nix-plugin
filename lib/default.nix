@@ -171,22 +171,27 @@ let
     let
       crateInfo = resolved.crates.${packageId};
 
-      # Resolve a dependency to its built derivation
+      # Resolve a regular dependency to its built derivation.
+      # Proc-macro crates must be built for the build platform since they
+      # execute as compiler plugins during compilation.
       depDrv =
         dep:
         let
           depCrateInfo = resolved.crates.${dep.packageId} or null;
         in
-        # proc-macro crates must be built for the build platform
         if depCrateInfo != null && (depCrateInfo.procMacro or false) then
           self.build.crates.${dep.packageId}
         else
           self.crates.${dep.packageId};
 
+      # Resolve a build-script dependency. Build scripts run on the build
+      # platform, so all their dependencies must be built for that platform.
+      buildDepDrv = dep: self.build.crates.${dep.packageId};
+
       # Dependencies are already filtered by the Rust resolver:
       # platform-incompatible and inactive optional deps are excluded.
       dependencies = map depDrv (crateInfo.dependencies or [ ]);
-      buildDependencies = map depDrv (crateInfo.buildDependencies or [ ]);
+      buildDependencies = map buildDepDrv (crateInfo.buildDependencies or [ ]);
 
       # Renames: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
       renamedDeps = lib.filter (d: d ? rename && d.rename != null) (

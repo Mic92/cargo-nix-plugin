@@ -31,6 +31,13 @@ let
   # Spot-check: rav1e (external dep with bin targets) should have empty crateBin
   rav1e = result.crates.${"rav1e"} or result.crates.${"rav1e 0.7.1"} or null;
 
+  memberIds = builtins.attrValues result.workspaceMembers;
+
+  # Find external crates that have non-empty devDependencies
+  externalWithDevDeps = builtins.filter (
+    id: !(builtins.elem id memberIds) && builtins.length (result.crates.${id}.devDependencies or [ ]) > 0
+  ) (builtins.attrNames result.crates);
+
   assertions = [
     {
       name = "crate-count";
@@ -56,6 +63,11 @@ let
       name = "external-crate-no-bins";
       ok = rav1e != null && rav1e.crateBin == [ ];
       msg = "rav1e (external dep) should have empty crateBin to avoid building binaries without their dependencies";
+    }
+    {
+      name = "external-crate-no-dev-deps";
+      ok = builtins.length externalWithDevDeps == 0;
+      msg = "external crates should have no devDependencies, found ${toString (builtins.length externalWithDevDeps)} with dev deps";
     }
   ];
 

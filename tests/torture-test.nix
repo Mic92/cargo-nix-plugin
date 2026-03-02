@@ -18,45 +18,50 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
     export NIX_LOG_DIR=$TMPDIR/nix/log
     mkdir -p $NIX_STORE_DIR $NIX_STATE_DIR $NIX_LOG_DIR
 
-    # Test: verify the wrapper produces derivation attrset structure
-    result=$(nix-instantiate --eval --strict --read-write-mode \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
-      --expr '
+    nix_eval() {
+      nix-instantiate --eval --strict --read-write-mode \
+        --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+        --expr "$1"
+    }
+
+    wrapper_expr='
       let
         pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
+      in import ${wrapperLib} {
+        inherit pkgs;
+        metadata = builtins.readFile "${testFixtures}/metadata.json";
+        cargoLock = builtins.readFile "${testFixtures}/Cargo.lock";
+        src = /dev/null;
+      }
+    '
+
+    # Test: wrapper produces correct structure
+    result=$(nix_eval "
+      let cargoNix = $wrapper_expr; in {
+        members = builtins.length (builtins.attrNames cargoNix.workspaceMembers);
+        crates = builtins.length (builtins.attrNames cargoNix.resolved.crates);
+        hasBuild = (builtins.head (builtins.attrValues cargoNix.workspaceMembers)) ? build;
+      }
+    ")
+    [[ "$result" == *"members = 224"* ]] || { echo "FAIL: expected 224 members: $result"; exit 1; }
+    [[ "$result" == *"hasBuild = true"* ]] || { echo "FAIL: missing build attr: $result"; exit 1; }
+
+    # Test: build dependencies are built for build platform under cross-compilation
+    result=$(nix_eval '
+      let
+        pkgs = import ${pkgs.path} { localSystem = "x86_64-linux"; crossSystem = "aarch64-linux"; };
         cargoNix = import ${wrapperLib} {
           inherit pkgs;
           metadata = builtins.readFile "${testFixtures}/metadata.json";
           cargoLock = builtins.readFile "${testFixtures}/Cargo.lock";
-          src = /dev/null;  # placeholder - we only test evaluation, not building
+          src = /dev/null;
         };
-        memberCount = builtins.length (builtins.attrNames cargoNix.workspaceMembers);
-        crateCount = builtins.length (builtins.attrNames cargoNix.resolved.crates);
-        # Check that workspace members have build attributes
-        firstMember = builtins.head (builtins.attrValues cargoNix.workspaceMembers);
-        hasBuild = firstMember ? build;
-        hasPackageId = firstMember ? packageId;
-      in
-        "members=''${toString memberCount} crates=''${toString crateCount} hasBuild=''${if hasBuild then "yes" else "no"} hasPackageId=''${if hasPackageId then "yes" else "no"}"
+        crates = cargoNix.builtCrates.crates;
+        rav1e = if crates ? rav1e then crates.rav1e else crates.${"rav1e 0.7.1"};
+        buildDepSystems = map (dep: dep.stdenv.hostPlatform.system) rav1e.buildDependencies;
+      in builtins.all (s: s == "x86_64-linux") buildDepSystems
     ')
+    [[ "$result" == "true" ]] || { echo "FAIL: build deps should target build platform: $result"; exit 1; }
 
-    echo "Torture test result: $result"
-
-    # Strip quotes
-    result=$(echo "$result" | tr -d '"')
-
-    members=$(echo "$result" | sed 's/.*members=\([0-9]*\).*/\1/')
-    hasBuild=$(echo "$result" | sed 's/.*hasBuild=\([a-z]*\).*/\1/')
-
-    if [ "$members" -ne 224 ]; then
-      echo "FAIL: Expected 224 members, got $members"
-      exit 1
-    fi
-    if [ "$hasBuild" != "yes" ]; then
-      echo "FAIL: workspace members should have 'build' attribute"
-      exit 1
-    fi
-
-    echo "PASS: wrapper produces correct structure for $members workspace members"
-    echo "$result" > $out
+    touch $out
   ''

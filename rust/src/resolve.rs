@@ -243,7 +243,13 @@ pub fn resolve_workspace(
                 source,
                 dependencies,
                 build_dependencies,
-                dev_dependencies,
+                // Dev dependencies are only useful for workspace members
+                // (to run tests); external crates never have their tests run.
+                dev_dependencies: if is_workspace_member {
+                    dev_dependencies
+                } else {
+                    Vec::new()
+                },
                 features: pkg
                     .features
                     .iter()
@@ -620,6 +626,43 @@ mod tests {
             let _ = &crate_info.crate_bin;
             // Spot-check: workspace members with src/main.rs should detect bins
             let _ = name;
+        }
+    }
+
+    /// Regression: non-workspace crates must not have dev dependencies emitted.
+    /// Dev dependencies are only needed for running tests, which only happens
+    /// for workspace members. Emitting them for external crates is wasteful
+    /// and inconsistent with crate2nix (which has no devDependencies field).
+    #[test]
+    fn external_crate_dev_deps_not_emitted() {
+        let metadata = include_str!("../tests/fixtures/metadata.json");
+        let cargo_lock = include_str!("../tests/fixtures/Cargo.lock");
+
+        let result = resolve_workspace(
+            metadata,
+            cargo_lock,
+            &linux_x86_64(),
+            &["default".to_string()],
+        )
+        .expect("resolve_workspace failed");
+
+        let member_ids: std::collections::HashSet<&str> = result
+            .workspace_members
+            .values()
+            .map(|s| s.as_str())
+            .collect();
+
+        for (pkg_id, crate_info) in &result.crates {
+            if member_ids.contains(pkg_id.as_str()) {
+                continue;
+            }
+            assert!(
+                crate_info.dev_dependencies.is_empty(),
+                "external crate {} ({}) should have no dev dependencies, got {}",
+                crate_info.crate_name,
+                crate_info.version,
+                crate_info.dev_dependencies.len()
+            );
         }
     }
 
