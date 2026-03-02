@@ -28,6 +28,9 @@ let
   # Spot-check: serde should exist
   serde = result.crates.${"serde"} or result.crates.${"serde 1.0.228"} or null;
 
+  # Spot-check: rav1e (external dep with bin targets) should have empty crateBin
+  rav1e = result.crates.${"rav1e"} or result.crates.${"rav1e 0.7.1"} or null;
+
   assertions = [
     {
       name = "crate-count";
@@ -48,6 +51,11 @@ let
       name = "serde-has-features";
       ok = serde != null && serde.features ? default;
       msg = "serde missing 'default' feature";
+    }
+    {
+      name = "external-crate-no-bins";
+      ok = rav1e != null && rav1e.crateBin == [ ];
+      msg = "rav1e (external dep) should have empty crateBin to avoid building binaries without their dependencies";
     }
   ];
 
