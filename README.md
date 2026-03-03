@@ -118,20 +118,16 @@ plugin-files = /path/to/libcargo_nix_plugin.so
 
 ## How It Works
 
-1. **C++ plugin shim** (~50 lines): Registers `builtins.resolveCargoWorkspace`,
-   serializes the Nix input attrset to JSON via `printValueAsJSON`, calls the
-   Rust FFI, and converts the JSON result back to Nix values via `parseJSON`.
+1. **Nix plugin**: Adds a `builtins.resolveCargoWorkspace` primop to Nix. When
+   you call `cargo-nix-plugin.lib { ... }`, this primop resolves your entire
+   Cargo workspace — dependencies, features, platform-specific conditionals —
+   and returns the crate graph as a Nix attrset. In automatic mode it shells
+   out to `cargo metadata`; in explicit mode it parses pre-provided JSON.
 
-2. **Rust core** (~700 lines): In automatic mode, runs `cargo metadata` as a
-   subprocess; in explicit mode, parses provided JSON directly. Extracts
-   `Cargo.lock` checksums (hex → SRI), evaluates `cfg()` expressions using
-   `cargo-platform`, resolves dependencies, and returns the full crate graph
-   as JSON.
-
-3. **Nix wrapper** (`lib/default.nix`): Takes the plugin output and calls
-   `buildRustCrate` for each crate with dependencies wired as built derivations.
-   Supports proc-macro cross-compilation, crate overrides, and the standard
-   `workspaceMembers`/`rootCrate` interface.
+2. **Nix wrapper** (`lib/default.nix`): Takes the resolved crate graph and
+   builds each crate with `buildRustCrate`, wiring up dependencies
+   automatically. Supports proc-macro cross-compilation, crate overrides,
+   and the standard `workspaceMembers`/`rootCrate` interface.
 
 ## Target Platform
 
