@@ -3,10 +3,18 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    nix = {
+      url = "github:NixOS/nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      nix,
+    }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -21,10 +29,15 @@
       linuxSystem = "x86_64-linux";
       linuxPkgs = import nixpkgs { system = linuxSystem; };
 
+      # Get the nix C API libraries from the nix flake
+      nixLibsFor =
+        pkgs:
+        nix.packages.${pkgs.stdenv.hostPlatform.system}.default.libs;
+
       mkPlugin =
         pkgs:
         pkgs.callPackage ./nix/plugin.nix {
-          nixComponents = pkgs.nixVersions.nixComponents_2_33;
+          nixLibs = nixLibsFor pkgs;
         };
     in
     {
@@ -38,12 +51,14 @@
           eval-test = linuxPkgs.callPackage ./nix/eval-test.nix {
             plugin = mkPlugin linuxPkgs;
             testFixtures = ./rust/tests/fixtures;
+            nix = nix.packages.${linuxSystem}.default;
           };
 
           torture-test = linuxPkgs.callPackage ./tests/torture-test.nix {
             plugin = mkPlugin linuxPkgs;
             testFixtures = ./rust/tests/fixtures;
             wrapperLib = ./lib;
+            nix = nix.packages.${linuxSystem}.default;
           };
 
           sample-build-test = linuxPkgs.callPackage ./tests/sample-build-test.nix {
@@ -51,6 +66,7 @@
             wrapperLib = ./lib;
             sampleProject = ./tests/sample-project;
           };
+
 
           # Optional: helper for generating metadata JSON explicitly.
           # Not needed when using the automatic subprocess mode (just pass src).

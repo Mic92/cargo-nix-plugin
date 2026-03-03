@@ -1,10 +1,9 @@
 //! Evaluate cfg() target expressions against a target description.
 
 use cargo_platform::{Cfg, Ident, Platform};
-use serde::{Deserialize, Serialize};
 
 /// Description of a target platform for cfg() evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TargetDescription {
     pub name: String,
     pub os: String,

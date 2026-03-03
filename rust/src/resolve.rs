@@ -2,7 +2,6 @@
 
 use cargo_metadata::camino;
 use cargo_metadata::{DependencyKind, Metadata, Package, PackageId, TargetKind};
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
@@ -10,8 +9,7 @@ use crate::cfg_eval::{matches_target, TargetDescription};
 use crate::lockfile::{parse_lockfile, LockfileHashes};
 
 /// The result of resolving a cargo workspace.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct WorkspaceResult {
     /// packageId of the root crate, or null for pure workspaces
     pub root: Option<String>,
@@ -24,8 +22,7 @@ pub struct WorkspaceResult {
 }
 
 /// Information about a single resolved crate.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct CrateInfo {
     pub crate_name: String,
     pub version: String,
@@ -47,27 +44,23 @@ pub struct CrateInfo {
     pub authors: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct DepInfo {
     pub name: String,
     pub package_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub rename: Option<String>,
     pub uses_default_features: bool,
     pub features: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug)]
 pub enum SourceInfo {
     CratesIo,
     Local { path: String },
     Git { url: String, rev: String },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct BinTarget {
     pub name: String,
     pub path: String,
@@ -685,10 +678,7 @@ mod tests {
 
     /// Helper: build a minimal Package with the given optional deps and feature map.
     /// Each dep entry is (package_name, rename_or_none, optional).
-    fn make_package(
-        deps: &[(&str, Option<&str>, bool)],
-        features: &[(&str, &[&str])],
-    ) -> Package {
+    fn make_package(deps: &[(&str, Option<&str>, bool)], features: &[(&str, &[&str])]) -> Package {
         let dep_json: Vec<serde_json::Value> = deps
             .iter()
             .map(|(name, rename, optional)| {
