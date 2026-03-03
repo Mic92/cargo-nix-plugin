@@ -1,7 +1,7 @@
 //! Full workspace resolution: tie together parsing, cfg eval, dep filtering, and feature resolution.
 
 use cargo_metadata::camino;
-use cargo_metadata::{DependencyKind, Metadata, Package, PackageId};
+use cargo_metadata::{DependencyKind, Metadata, Package, PackageId, TargetKind};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -115,7 +115,7 @@ pub fn resolve_workspace(
     // Build name occurrence counts for ID shortening
     let mut name_counts: HashMap<String, usize> = HashMap::new();
     for pkg in &metadata.packages {
-        *name_counts.entry(pkg.name.clone()).or_default() += 1;
+        *name_counts.entry(pkg.name.to_string()).or_default() += 1;
     }
 
     // Build package lookup by ID
@@ -141,7 +141,7 @@ pub fn resolve_workspace(
     for member_id in &metadata.workspace_members {
         if let Some(pkg) = pkgs_by_id.get(member_id) {
             let short = short_ids.get(member_id).unwrap();
-            workspace_members.insert(pkg.name.clone(), short.clone());
+            workspace_members.insert(pkg.name.to_string(), short.clone());
         }
     }
 
@@ -161,7 +161,9 @@ pub fn resolve_workspace(
         let is_workspace_member = workspace_member_ids.contains(&pkg.id);
 
         // Get resolved features from cargo's resolve
-        let resolved_features: Vec<String> = node.map(|n| n.features.clone()).unwrap_or_default();
+        let resolved_features: Vec<String> = node
+            .map(|n| n.features.iter().map(|f| f.to_string()).collect())
+            .unwrap_or_default();
 
         // Determine source
         let source = resolve_source(pkg, &lockfile_hashes, is_workspace_member);
@@ -182,19 +184,26 @@ pub fn resolve_workspace(
         // Extract build targets
         let lib_target = pkg.targets.iter().find(|t| {
             t.kind.iter().any(|k| {
-                k == "lib" || k == "cdylib" || k == "dylib" || k == "rlib" || k == "proc-macro"
+                matches!(
+                    k,
+                    TargetKind::Lib
+                        | TargetKind::CDyLib
+                        | TargetKind::DyLib
+                        | TargetKind::RLib
+                        | TargetKind::ProcMacro
+                )
             })
         });
 
         let build_target = pkg
             .targets
             .iter()
-            .find(|t| t.kind.iter().any(|k| k == "custom-build"));
+            .find(|t| t.kind.iter().any(|k| *k == TargetKind::CustomBuild));
 
         let proc_macro = pkg
             .targets
             .iter()
-            .any(|t| t.kind.iter().any(|k| k == "proc-macro"));
+            .any(|t| t.kind.iter().any(|k| *k == TargetKind::ProcMacro));
 
         // Only include bin targets for workspace members.
         // External dependencies are only used as libraries; their binaries
@@ -203,7 +212,7 @@ pub fn resolve_workspace(
         let binaries: Vec<BinTarget> = if is_workspace_member {
             pkg.targets
                 .iter()
-                .filter(|t| t.kind.iter().any(|k| k == "bin"))
+                .filter(|t| t.kind.iter().any(|k| *k == TargetKind::Bin))
                 .map(|t| {
                     let path = relative_src_path(&t.src_path, &pkg.manifest_path);
                     BinTarget {
@@ -220,11 +229,19 @@ pub fn resolve_workspace(
             .targets
             .iter()
             .filter(|t| {
-                t.kind
-                    .iter()
-                    .any(|k| k.ends_with("lib") || k == "proc-macro")
+                t.kind.iter().any(|k| {
+                    matches!(
+                        k,
+                        TargetKind::Lib
+                            | TargetKind::CDyLib
+                            | TargetKind::DyLib
+                            | TargetKind::RLib
+                            | TargetKind::StaticLib
+                            | TargetKind::ProcMacro
+                    )
+                })
             })
-            .flat_map(|t| t.crate_types.iter().cloned())
+            .flat_map(|t| t.crate_types.iter().map(|ct| ct.to_string()))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -236,7 +253,7 @@ pub fn resolve_workspace(
         crates.insert(
             short_id,
             CrateInfo {
-                crate_name: pkg.name.clone(),
+                crate_name: pkg.name.to_string(),
                 version: pkg.version.to_string(),
                 edition: pkg.edition.to_string(),
                 sha256,
@@ -327,7 +344,7 @@ fn resolve_source(
 
 fn get_sha256(pkg: &Package, lockfile_hashes: &LockfileHashes) -> Option<String> {
     lockfile_hashes
-        .get(&(pkg.name.clone(), pkg.version.to_string()))
+        .get(&(pkg.name.to_string(), pkg.version.to_string()))
         .cloned()
 }
 
@@ -416,7 +433,7 @@ fn resolve_dependencies(
     let mut node_dep_lookup: HashMap<String, Vec<(&PackageId, &str)>> = HashMap::new();
     for node_dep in &node.deps {
         if let Some(dep_pkg) = pkgs_by_id.get(&node_dep.pkg) {
-            let normalized = normalize_name(&dep_pkg.name);
+            let normalized = normalize_name(dep_pkg.name.as_ref());
             node_dep_lookup
                 .entry(normalized)
                 .or_default()

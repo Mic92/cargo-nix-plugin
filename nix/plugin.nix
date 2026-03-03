@@ -15,7 +15,7 @@ let
     pname = "cargo-nix-plugin-core";
     version = "0.1.0";
     src = ../rust;
-    cargoHash = "sha256-L4bbQGLZBuTb/ZshMWRGDaCCs+ZiylcynfMGx1BWdwI=";
+    cargoLock.lockFile = ../rust/Cargo.lock;
     # Bake in the cargo store path so the plugin can shell out at eval time
     CARGO_NIX_PLUGIN_CARGO_PATH = lib.getExe cargo;
   };

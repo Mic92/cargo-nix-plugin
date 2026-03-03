@@ -1,6 +1,6 @@
 //! Evaluate cfg() target expressions against a target description.
 
-use cargo_platform::{Cfg, Platform};
+use cargo_platform::{Cfg, Ident, Platform};
 use serde::{Deserialize, Serialize};
 
 /// Description of a target platform for cfg() evaluation.
@@ -18,27 +18,32 @@ pub struct TargetDescription {
     pub windows: bool,
 }
 
+/// Create a non-raw `Ident` from a string.
+fn ident(name: &str) -> Ident {
+    Ident {
+        name: name.to_string(),
+        raw: false,
+    }
+}
+
 /// Build the list of `Cfg` values that rustc would report for this target.
 pub fn target_cfgs(target: &TargetDescription) -> Vec<Cfg> {
     let mut cfgs = vec![
-        Cfg::KeyPair("target_os".to_string(), target.os.clone()),
-        Cfg::KeyPair("target_arch".to_string(), target.arch.clone()),
-        Cfg::KeyPair("target_vendor".to_string(), target.vendor.clone()),
-        Cfg::KeyPair("target_env".to_string(), target.env.clone()),
-        Cfg::KeyPair(
-            "target_pointer_width".to_string(),
-            target.pointer_width.clone(),
-        ),
-        Cfg::KeyPair("target_endian".to_string(), target.endian.clone()),
+        Cfg::KeyPair(ident("target_os"), target.os.clone()),
+        Cfg::KeyPair(ident("target_arch"), target.arch.clone()),
+        Cfg::KeyPair(ident("target_vendor"), target.vendor.clone()),
+        Cfg::KeyPair(ident("target_env"), target.env.clone()),
+        Cfg::KeyPair(ident("target_pointer_width"), target.pointer_width.clone()),
+        Cfg::KeyPair(ident("target_endian"), target.endian.clone()),
     ];
     for fam in &target.family {
-        cfgs.push(Cfg::KeyPair("target_family".to_string(), fam.clone()));
+        cfgs.push(Cfg::KeyPair(ident("target_family"), fam.clone()));
     }
     if target.unix {
-        cfgs.push(Cfg::Name("unix".to_string()));
+        cfgs.push(Cfg::Name(ident("unix")));
     }
     if target.windows {
-        cfgs.push(Cfg::Name("windows".to_string()));
+        cfgs.push(Cfg::Name(ident("windows")));
     }
     cfgs
 }
