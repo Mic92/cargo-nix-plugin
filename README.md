@@ -167,7 +167,6 @@ The wrapper auto-detects this from `stdenv.hostPlatform`.
   always for the **build** platform, so the plugin can shell out to
   `cargo metadata` during evaluation regardless of the target platform.
 
-- **Rust**: Uses `cargo_metadata` 0.18, `cargo-platform` 0.1
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`
 
