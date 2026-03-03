@@ -16,18 +16,20 @@
       ];
 
       forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs supportedSystems (system: f (import nixpkgs { inherit system; }));
+        f: nixpkgs.lib.genAttrs supportedSystems (system: f (import nixpkgs { inherit system; }));
 
       linuxSystem = "x86_64-linux";
       linuxPkgs = import nixpkgs { system = linuxSystem; };
 
-      mkPlugin = pkgs: pkgs.callPackage ./nix/plugin.nix {
-        nixComponents = pkgs.nixVersions.nixComponents_2_33;
-      };
+      mkPlugin =
+        pkgs:
+        pkgs.callPackage ./nix/plugin.nix {
+          nixComponents = pkgs.nixVersions.nixComponents_2_33;
+        };
     in
     {
-      packages = forAllSystems (pkgs:
+      packages = forAllSystems (
+        pkgs:
         {
           default = mkPlugin pkgs;
           cargo-nix-plugin = mkPlugin pkgs;
@@ -42,6 +44,12 @@
             plugin = mkPlugin linuxPkgs;
             testFixtures = ./rust/tests/fixtures;
             wrapperLib = ./lib;
+          };
+
+          sample-build-test = linuxPkgs.callPackage ./tests/sample-build-test.nix {
+            plugin = mkPlugin linuxPkgs;
+            wrapperLib = ./lib;
+            sampleProject = ./tests/sample-project;
           };
 
           # Optional: helper for generating metadata JSON explicitly.
@@ -74,6 +82,12 @@
           type = "app";
           program = "${self.packages.${linuxSystem}.generate-metadata}/bin/generate-metadata";
         };
+      };
+
+      checks.${linuxSystem} = {
+        eval-test = self.packages.${linuxSystem}.eval-test;
+        torture-test = self.packages.${linuxSystem}.torture-test;
+        sample-build-test = self.packages.${linuxSystem}.sample-build-test;
       };
 
       lib = import ./lib;
