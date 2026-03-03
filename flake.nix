@@ -3,14 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    crate2nix-torture = {
-      url = "git+ssh://forgejo@git.ntd.one/anthropic/crate2nix-torture.git";
-      flake = false;
-    };
   };
 
   outputs =
-    { self, nixpkgs, crate2nix-torture }:
+    { self, nixpkgs }:
     let
       supportedSystems = [
         "x86_64-linux"
@@ -46,13 +42,6 @@
             plugin = mkPlugin linuxPkgs;
             testFixtures = ./rust/tests/fixtures;
             wrapperLib = ./lib;
-          };
-
-          benchmark = linuxPkgs.callPackage ./tests/benchmark.nix {
-            plugin = mkPlugin linuxPkgs;
-            benchFixtures = ./tests/bench-fixtures;
-            nixpkgsPath = nixpkgs;
-            cargoNixFile = "${crate2nix-torture}/Cargo.nix";
           };
 
           # Optional: helper for generating metadata JSON explicitly.
