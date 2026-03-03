@@ -124,7 +124,7 @@ plugin-files = /path/to/libcargo_nix_plugin.so
    and returns the crate graph as a Nix attrset. In automatic mode it shells
    out to `cargo metadata`; in explicit mode it parses pre-provided JSON.
 
-2. **Nix wrapper** (`lib/default.nix`): Takes the resolved crate graph and
+2. **Nix wrapper**: Takes the resolved crate graph and
    builds each crate with `buildRustCrate`, wiring up dependencies
    automatically. Supports proc-macro cross-compilation, crate overrides,
    and the standard `workspaceMembers`/`rootCrate` interface.
@@ -147,11 +147,9 @@ The wrapper auto-detects this from `stdenv.hostPlatform`.
 ## Compatibility
 
 - **Nix**: The plugin must be loaded by the **same Nix version** it was compiled
-  against. The plugin links against `nix-expr` at build time, and the Nix plugin
-  ABI is not stable across versions. If you see errors like
-  `expected a set but found a set`, you have a version mismatch between the
-  plugin and the evaluating `nix` binary. The flake builds against
-  `nixComponents_2_33`, so use Nix 2.33.x to evaluate:
+  against — the Nix plugin ABI is not stable across versions. If you see errors
+  like `expected a set but found a set`, you have a version mismatch. The flake
+  currently builds against Nix 2.33, so use Nix 2.33.x to evaluate:
 
   ```bash
   # Get the matching nix
@@ -162,10 +160,8 @@ The wrapper auto-detects this from `stdenv.hostPlatform`.
     --option plugin-files "$PLUGIN/lib/nix/plugins/libcargo_nix_plugin.so"
   ```
 
-- **Platforms**: The plugin builds for `x86_64-linux`, `aarch64-linux`,
-  `aarch64-darwin`, and `x86_64-darwin`. The compiled-in `cargo` binary is
-  always for the **build** platform, so the plugin can shell out to
-  `cargo metadata` during evaluation regardless of the target platform.
+- **Platforms**: `x86_64-linux`, `aarch64-linux`, `aarch64-darwin`, and
+  `x86_64-darwin`. Cross-compilation to other target platforms is supported.
 
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`
