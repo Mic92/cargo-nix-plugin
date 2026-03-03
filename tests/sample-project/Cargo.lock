@@ -33,7 +33,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "sample-project"
+name = "sample-bin"
+version = "0.1.0"
+dependencies = [
+ "sample-lib",
+]
+
+[[package]]
+name = "sample-lib"
 version = "0.1.0"
 dependencies = [
  "serde",

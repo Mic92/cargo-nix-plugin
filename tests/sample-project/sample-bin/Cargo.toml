@@ -1,0 +1,7 @@
+[package]
+name = "sample-bin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sample-lib = { path = "../sample-lib" }
