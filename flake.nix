@@ -24,7 +24,7 @@
       mkPlugin =
         pkgs:
         pkgs.callPackage ./nix/plugin.nix {
-          nixComponents = pkgs.nixVersions.nixComponents_2_33;
+          nixComponents = pkgs.nixVersions.nixComponents_2_32;
         };
     in
     {

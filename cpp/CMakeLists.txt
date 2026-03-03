@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(cargo-nix-plugin)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(NIX REQUIRED nix-expr>=2.33)
+pkg_check_modules(NIX REQUIRED nix-expr>=2.32)
 
 find_package(nlohmann_json REQUIRED)
 
