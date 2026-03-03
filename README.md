@@ -116,6 +116,46 @@ plugin-files = /path/to/libcargo_nix_plugin.so
 }
 ```
 
+## Clippy
+
+The wrapper provides cached clippy checks via `cargoNix.clippy`. Dependencies
+are compiled once with `rustc` and cached in the Nix store; only workspace
+members are re-checked with `clippy-driver`. This means running clippy on a
+large workspace is as fast as compiling just your local crates.
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+};
+
+# Check all workspace members
+cargoNix.clippy.allWorkspaceMembers
+
+# Check a single member
+cargoNix.clippy.workspaceMembers.my-crate.build
+```
+
+To fail on warnings, pass extra clippy flags:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  clippyArgs = [ "-D" "warnings" ];
+};
+```
+
+### How clippy caching works
+
+`clippy-driver` is a drop-in replacement for `rustc` — it accepts identical
+command-line flags and produces the same artifacts, but also runs lint passes.
+The wrapper creates a small shim package where `bin/rustc` calls
+`clippy-driver`, and passes it as the `rust` override to `buildRustCrate` for
+workspace members only. Non-workspace dependencies use the normal `rustc` and
+resolve to the **exact same Nix store paths** as a regular build — no redundant
+compilation.
+
 ## How It Works
 
 1. **Nix plugin**: Adds a `builtins.resolveCargoWorkspace` primop to Nix. When

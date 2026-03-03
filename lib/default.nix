@@ -17,6 +17,11 @@
 #       src = ./.;  # workspace root
 #     };
 #   in cargoNix.workspaceMembers
+#
+# Clippy: use `clippy` to get per-workspace-member clippy checks that
+# reuse Nix-cached dependency builds:
+#   cargoNix.clippy.allWorkspaceMembers  # check all members
+#   cargoNix.clippy.workspaceMembers.<name>.build  # check one member
 
 {
   pkgs ? import <nixpkgs> { },
@@ -39,62 +44,72 @@
   rootFeatures ? [ "default" ],
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
+  # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
+  clippyArgs ? [ ],
 }:
 
 let
   # Build the target description from stdenv if not provided
   defaultTarget = makeDefaultTarget stdenv.hostPlatform;
 
-  makeDefaultTarget =
-    platform:
-    {
-      name = platform.rust.rustcTargetSpec or platform.rust.rustcTarget or "x86_64-unknown-linux-gnu";
-      os =
-        if platform.isLinux then
-          "linux"
-        else if platform.isDarwin then
-          "macos"
-        else if platform.isWindows then
-          "windows"
-        else if platform.isFreeBSD then
-          "freebsd"
-        else
-          "unknown";
-      arch =
-        if platform.isx86_64 then
-          "x86_64"
-        else if platform.isAarch64 then
-          "aarch64"
-        else if platform.isi686 then
-          "i686"
-        else if platform.isAarch32 then
-          "arm"
-        else if platform.isRiscV64 then
-          "riscv64"
-        else
-          "unknown";
-      vendor =
-        if platform.isLinux then
-          "unknown"
-        else if platform.isDarwin then
-          "apple"
-        else
-          "unknown";
-      env =
-        if platform.isLinux && platform.isGnu then
-          "gnu"
-        else if platform.isLinux && platform.isMusl then
-          "musl"
-        else
-          "";
-      family =
-        if platform.isUnix then [ "unix" ] else if platform.isWindows then [ "windows" ] else [ ];
-      pointer_width =
-        if platform.is64bit then "64" else if platform.is32bit then "32" else "64";
-      endian = if platform.isLittleEndian then "little" else "big";
-      unix = platform.isUnix;
-      windows = platform.isWindows;
-    };
+  makeDefaultTarget = platform: {
+    name = platform.rust.rustcTargetSpec or platform.rust.rustcTarget or "x86_64-unknown-linux-gnu";
+    os =
+      if platform.isLinux then
+        "linux"
+      else if platform.isDarwin then
+        "macos"
+      else if platform.isWindows then
+        "windows"
+      else if platform.isFreeBSD then
+        "freebsd"
+      else
+        "unknown";
+    arch =
+      if platform.isx86_64 then
+        "x86_64"
+      else if platform.isAarch64 then
+        "aarch64"
+      else if platform.isi686 then
+        "i686"
+      else if platform.isAarch32 then
+        "arm"
+      else if platform.isRiscV64 then
+        "riscv64"
+      else
+        "unknown";
+    vendor =
+      if platform.isLinux then
+        "unknown"
+      else if platform.isDarwin then
+        "apple"
+      else
+        "unknown";
+    env =
+      if platform.isLinux && platform.isGnu then
+        "gnu"
+      else if platform.isLinux && platform.isMusl then
+        "musl"
+      else
+        "";
+    family =
+      if platform.isUnix then
+        [ "unix" ]
+      else if platform.isWindows then
+        [ "windows" ]
+      else
+        [ ];
+    pointer_width =
+      if platform.is64bit then
+        "64"
+      else if platform.is32bit then
+        "32"
+      else
+        "64";
+    endian = if platform.isLittleEndian then "little" else "big";
+    unix = platform.isUnix;
+    windows = platform.isWindows;
+  };
 
   resolvedTarget = if target != null then target else defaultTarget;
 
@@ -159,7 +174,9 @@ let
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
       self = {
-        crates = lib.mapAttrs (packageId: _: buildCrate self cratePkgs buildRustCrate packageId) resolved.crates;
+        crates = lib.mapAttrs (
+          packageId: _: buildCrate self cratePkgs buildRustCrate packageId
+        ) resolved.crates;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         build = mkBuiltByPackageIdByPkgs cratePkgs.buildPackages;
       };
@@ -241,15 +258,91 @@ let
 
   builtCrates = mkBuiltByPackageIdByPkgs pkgs;
 
+  # --- Clippy support ---
+  # clippy-driver is a drop-in replacement for rustc.  We build a small
+  # wrapper package that exposes `bin/rustc` → clippy-driver so that
+  # buildRustCrate (which calls `noisily rustc …`) runs clippy instead.
+  # Dependencies are built with the real rustc (and cached); only
+  # workspace members use the clippy wrapper.
+
+  clippyRustcWrapper =
+    let
+      clippy = pkgs.clippy;
+      rustc = pkgs.rustc;
+      extraArgs = lib.concatMapStringsSep " " lib.escapeShellArg clippyArgs;
+    in
+    pkgs.runCommand "clippy-as-rustc"
+      {
+        nativeBuildInputs = [ pkgs.makeWrapper ];
+      }
+      ''
+        mkdir -p $out/bin $out/lib
+        # Symlink the real rustc's libs (sysroot) so clippy-driver finds them
+        ln -s ${rustc}/lib/* $out/lib/
+
+        # Wrap clippy-driver as "rustc" so buildRustCrate's `noisily rustc`
+        # invocations run clippy instead.
+        makeWrapper ${clippy}/bin/clippy-driver $out/bin/rustc \
+          ${lib.optionalString (clippyArgs != [ ]) ''--add-flags "${extraArgs}"''}
+
+        # Forward other tools from the real toolchain.
+        for tool in rustdoc rustfmt; do
+          if [ -e ${rustc}/bin/$tool ]; then
+            ln -s ${rustc}/bin/$tool $out/bin/$tool
+          fi
+        done
+      '';
+
+  # Build workspace members under clippy, reusing the normal dependency builds.
+  # Non-workspace crates are taken directly from builtCrates so they are
+  # identical Nix store paths — no redundant rebuilds.
+  mkClippyBuiltByPkgs =
+    cratePkgs:
+    let
+      normalBuilt = mkBuiltByPackageIdByPkgs cratePkgs;
+
+      # Normal buildRustCrate for dependencies (fully cached)
+      normalBuildRustCrate =
+        let
+          base = buildRustCrateForPkgs cratePkgs;
+        in
+        if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
+
+      # Clippy buildRustCrate: use clippy-driver as the compiler
+      clippyBuildRustCrate = args: (normalBuildRustCrate args).override { rust = clippyRustcWrapper; };
+
+      workspaceMemberIds = lib.attrValues resolved.workspaceMembers;
+
+      # For clippy crate resolution: workspace members use clippy-driver,
+      # everything else reuses the already-cached normal build output.
+      self = {
+        crates = lib.mapAttrs (
+          packageId: _:
+          let
+            isWorkspaceMember = lib.elem packageId workspaceMemberIds;
+          in
+          if isWorkspaceMember then
+            buildCrate self cratePkgs clippyBuildRustCrate packageId
+          else
+            normalBuilt.crates.${packageId}
+        ) resolved.crates;
+        target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
+        # Build-platform crates (proc macros, build scripts) always use
+        # the normal compiler — clippy on their sources is not the goal.
+        build = normalBuilt.build;
+      };
+    in
+    self;
+
+  clippyCrates = mkClippyBuiltByPkgs pkgs;
+
 in
 {
   # Public interface matching crate2nix
-  workspaceMembers = lib.mapAttrs (
-    name: packageId: {
-      inherit packageId;
-      build = builtCrates.crates.${packageId};
-    }
-  ) resolved.workspaceMembers;
+  workspaceMembers = lib.mapAttrs (name: packageId: {
+    inherit packageId;
+    build = builtCrates.crates.${packageId};
+  }) resolved.workspaceMembers;
 
   rootCrate =
     if resolved.root != null then
@@ -262,7 +355,26 @@ in
 
   allWorkspaceMembers = pkgs.symlinkJoin {
     name = "all-workspace-members";
-    paths = lib.mapAttrsToList (_name: packageId: builtCrates.crates.${packageId}) resolved.workspaceMembers;
+    paths = lib.mapAttrsToList (
+      _name: packageId: builtCrates.crates.${packageId}
+    ) resolved.workspaceMembers;
+  };
+
+  # Clippy: workspace members checked with clippy-driver, dependencies
+  # compiled normally (cached).  Build any member to get clippy diagnostics;
+  # the build fails if clippy reports errors.
+  clippy = {
+    workspaceMembers = lib.mapAttrs (name: packageId: {
+      inherit packageId;
+      build = clippyCrates.crates.${packageId};
+    }) resolved.workspaceMembers;
+
+    allWorkspaceMembers = pkgs.symlinkJoin {
+      name = "all-workspace-members-clippy";
+      paths = lib.mapAttrsToList (
+        _name: packageId: clippyCrates.crates.${packageId}
+      ) resolved.workspaceMembers;
+    };
   };
 
   # Expose internals for debugging
