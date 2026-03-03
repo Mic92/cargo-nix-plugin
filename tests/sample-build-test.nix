@@ -1,5 +1,7 @@
-# End-to-end build test: resolve, compile, and run a small Rust project
+# End-to-end build test: resolve, compile, and run a small Rust workspace
 # using the nix plugin + buildRustCrate, all inside a single derivation.
+# The workspace has two members (sample-lib, sample-bin) to exercise
+# inter-workspace-member dependencies.
 {
   pkgs,
   plugin,
@@ -18,24 +20,25 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
   ''
     export HOME=$(mktemp -d)
 
-    # Use the host nix store so buildRustCrate can access nixpkgs derivations.
+    cargoNixExpr='
+      let
+        pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
+      in import ${wrapperLib} {
+        inherit pkgs;
+        metadata = builtins.readFile "${sampleProject}/metadata.json";
+        cargoLock = builtins.readFile "${sampleProject}/Cargo.lock";
+        src = ${sampleProject};
+      }
+    '
+
+    # --- Build test: compile and run the binary workspace member ---
     drv=$(nix-instantiate \
       --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
-      --expr '
-        let
-          pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
-          cargoNix = import ${wrapperLib} {
-            inherit pkgs;
-            metadata = builtins.readFile "${sampleProject}/metadata.json";
-            cargoLock = builtins.readFile "${sampleProject}/Cargo.lock";
-            src = ${sampleProject};
-          };
-        in cargoNix.rootCrate.build
-      ')
+      --expr "($cargoNixExpr).workspaceMembers.sample-bin.build")
 
     # --realize may print multiple outputs (out + lib); take the first.
     built=$(nix-store --realize "$drv" | head -1)
-    out_json=$("$built"/bin/sample-project)
+    out_json=$("$built"/bin/sample-bin)
     echo "Output: $out_json"
 
     msg=$(echo "$out_json" | jq -r .message)
@@ -44,22 +47,12 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
       exit 1
     }
 
-    echo "PASS: sample project built and ran successfully"
+    echo "PASS: workspace built and ran successfully"
 
-    # --- Clippy test: build with clippy-driver, verify it succeeds ---
+    # --- Clippy test: lint all workspace members with clippy-driver ---
     clippy_drv=$(nix-instantiate \
       --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
-      --expr '
-        let
-          pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
-          cargoNix = import ${wrapperLib} {
-            inherit pkgs;
-            metadata = builtins.readFile "${sampleProject}/metadata.json";
-            cargoLock = builtins.readFile "${sampleProject}/Cargo.lock";
-            src = ${sampleProject};
-          };
-        in cargoNix.clippy.allWorkspaceMembers
-      ')
+      --expr "($cargoNixExpr).clippy.allWorkspaceMembers")
 
     nix-store --realize "$clippy_drv" > /dev/null
     echo "PASS: clippy check succeeded"

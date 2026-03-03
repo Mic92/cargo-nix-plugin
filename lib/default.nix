@@ -264,6 +264,9 @@ let
   # buildRustCrate (which calls `noisily rustc …`) runs clippy instead.
   # Dependencies are built with the real rustc (and cached); only
   # workspace members use the clippy wrapper.
+  #
+  # All workspace members are consistently built with clippy-driver so
+  # that inter-workspace-member dependencies have matching rlib metadata.
 
   clippyRustcWrapper =
     let
@@ -327,9 +330,9 @@ let
             normalBuilt.crates.${packageId}
         ) resolved.crates;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
-        # Build-platform crates (proc macros, build scripts) always use
-        # the normal compiler — clippy on their sources is not the goal.
-        build = normalBuilt.build;
+        # Build-platform crates use clippy for workspace members too,
+        # so build scripts see the same rlib metadata as the lib phase.
+        build = mkClippyBuiltByPkgs cratePkgs.buildPackages;
       };
     in
     self;
