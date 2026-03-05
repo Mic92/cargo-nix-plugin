@@ -42,6 +42,14 @@
           inherit nixComponents;
         };
 
+      mkPluginSanitized =
+        pkgs: nixComponents:
+        (mkPlugin pkgs nixComponents).override {
+          stdenv = pkgs.llvmPackages.stdenv;
+          llvmPackages = pkgs.llvmPackages;
+          enableSanitizers = true;
+        };
+
       # Generate test derivations for a given nix version.
       mkTests =
         pkgs: plugin: nix:
@@ -73,11 +81,16 @@
           components = pkgs.nixVersions.${cfg.components};
           nix = pkgs.nixVersions.${cfg.binary};
           plugin = mkPlugin pkgs components;
+          pluginSanitized = mkPluginSanitized pkgs components;
           tests = mkTests pkgs plugin nix;
+          sanitizedTests = mkTests pkgs pluginSanitized nix;
         in
         acc
         // { "cargo-nix-plugin-nix_${ver}" = plugin; }
         // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
+        // nixpkgs.lib.mapAttrs' (
+          name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
+        ) sanitizedTests
       ) {} (builtins.attrNames nixVersions);
 
       # The default nix version used for the top-level plugin package.

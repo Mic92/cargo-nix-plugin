@@ -8,7 +8,12 @@
   cmake,
   boost,
   nlohmann_json,
+  llvmPackages ? null,
+  enableSanitizers ? false,
 }:
+
+assert enableSanitizers -> llvmPackages != null;
+assert enableSanitizers -> stdenv.cc.isClang;
 
 let
   rustLib = rustPlatform.buildRustPackage {
@@ -39,7 +44,13 @@ stdenv.mkDerivation {
 
   cmakeFlags = [
     "-DRUST_LIB_DIR=${rustLib}/lib"
+  ] ++ lib.optionals enableSanitizers [
+    "-DENABLE_SANITIZERS=ON"
+    "-DSANITIZER_RT_DIR=${llvmPackages.compiler-rt}/lib/linux"
   ];
+
+  # Don't strip sanitizer-instrumented binaries — removes UBSan metadata.
+  dontStrip = enableSanitizers;
 
   meta = {
     description = "Nix plugin for resolving Cargo workspaces";
