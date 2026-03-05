@@ -5,11 +5,12 @@
   plugin,
   testFixtures,
   wrapperLib,
+  nix,
 }:
 
 pkgs.runCommand "cargo-nix-plugin-torture-test"
   {
-    nativeBuildInputs = [ pkgs.nixVersions.nix_2_33 ];
+    nativeBuildInputs = [ nix ];
   }
   ''
     export HOME=$(mktemp -d)

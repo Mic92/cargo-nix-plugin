@@ -7,12 +7,13 @@
   plugin,
   wrapperLib,
   sampleProject,
+  nix,
 }:
 
 pkgs.runCommand "cargo-nix-plugin-sample-build-test"
   {
     nativeBuildInputs = [
-      pkgs.nixVersions.nix_2_33
+      nix
       pkgs.jq
     ];
     requiredSystemFeatures = [ "recursive-nix" ];
