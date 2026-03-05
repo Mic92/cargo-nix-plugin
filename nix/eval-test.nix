@@ -2,11 +2,12 @@
   pkgs,
   plugin,
   testFixtures,
+  nix,
 }:
 
 pkgs.runCommand "cargo-nix-plugin-eval-test"
   {
-    nativeBuildInputs = [ pkgs.nixVersions.nix_2_33 ];
+    nativeBuildInputs = [ nix ];
   }
   ''
     # Use a local temp store to avoid permission issues in the sandbox
