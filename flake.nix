@@ -70,6 +70,12 @@
             wrapperLib = ./lib;
             sampleProject = ./tests/sample-project;
           };
+
+          chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
+            inherit plugin nix;
+            wrapperLib = ./lib;
+            sampleProject = ./tests/sample-project;
+          };
         };
 
       # Build packages/tests for every nix version, suffixed with the version.

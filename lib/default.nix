@@ -33,8 +33,14 @@
   # Optional: contents of Cargo.lock (required when metadata is provided)
   # If omitted with metadata=null, read from src/Cargo.lock automatically.
   cargoLock ? null,
-  # Required: workspace source root
+  # Required: workspace source root (used for buildRustCrate src)
   src ? null,
+  # Optional: path to Cargo.toml for cargo metadata subprocess.
+  # Defaults to "${src}/Cargo.toml" which forces src into the store.
+  # Set this to a real filesystem path (e.g. /path/to/Cargo.toml) when
+  # building into a chroot store (--store), since eval-time subprocess
+  # access needs a host-accessible path, not a chroot store path.
+  manifestPath ? null,
   # Optional: function to create buildRustCrate for a given pkgs
   buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
   # Optional: crate overrides
@@ -114,6 +120,8 @@ let
   resolvedTarget = if target != null then target else defaultTarget;
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
+  effectiveManifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
+
   resolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
@@ -126,7 +134,7 @@ let
         }
       else
         {
-          manifestPath = "${src}/Cargo.toml";
+          manifestPath = effectiveManifestPath;
         }
     )
   );
