@@ -38,6 +38,7 @@ stdenv.mkDerivation {
 
   buildInputs = [
     nixComponents.nix-expr
+    nixComponents.nix-store
     boost
     nlohmann_json
   ];
