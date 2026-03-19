@@ -33,8 +33,14 @@
   # Optional: contents of Cargo.lock (required when metadata is provided)
   # If omitted with metadata=null, read from src/Cargo.lock automatically.
   cargoLock ? null,
-  # Required: workspace source root
+  # Required: workspace source root (used for buildRustCrate src)
   src ? null,
+  # Optional: path to Cargo.toml for cargo metadata subprocess.
+  # Defaults to "${src}/Cargo.toml" which forces src into the store.
+  # Set this to a real filesystem path (e.g. /path/to/Cargo.toml) when
+  # building into a chroot store (--store), since eval-time subprocess
+  # access needs a host-accessible path, not a chroot store path.
+  manifestPath ? null,
   # Optional: function to create buildRustCrate for a given pkgs
   buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
   # Optional: crate overrides
@@ -44,6 +50,10 @@
   rootFeatures ? [ "default" ],
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
+  # Optional: function from workspace-relative path (string) to src for
+  # local crates. Default slices into the monolithic `src`. Override to
+  # provide narrow per-crate sources (avoids hashing the full workspace).
+  localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
 }:
@@ -114,6 +124,8 @@ let
   resolvedTarget = if target != null then target else defaultTarget;
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
+  effectiveManifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
+
   resolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
@@ -126,7 +138,7 @@ let
         }
       else
         {
-          manifestPath = "${src}/Cargo.toml";
+          manifestPath = effectiveManifestPath;
         }
     )
   );
@@ -147,7 +159,7 @@ let
       isSubdir = relPath != sourcePath && relPath != "";
     in
     if sourceType == "local" then
-      if isSubdir then src + "/${relPath}" else src
+      localSrc (if isSubdir then relPath else "")
     else if sourceType == "crates-io" then
       pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";

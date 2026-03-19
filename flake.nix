@@ -70,6 +70,14 @@
             wrapperLib = ./lib;
             sampleProject = ./tests/sample-project;
           };
+
+          chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
+            inherit plugin nix;
+            wrapperLib = ./lib;
+            # nodeps variant: cargo metadata inside the sandbox can't reach
+            # crates.io, and the remap logic under test doesn't need it to.
+            sampleProject = ./tests/sample-project-nodeps;
+          };
         };
 
       # Build packages/tests for every nix version, suffixed with the version.

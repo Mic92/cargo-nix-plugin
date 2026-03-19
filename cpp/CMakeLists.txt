@@ -4,7 +4,7 @@ project(cargo-nix-plugin)
 option(ENABLE_SANITIZERS "Build with UBSan (undefined behavior sanitizer)" OFF)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(NIX REQUIRED nix-expr>=2.32)
+pkg_check_modules(NIX REQUIRED nix-expr>=2.32 nix-store>=2.32)
 
 find_package(nlohmann_json REQUIRED)
 

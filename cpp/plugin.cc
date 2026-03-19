@@ -3,6 +3,7 @@
 #include <nix/expr/value.hh>
 #include <nix/expr/json-to-value.hh>
 #include <nix/expr/value-to-json.hh>
+#include <nix/store/local-fs-store.hh>
 #include <nlohmann/json.hpp>
 
 // Rust FFI declarations
@@ -17,6 +18,33 @@ extern "C" {
 
 using namespace nix;
 
+/**
+ * If the store is a chroot store (--store /tmp/foo), remap a logical
+ * store path to the real filesystem path so that cargo metadata can
+ * read it during eval.
+ *
+ * Example: /nix/store/xxx-source/Cargo.toml
+ *       -> /tmp/foo/nix/store/xxx-source/Cargo.toml
+ */
+static std::string remapStorePath(Store &store, const std::string &path) {
+    auto *localFS = dynamic_cast<LocalFSStore *>(&store);
+    if (!localFS)
+        return path;
+
+    auto realStoreDir = localFS->getRealStoreDir();
+    auto logicalStoreDir = store.storeDir;
+
+    // No remapping needed if real == logical (normal store)
+    if (realStoreDir == logicalStoreDir)
+        return path;
+
+    // Only remap paths that start with the logical store dir
+    if (path.substr(0, logicalStoreDir.size()) != logicalStoreDir)
+        return path;
+
+    return realStoreDir + path.substr(logicalStoreDir.size());
+}
+
 static void prim_resolveCargoWorkspace(EvalState &state, const PosIdx pos,
                                         Value **args, Value &v) {
     state.forceAttrs(*args[0], pos,
@@ -25,6 +53,14 @@ static void prim_resolveCargoWorkspace(EvalState &state, const PosIdx pos,
     // Serialize the entire input attrset to JSON and hand it to Rust
     NixStringContext context;
     auto inputJson = printValueAsJSON(state, true, *args[0], pos, context, false);
+
+    // If manifestPath is a store path and we're using a chroot store,
+    // remap it to the real filesystem path before passing to Rust.
+    if (inputJson.contains("manifestPath") && inputJson["manifestPath"].is_string()) {
+        auto manifest = inputJson["manifestPath"].get<std::string>();
+        inputJson["manifestPath"] = remapStorePath(*state.store, manifest);
+    }
+
     auto inputStr = inputJson.dump();
 
     char *resultJson = nullptr;
