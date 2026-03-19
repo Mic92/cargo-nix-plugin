@@ -81,7 +81,8 @@ static void prim_resolveCargoWorkspace(EvalState &state, const PosIdx pos,
     parseJSON(state, result, v);
 }
 
-static RegisterPrimOp rp({
+// Nix >=2.34 renamed PrimOp::fun to PrimOp::impl (see CMakeLists.txt).
+static RegisterPrimOp rp(PrimOp {
     .name = "resolveCargoWorkspace",
     .args = {"attrs"},
     .arity = 1,
@@ -94,5 +95,9 @@ static RegisterPrimOp rp({
       - `target`: Attrset describing the target platform
       - `rootFeatures` (optional): List of features to enable (defaults to `["default"]`)
     )",
+#ifdef NIX_PRIMOP_HAS_IMPL
+    .impl = prim_resolveCargoWorkspace,
+#else
     .fun = prim_resolveCargoWorkspace,
+#endif
 });

@@ -33,6 +33,10 @@
           components = "nixComponents_2_33";
           binary = "nix_2_33";
         };
+        "2_34" = {
+          components = "nixComponents_2_34";
+          binary = "nix_2_34";
+        };
       };
 
       # Build the plugin against a specific nix version's components.
