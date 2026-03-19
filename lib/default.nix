@@ -50,6 +50,10 @@
   rootFeatures ? [ "default" ],
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
+  # Optional: function from workspace-relative path (string) to src for
+  # local crates. Default slices into the monolithic `src`. Override to
+  # provide narrow per-crate sources (avoids hashing the full workspace).
+  localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
 }:
@@ -155,7 +159,7 @@ let
       isSubdir = relPath != sourcePath && relPath != "";
     in
     if sourceType == "local" then
-      if isSubdir then src + "/${relPath}" else src
+      localSrc (if isSubdir then relPath else "")
     else if sourceType == "crates-io" then
       pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
