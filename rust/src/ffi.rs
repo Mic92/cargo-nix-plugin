@@ -204,6 +204,4 @@ mod tests {
         let has_serde = result.crates.values().any(|c| c.crate_name == "serde");
         assert!(has_serde, "expected serde in resolved crates");
     }
-
-
 }

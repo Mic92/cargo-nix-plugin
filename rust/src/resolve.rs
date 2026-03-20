@@ -83,7 +83,7 @@ fn shorten_id(id: &PackageId, name_counts: &HashMap<String, usize>) -> String {
     // Parse the package ID to extract name and version
     // Format: "registry+...#name@version" or "path+...#name@version"
     let repr = &id.repr;
-    if let Some(fragment) = repr.split('#').last() {
+    if let Some(fragment) = repr.split('#').next_back() {
         if let Some((name, version)) = fragment.rsplit_once('@') {
             let count = name_counts.get(name).copied().unwrap_or(0);
             if count <= 1 {
@@ -198,12 +198,12 @@ pub fn resolve_workspace(
         let build_target = pkg
             .targets
             .iter()
-            .find(|t| t.kind.iter().any(|k| *k == TargetKind::CustomBuild));
+            .find(|t| t.kind.contains(&TargetKind::CustomBuild));
 
         let proc_macro = pkg
             .targets
             .iter()
-            .any(|t| t.kind.iter().any(|k| *k == TargetKind::ProcMacro));
+            .any(|t| t.kind.contains(&TargetKind::ProcMacro));
 
         // Only include bin targets for workspace members.
         // External dependencies are only used as libraries; their binaries
@@ -212,7 +212,7 @@ pub fn resolve_workspace(
         let binaries: Vec<BinTarget> = if is_workspace_member {
             pkg.targets
                 .iter()
-                .filter(|t| t.kind.iter().any(|k| *k == TargetKind::Bin))
+                .filter(|t| t.kind.contains(&TargetKind::Bin))
                 .map(|t| {
                     let path = relative_src_path(&t.src_path, &pkg.manifest_path);
                     BinTarget {
@@ -302,9 +302,8 @@ fn resolve_source(
         Some(source) if source.is_crates_io() => Some(SourceInfo::CratesIo),
         Some(source) => {
             let repr = &source.repr;
-            if repr.starts_with("git+") {
+            if let Some(url_str) = repr.strip_prefix("git+") {
                 // Parse git URL and rev
-                let url_str = &repr[4..];
                 if let Some((url, rev)) = url_str.rsplit_once('#') {
                     // Strip query params from url for clean output
                     let clean_url = url.split('?').next().unwrap_or(url);
@@ -685,10 +684,7 @@ mod tests {
 
     /// Helper: build a minimal Package with the given optional deps and feature map.
     /// Each dep entry is (package_name, rename_or_none, optional).
-    fn make_package(
-        deps: &[(&str, Option<&str>, bool)],
-        features: &[(&str, &[&str])],
-    ) -> Package {
+    fn make_package(deps: &[(&str, Option<&str>, bool)], features: &[(&str, &[&str])]) -> Package {
         let dep_json: Vec<serde_json::Value> = deps
             .iter()
             .map(|(name, rename, optional)| {
