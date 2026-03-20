@@ -218,8 +218,20 @@ let
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
       self = {
+        # With-bins variant — exposed via workspaceMembers.<name>.build so
+        # the top-level crate builds its binaries. Its deps still resolve via
+        # cratesLibOnly (see depDrv below), so only the root pays the bin cost.
         crates = lib.mapAttrs (
-          packageId: _: buildCrate self cratePkgs buildRustCrate packageId
+          packageId: _: buildCrate { libOnly = false; } self cratePkgs buildRustCrate packageId
+        ) resolved.crates;
+        # Lib-only variant — what dep edges resolve to. Nothing in a dep chain
+        # needs its sidecar bins (build.rs-invoked binaries from other crates
+        # would go through buildDependencies + CARGO_BIN_EXE, which
+        # buildRustCrate doesn't wire up anyway). Shares the same transitive
+        # closure with `crates` because its own dep edges also go to
+        # cratesLibOnly — no duplicate work, just different roots.
+        cratesLibOnly = lib.mapAttrs (
+          packageId: _: buildCrate { libOnly = true; } self cratePkgs buildRustCrate packageId
         ) resolved.crates;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         build = mkBuiltByPackageIdByPkgs cratePkgs.buildPackages;
@@ -228,6 +240,7 @@ let
     self;
 
   buildCrate =
+    { libOnly }:
     self: cratePkgs: buildRustCrate: packageId:
     let
       crateInfo = resolved.crates.${packageId};
@@ -235,19 +248,20 @@ let
       # Resolve a regular dependency to its built derivation.
       # Proc-macro crates must be built for the build platform since they
       # execute as compiler plugins during compilation.
+      # Deps are always lib-only — nothing downstream needs a dep's bins.
       depDrv =
         dep:
         let
           depCrateInfo = resolved.crates.${dep.packageId} or null;
         in
         if depCrateInfo != null && (depCrateInfo.procMacro or false) then
-          self.build.crates.${dep.packageId}
+          self.build.cratesLibOnly.${dep.packageId}
         else
-          self.crates.${dep.packageId};
+          self.cratesLibOnly.${dep.packageId};
 
       # Resolve a build-script dependency. Build scripts run on the build
       # platform, so all their dependencies must be built for that platform.
-      buildDepDrv = dep: self.build.crates.${dep.packageId};
+      buildDepDrv = dep: self.build.cratesLibOnly.${dep.packageId};
 
       # Dependencies are already filtered by the Rust resolver:
       # platform-incompatible and inactive optional deps are excluded.
@@ -281,7 +295,7 @@ let
         inherit dependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
-        crateBin = crateInfo.crateBin or [ ];
+        crateBin = if libOnly then [ ] else (crateInfo.crateBin or [ ]);
       }
       // lib.optionalAttrs ((crateInfo.build or null) != null) {
         build = crateInfo.build;
@@ -362,6 +376,8 @@ let
 
       # For clippy crate resolution: workspace members use clippy-driver,
       # everything else reuses the already-cached normal build output.
+      # Clippy checks bins too, so no lib-only split here — alias
+      # cratesLibOnly to self.crates so depDrv's lookup still resolves.
       self = {
         crates = lib.mapAttrs (
           packageId: _:
@@ -369,10 +385,11 @@ let
             isWorkspaceMember = lib.elem packageId workspaceMemberIds;
           in
           if isWorkspaceMember then
-            buildCrate self cratePkgs clippyBuildRustCrate packageId
+            buildCrate { libOnly = false; } self cratePkgs clippyBuildRustCrate packageId
           else
-            normalBuilt.crates.${packageId}
+            normalBuilt.cratesLibOnly.${packageId}
         ) resolved.crates;
+        cratesLibOnly = self.crates;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         # Build-platform crates use clippy for workspace members too,
         # so build scripts see the same rlib metadata as the lib phase.
