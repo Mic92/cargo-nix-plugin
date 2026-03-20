@@ -77,12 +77,18 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
 }
 
 /// Run `cargo metadata` as a subprocess and return its stdout.
+///
+/// Passes `--offline --locked`: the lockfile already pins every crate
+/// (including checksums), so cargo has no reason to hit the network.
+/// Without `--offline`, cargo still contacts registry indices — which
+/// fails for private registries that need credentials at eval time.
 fn run_cargo_metadata(cargo_path: &str, manifest_path: &str) -> Result<String, String> {
     let output = std::process::Command::new(cargo_path)
         .args([
             "metadata",
             "--format-version",
             "1",
+            "--offline",
             "--locked",
             "--manifest-path",
             manifest_path,
@@ -94,7 +100,8 @@ fn run_cargo_metadata(cargo_path: &str, manifest_path: &str) -> Result<String, S
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "cargo metadata failed (exit {}):\n{stderr}\n\n\
-             Hint: pass 'metadata' explicitly for offline/pure usage.",
+             Hint: if the lockfile is stale, run `cargo metadata --locked` manually \
+             to see the drift; otherwise pass 'metadata' explicitly.",
             output.status
         ));
     }
@@ -179,7 +186,7 @@ mod tests {
 
     /// End-to-end test: run cargo metadata on this crate's own workspace
     /// and verify the subprocess path produces valid output.
-    /// Requires cargo on PATH and network access.
+    /// Requires cargo on PATH; no network (--offline).
     #[test]
     #[ignore]
     fn subprocess_resolves_own_workspace() {
