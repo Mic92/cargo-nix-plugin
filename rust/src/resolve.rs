@@ -58,13 +58,25 @@ pub struct DepInfo {
     pub features: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 #[serde(rename_all = "kebab-case")]
 pub enum SourceInfo {
     CratesIo,
-    Local { path: String },
-    Git { url: String, rev: String },
+    /// Alternative registry. `index` is the full source string from cargo
+    /// metadata (e.g. `sparse+https://example.com/index/`), matching what
+    /// Cargo.lock records. The nix lib maps it to a download URL via
+    /// `extraRegistries`.
+    Registry {
+        index: String,
+    },
+    Local {
+        path: String,
+    },
+    Git {
+        url: String,
+        rev: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -314,9 +326,15 @@ fn resolve_source(
                 } else {
                     None
                 }
-            } else if repr.starts_with("sparse+") {
-                // Sparse registry — treat like crates.io for now
-                Some(SourceInfo::CratesIo)
+            } else if repr.starts_with("sparse+") || repr.starts_with("registry+") {
+                // Alternative registry (sparse-protocol or git-index).
+                // is_crates_io() above already caught the real crates.io,
+                // so anything reaching here is a private/alternative registry.
+                // Preserve the full index URL so the nix side can look it up
+                // in extraRegistries.
+                Some(SourceInfo::Registry {
+                    index: repr.clone(),
+                })
             } else {
                 None
             }
@@ -885,6 +903,76 @@ mod tests {
         assert!(
             result.contains(&"serde".to_string()),
             "non-optional serde should always be included"
+        );
+    }
+
+    /// Build a minimal Package with a given source string to exercise resolve_source.
+    fn package_with_source(source: Option<&str>) -> Package {
+        serde_json::from_value(serde_json::json!({
+            "name": "p",
+            "version": "1.0.0",
+            "id": "test#p@1.0.0",
+            "source": source,
+            "dependencies": [],
+            "targets": [{
+                "kind": ["lib"], "crate_types": ["lib"], "name": "p",
+                "src_path": "/p/src/lib.rs", "edition": "2021",
+                "doc": true, "doctest": true, "test": true
+            }],
+            "features": {},
+            "manifest_path": "/p/Cargo.toml",
+            "edition": "2021",
+        }))
+        .expect("failed to construct test Package")
+    }
+
+    #[test]
+    fn resolve_source_crates_io() {
+        let pkg = package_with_source(Some(
+            "registry+https://github.com/rust-lang/crates.io-index",
+        ));
+        assert_eq!(
+            resolve_source(&pkg, &LockfileHashes::default(), false),
+            Some(SourceInfo::CratesIo)
+        );
+    }
+
+    #[test]
+    fn resolve_source_sparse_registry() {
+        let index = "sparse+https://example.com/api/cargo/private/index/";
+        let pkg = package_with_source(Some(index));
+        assert_eq!(
+            resolve_source(&pkg, &LockfileHashes::default(), false),
+            Some(SourceInfo::Registry {
+                index: index.into()
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_source_git_index_registry() {
+        // Non-crates.io registry+ URL (git-protocol index, not a git dep)
+        let index = "registry+https://example.com/cargo-index.git";
+        let pkg = package_with_source(Some(index));
+        assert_eq!(
+            resolve_source(&pkg, &LockfileHashes::default(), false),
+            Some(SourceInfo::Registry {
+                index: index.into()
+            })
+        );
+    }
+
+    #[test]
+    fn source_info_registry_serialization() {
+        let s = SourceInfo::Registry {
+            index: "sparse+https://example.com/index/".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({
+                "type": "registry",
+                "index": "sparse+https://example.com/index/",
+            })
         );
     }
 }

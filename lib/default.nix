@@ -54,6 +54,22 @@
   # local crates. Default slices into the monolithic `src`. Override to
   # provide narrow per-crate sources (avoids hashing the full workspace).
   localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
+  # Optional: alternative registry configuration. Maps the index URL
+  # (as cargo metadata / Cargo.lock reports it, including the `sparse+`
+  # or `registry+` scheme prefix) to { dl, fetchurl? }.
+  #
+  #   extraRegistries = {
+  #     "sparse+https://example.com/api/cargo/private/index/" = {
+  #       dl = "https://example.com/api/cargo/private/v1/crates";
+  #       fetchurl = myAuthenticatedFetchurl;  # optional, defaults to pkgs.fetchurl
+  #     };
+  #   };
+  #
+  # `dl` is the registry's config.json "dl" value (no trailing slash).
+  # The crate URL is constructed as `${dl}/${name}/${version}/download`
+  # following the same convention as nixpkgs importCargoLock. Override
+  # `fetchurl` to wire in netrc auth for private registries.
+  extraRegistries ? { },
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
 }:
@@ -164,6 +180,22 @@ let
       pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
         url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
+        sha256 = crateInfo.sha256;
+      }
+    else if sourceType == "registry" then
+      let
+        index = crateInfo.source.index;
+        reg =
+          extraRegistries.${index} or (throw ''
+            crate ${crateInfo.crateName}-${crateInfo.version} is from
+            registry ${index}, which is not configured. Add an entry
+            to `extraRegistries`.
+          '');
+        fetch = reg.fetchurl or pkgs.fetchurl;
+      in
+      fetch {
+        name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
+        url = "${reg.dl}/${crateInfo.crateName}/${crateInfo.version}/download";
         sha256 = crateInfo.sha256;
       }
     else if sourceType == "git" then
