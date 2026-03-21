@@ -27,7 +27,7 @@
   pkgs ? import <nixpkgs> { },
   lib ? pkgs.lib,
   stdenv ? pkgs.stdenv,
-  # Optional: output of `cargo metadata --format-version 1 --offline --locked`
+  # Optional: output of `cargo metadata --format-version 1 --locked`
   # If omitted, the plugin shells out to cargo automatically.
   metadata ? null,
   # Optional: contents of Cargo.lock (required when metadata is provided)
