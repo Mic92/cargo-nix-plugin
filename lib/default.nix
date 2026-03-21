@@ -250,6 +250,12 @@ let
       # Proc-macro crates must be built for the build platform since they
       # execute as compiler plugins during compilation.
       # Deps are always lib-only — nothing downstream needs a dep's bins.
+      # Tradeoff: if workspace member B has both lib and bins, and member A
+      # depends on B, allWorkspaceMembers realizes both crates.B (with bins)
+      # and cratesLibOnly.B (via A's dep edge) — distinct drvs, so B's rlib
+      # compiles twice. We accept this so workspaceMembers.A.build stays free
+      # of B's bins; route through self.crates instead if you'd rather trade
+      # the other way.
       depDrv =
         dep:
         let
