@@ -217,10 +217,23 @@ let
         in
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
-      self = {
-        crates = lib.mapAttrs (
-          packageId: _: buildCrate self cratePkgs buildRustCrate packageId
+      mkCrates =
+        libOnly:
+        lib.mapAttrs (
+          packageId: _: buildCrate { inherit libOnly; } self cratePkgs buildRustCrate packageId
         ) resolved.crates;
+
+      self = {
+        # With-bins variant — exposed via workspaceMembers.<name>.build so
+        # the top-level crate builds its binaries. Its deps still resolve via
+        # cratesLibOnly (see depDrv below), so only the root pays the bin cost.
+        crates = mkCrates false;
+        # Lib-only variant — what dep edges resolve to. Cargo doesn't expose
+        # a dependency's binaries to downstream crates (nightly artifact-deps /
+        # CARGO_BIN_FILE_* aren't wired by buildRustCrate anyway). Shares the
+        # same transitive closure with `crates` because both variants route dep
+        # edges through here — no duplicate work, just different roots.
+        cratesLibOnly = mkCrates true;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         build = mkBuiltByPackageIdByPkgs cratePkgs.buildPackages;
       };
@@ -228,6 +241,7 @@ let
     self;
 
   buildCrate =
+    { libOnly }:
     self: cratePkgs: buildRustCrate: packageId:
     let
       crateInfo = resolved.crates.${packageId};
@@ -235,19 +249,26 @@ let
       # Resolve a regular dependency to its built derivation.
       # Proc-macro crates must be built for the build platform since they
       # execute as compiler plugins during compilation.
+      # Deps are always lib-only — nothing downstream needs a dep's bins.
+      # Tradeoff: if workspace member B has both lib and bins, and member A
+      # depends on B, allWorkspaceMembers realizes both crates.B (with bins)
+      # and cratesLibOnly.B (via A's dep edge) — distinct drvs, so B's rlib
+      # compiles twice. We accept this so workspaceMembers.A.build stays free
+      # of B's bins; route through self.crates instead if you'd rather trade
+      # the other way.
       depDrv =
         dep:
         let
           depCrateInfo = resolved.crates.${dep.packageId} or null;
         in
         if depCrateInfo != null && (depCrateInfo.procMacro or false) then
-          self.build.crates.${dep.packageId}
+          self.build.cratesLibOnly.${dep.packageId}
         else
-          self.crates.${dep.packageId};
+          self.cratesLibOnly.${dep.packageId};
 
       # Resolve a build-script dependency. Build scripts run on the build
       # platform, so all their dependencies must be built for that platform.
-      buildDepDrv = dep: self.build.crates.${dep.packageId};
+      buildDepDrv = dep: self.build.cratesLibOnly.${dep.packageId};
 
       # Dependencies are already filtered by the Rust resolver:
       # platform-incompatible and inactive optional deps are excluded.
@@ -281,7 +302,7 @@ let
         inherit dependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
-        crateBin = crateInfo.crateBin or [ ];
+        crateBin = if libOnly then [ ] else crateInfo.crateBin or [ ];
       }
       // lib.optionalAttrs ((crateInfo.build or null) != null) {
         build = crateInfo.build;
@@ -362,6 +383,8 @@ let
 
       # For clippy crate resolution: workspace members use clippy-driver,
       # everything else reuses the already-cached normal build output.
+      # Clippy checks bins too, so no lib-only split here — alias
+      # cratesLibOnly to self.crates so depDrv's lookup still resolves.
       self = {
         crates = lib.mapAttrs (
           packageId: _:
@@ -369,10 +392,11 @@ let
             isWorkspaceMember = lib.elem packageId workspaceMemberIds;
           in
           if isWorkspaceMember then
-            buildCrate self cratePkgs clippyBuildRustCrate packageId
+            buildCrate { libOnly = false; } self cratePkgs clippyBuildRustCrate packageId
           else
-            normalBuilt.crates.${packageId}
+            normalBuilt.cratesLibOnly.${packageId}
         ) resolved.crates;
+        cratesLibOnly = self.crates;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         # Build-platform crates use clippy for workspace members too,
         # so build scripts see the same rlib metadata as the lib phase.

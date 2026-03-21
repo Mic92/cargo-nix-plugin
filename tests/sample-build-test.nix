@@ -50,6 +50,35 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
 
     echo "PASS: workspace built and ran successfully"
 
+    # --- Lib-only dep split: sample-lib has a sidecar bin (sample-tool).
+    # When built as the root crate, the bin is present; when pulled in as
+    # a dependency of sample-bin (cratesLibOnly), the bin is suppressed.
+    lib_root_drv=$(nix-instantiate \
+      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --expr "($cargoNixExpr).workspaceMembers.sample-lib.build")
+    lib_dep_drv=$(nix-instantiate \
+      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --expr "let c = ($cargoNixExpr); in builtins.getAttr c.resolved.workspaceMembers.sample-lib c.builtCrates.cratesLibOnly")
+
+    [[ "$lib_root_drv" != "$lib_dep_drv" ]] || {
+      echo "FAIL: lib-only dep drv should differ from with-bins root drv"
+      exit 1
+    }
+
+    # --realize prints all outputs in hash order; pick the one without -lib suffix.
+    lib_root=$(nix-store --realize "$lib_root_drv" | grep -v -- '-lib$')
+    lib_dep=$(nix-store --realize "$lib_dep_drv" | grep -v -- '-lib$')
+
+    [[ -x "$lib_root/bin/sample-tool" ]] || {
+      echo "FAIL: workspaceMembers.sample-lib.build should include bin/sample-tool"
+      exit 1
+    }
+    [[ ! -e "$lib_dep/bin/sample-tool" ]] || {
+      echo "FAIL: lib-only dep of sample-lib should NOT include bin/sample-tool"
+      exit 1
+    }
+    echo "PASS: lib-only dep split suppresses sidecar bins"
+
     # --- Clippy test: lint all workspace members with clippy-driver ---
     clippy_drv=$(nix-instantiate \
       --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
