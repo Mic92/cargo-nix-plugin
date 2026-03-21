@@ -217,21 +217,23 @@ let
         in
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
+      mkCrates =
+        libOnly:
+        lib.mapAttrs (
+          packageId: _: buildCrate { inherit libOnly; } self cratePkgs buildRustCrate packageId
+        ) resolved.crates;
+
       self = {
         # With-bins variant — exposed via workspaceMembers.<name>.build so
         # the top-level crate builds its binaries. Its deps still resolve via
         # cratesLibOnly (see depDrv below), so only the root pays the bin cost.
-        crates = lib.mapAttrs (
-          packageId: _: buildCrate { libOnly = false; } self cratePkgs buildRustCrate packageId
-        ) resolved.crates;
+        crates = mkCrates false;
         # Lib-only variant — what dep edges resolve to. Cargo doesn't expose
         # a dependency's binaries to downstream crates (nightly artifact-deps /
         # CARGO_BIN_FILE_* aren't wired by buildRustCrate anyway). Shares the
         # same transitive closure with `crates` because both variants route dep
         # edges through here — no duplicate work, just different roots.
-        cratesLibOnly = lib.mapAttrs (
-          packageId: _: buildCrate { libOnly = true; } self cratePkgs buildRustCrate packageId
-        ) resolved.crates;
+        cratesLibOnly = mkCrates true;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         build = mkBuiltByPackageIdByPkgs cratePkgs.buildPackages;
       };
