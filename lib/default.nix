@@ -302,7 +302,7 @@ let
         inherit dependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
-        crateBin = if libOnly then [ ] else (crateInfo.crateBin or [ ]);
+        crateBin = if libOnly then [ ] else crateInfo.crateBin or [ ];
       }
       // lib.optionalAttrs ((crateInfo.build or null) != null) {
         build = crateInfo.build;
