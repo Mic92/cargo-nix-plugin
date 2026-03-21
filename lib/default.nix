@@ -224,12 +224,11 @@ let
         crates = lib.mapAttrs (
           packageId: _: buildCrate { libOnly = false; } self cratePkgs buildRustCrate packageId
         ) resolved.crates;
-        # Lib-only variant — what dep edges resolve to. Nothing in a dep chain
-        # needs its sidecar bins (build.rs-invoked binaries from other crates
-        # would go through buildDependencies + CARGO_BIN_EXE, which
-        # buildRustCrate doesn't wire up anyway). Shares the same transitive
-        # closure with `crates` because its own dep edges also go to
-        # cratesLibOnly — no duplicate work, just different roots.
+        # Lib-only variant — what dep edges resolve to. Cargo doesn't expose
+        # a dependency's binaries to downstream crates (nightly artifact-deps /
+        # CARGO_BIN_FILE_* aren't wired by buildRustCrate anyway). Shares the
+        # same transitive closure with `crates` because both variants route dep
+        # edges through here — no duplicate work, just different roots.
         cratesLibOnly = lib.mapAttrs (
           packageId: _: buildCrate { libOnly = true; } self cratePkgs buildRustCrate packageId
         ) resolved.crates;
