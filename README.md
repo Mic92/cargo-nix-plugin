@@ -46,6 +46,23 @@ This shells out to `cargo metadata --format-version 1 --locked` during Nix
 evaluation. It uses the user's `CARGO_HOME` cache, so it's near-instant when
 dependencies have been fetched before. Network access is required on first use.
 
+The subprocess runs with its working directory set to the manifest's parent,
+so cargo discovers `.cargo/config.toml` relative to your workspace. If your
+workspace references a private registry and you pass `src` as a store path,
+include `.cargo/config.toml` in the source fileset — or pass the registry
+explicitly via `cargoConfig`:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  cargoConfig = [ ''registries.my-private.index="sparse+https://…/index/"'' ];
+};
+```
+
+Each `cargoConfig` entry is forwarded as `--config <value>`; cargo accepts
+both `KEY=VALUE` strings and paths to `.toml` files.
+
 ### Explicit (pure, offline)
 
 For pure evaluation or CI without network, pre-generate the metadata:

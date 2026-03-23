@@ -1,0 +1,11 @@
+[package]
+name = "sample-registry-ref"
+version = "0.1.0"
+edition = "2021"
+
+# References a private registry in [patch] without actually depending on
+# the patched crate. cargo metadata must know the registry *exists* to
+# parse this manifest, but won't contact it since there's nothing to
+# resolve. This lets us test config discovery hermetically.
+[patch.crates-io]
+phantom-crate = { version = "1.0.0", registry = "test-registry" }
