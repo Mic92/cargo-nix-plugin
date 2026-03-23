@@ -41,6 +41,16 @@
   # building into a chroot store (--store), since eval-time subprocess
   # access needs a host-accessible path, not a chroot store path.
   manifestPath ? null,
+  # Optional: extra `--config` arguments for the cargo metadata subprocess.
+  # Each entry is passed as `--config <value>`; cargo accepts both
+  # `KEY=VALUE` strings and paths to config.toml files. Use this to
+  # declare private registries when `.cargo/config.toml` isn't reachable
+  # from the manifest directory (e.g. store-path `src` without `.cargo/`
+  # in the fileset):
+  #
+  #   cargoConfig = [ "registries.my-private.index=\"sparse+https://…\"" ];
+  #
+  cargoConfig ? [ ],
   # Optional: function to create buildRustCrate for a given pkgs
   buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
   # Optional: crate overrides
@@ -155,6 +165,7 @@ let
       else
         {
           manifestPath = effectiveManifestPath;
+          inherit cargoConfig;
         }
     )
   );

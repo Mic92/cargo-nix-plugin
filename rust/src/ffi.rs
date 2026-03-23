@@ -27,6 +27,11 @@ struct PluginInput {
     cargo_lock: Option<String>,
     /// Path to Cargo.toml (mode 2 — subprocess)
     manifest_path: Option<String>,
+    /// Extra `--config` arguments for the cargo metadata subprocess.
+    /// Each entry is passed as a separate `--config <value>` pair; cargo
+    /// accepts both `KEY=VALUE` strings and paths to config.toml files.
+    #[serde(default)]
+    cargo_config: Vec<String>,
     target: TargetDescription,
     #[serde(default = "default_root_features")]
     root_features: Vec<String>,
@@ -57,7 +62,8 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
             (metadata.clone(), cargo_lock.to_string())
         }
         (None, Some(manifest_path)) => {
-            let metadata_json = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest_path)?;
+            let metadata_json =
+                run_cargo_metadata(BUILTIN_CARGO_PATH, manifest_path, &input.cargo_config)?;
             let manifest_dir = std::path::Path::new(manifest_path)
                 .parent()
                 .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
@@ -82,20 +88,27 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
 /// `.cargo/config.toml` relative to the workspace (cargo's config search
 /// walks up from CWD, not from `--manifest-path`). Without this, the
 /// result depends on where the nix evaluator happens to be running.
-fn run_cargo_metadata(cargo_path: &str, manifest_path: &str) -> Result<String, String> {
+fn run_cargo_metadata(
+    cargo_path: &str,
+    manifest_path: &str,
+    cargo_config: &[String],
+) -> Result<String, String> {
     let manifest_dir = std::path::Path::new(manifest_path)
         .parent()
         .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
-    let output = std::process::Command::new(cargo_path)
-        .current_dir(manifest_dir)
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--locked",
-            "--manifest-path",
-            manifest_path,
-        ])
+    let mut cmd = std::process::Command::new(cargo_path);
+    cmd.current_dir(manifest_dir).args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+        "--manifest-path",
+        manifest_path,
+    ]);
+    for cfg in cargo_config {
+        cmd.args(["--config", cfg]);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run '{cargo_path} metadata': {e}"))?;
 
@@ -171,6 +184,90 @@ pub unsafe extern "C" fn free_string(s: *mut c_char) {
 mod tests {
     use super::*;
 
+    /// Verify run_cargo_metadata sets CWD to the manifest dir so cargo
+    /// discovers .cargo/config.toml relative to the workspace, not the
+    /// evaluator's CWD.
+    ///
+    /// The fixture references a fake registry via [patch.crates-io]. Cargo
+    /// needs the registry *defined* (via .cargo/config.toml) to parse the
+    /// manifest; without it, the error is "registry index was not found".
+    /// With it, cargo proceeds to contact the (unreachable) registry and
+    /// fails on DNS — a different error that proves config discovery worked.
+    #[test]
+    fn subprocess_discovers_cargo_config_via_manifest_dir() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample-project-registry/Cargo.toml"
+        );
+
+        // `cargo test` runs from CARGO_MANIFEST_DIR (rust/), which has no
+        // .cargo/config.toml in its ancestry. Without .current_dir(manifest_dir)
+        // the subprocess would search from there and miss the fixture's config.
+        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[])
+            .expect_err("fixture registry is unreachable; metadata should fail");
+
+        assert!(
+            !err.contains("registry index was not found"),
+            "cargo did not discover .cargo/config.toml — current_dir not applied?\n{err}"
+        );
+        assert!(
+            err.contains("registry.invalid") || err.contains("test-registry"),
+            "expected registry-contact error, got:\n{err}"
+        );
+    }
+
+    /// Verify cargoConfig entries are passed through as --config args.
+    /// Same fixture, but we move .cargo/config.toml out of reach by
+    /// pointing at a manifest copy in a tempdir, then supply the registry
+    /// definition via cargoConfig instead.
+    #[test]
+    fn cargo_config_param_defines_registry() {
+        let fixture_dir = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample-project-registry"
+        );
+        let tmp = mk_tempdir("cargo-nix-plugin-config-test");
+        for f in ["Cargo.toml", "Cargo.lock"] {
+            std::fs::copy(format!("{fixture_dir}/{f}"), tmp.join(f)).expect("copy fixture file");
+        }
+        std::fs::create_dir(tmp.join("src")).expect("mkdir src");
+        std::fs::write(tmp.join("src/lib.rs"), "").expect("write lib.rs");
+
+        let manifest = tmp.join("Cargo.toml");
+        let manifest = manifest.to_str().expect("utf8 path");
+
+        // No .cargo/config.toml here — registry must come from cargoConfig.
+        let cfg = vec![
+            r#"registries.test-registry.index="sparse+https://registry.invalid/index/""#
+                .to_string(),
+        ];
+        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest, &cfg)
+            .expect_err("fixture registry is unreachable; metadata should fail");
+
+        assert!(
+            !err.contains("registry index was not found"),
+            "cargoConfig --config arg not applied?\n{err}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn mk_tempdir(prefix: &str) -> std::path::PathBuf {
+        loop {
+            let dir = std::env::temp_dir().join(format!(
+                "{prefix}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("create tempdir: {e}"),
+            }
+        }
+    }
+
     fn linux_x86_64() -> TargetDescription {
         TargetDescription {
             name: "x86_64-unknown-linux-gnu".to_string(),
@@ -198,6 +295,7 @@ mod tests {
             metadata: None,
             cargo_lock: None,
             manifest_path: Some(manifest_path.to_string()),
+            cargo_config: vec![],
             target: linux_x86_64(),
             root_features: vec!["default".to_string()],
         };
