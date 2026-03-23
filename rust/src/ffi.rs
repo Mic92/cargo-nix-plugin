@@ -77,8 +77,17 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
 }
 
 /// Run `cargo metadata` as a subprocess and return its stdout.
+///
+/// Runs with CWD set to the manifest's directory so cargo discovers
+/// `.cargo/config.toml` relative to the workspace (cargo's config search
+/// walks up from CWD, not from `--manifest-path`). Without this, the
+/// result depends on where the nix evaluator happens to be running.
 fn run_cargo_metadata(cargo_path: &str, manifest_path: &str) -> Result<String, String> {
+    let manifest_dir = std::path::Path::new(manifest_path)
+        .parent()
+        .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
     let output = std::process::Command::new(cargo_path)
+        .current_dir(manifest_dir)
         .args([
             "metadata",
             "--format-version",
