@@ -1,0 +1,11 @@
+[package]
+name = "sample-project-features"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gated-dep-marker = { path = "gated-dep-marker", optional = true }
+
+[features]
+default = []
+gated-dep = ["dep:gated-dep-marker"]

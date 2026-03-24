@@ -56,8 +56,13 @@
   # Optional: crate overrides
   # If omitted, the default crate overrides from nixpkgs will be used
   crateOverrides ? null,
-  # Optional: features to enable
-  rootFeatures ? [ "default" ],
+  # Optional: features to enable on the root package (`--features`).
+  # Empty means cargo's default behavior (default features unless
+  # `noDefaultFeatures = true`). Only applies in subprocess mode; in
+  # explicit mode the metadata JSON already has features resolved.
+  rootFeatures ? [ ],
+  # Optional: pass `--no-default-features` to the metadata subprocess.
+  noDefaultFeatures ? false,
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
   # Optional: function from workspace-relative path (string) to src for
@@ -155,7 +160,7 @@ let
   resolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
-      inherit rootFeatures;
+      inherit rootFeatures noDefaultFeatures;
     }
     // (
       if metadata != null then
