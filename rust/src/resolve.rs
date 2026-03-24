@@ -108,11 +108,14 @@ fn shorten_id(id: &PackageId, name_counts: &HashMap<String, usize>) -> String {
 }
 
 /// Resolve a full cargo workspace.
+///
+/// Feature selection must already be baked into `metadata_json` (via
+/// `cargo metadata --features ...`); this function consumes the resolved
+/// graph, it does not re-resolve.
 pub fn resolve_workspace(
     metadata_json: &str,
     cargo_lock: &str,
     target: &TargetDescription,
-    _root_features: &[String],
 ) -> Result<WorkspaceResult, String> {
     let metadata: Metadata = serde_json::from_str(metadata_json)
         .map_err(|e| format!("Failed to parse metadata: {e}"))?;
@@ -561,13 +564,8 @@ mod tests {
         let metadata = include_str!("../tests/fixtures/metadata.json");
         let cargo_lock = include_str!("../tests/fixtures/Cargo.lock");
 
-        let result = resolve_workspace(
-            metadata,
-            cargo_lock,
-            &linux_x86_64(),
-            &["default".to_string()],
-        )
-        .expect("resolve_workspace failed");
+        let result = resolve_workspace(metadata, cargo_lock, &linux_x86_64())
+            .expect("resolve_workspace failed");
 
         // 1798 packages in metadata, should have entries for all of them
         assert!(
@@ -632,13 +630,8 @@ mod tests {
         let metadata = include_str!("../tests/fixtures/metadata.json");
         let cargo_lock = include_str!("../tests/fixtures/Cargo.lock");
 
-        let result = resolve_workspace(
-            metadata,
-            cargo_lock,
-            &linux_x86_64(),
-            &["default".to_string()],
-        )
-        .expect("resolve_workspace failed");
+        let result = resolve_workspace(metadata, cargo_lock, &linux_x86_64())
+            .expect("resolve_workspace failed");
 
         let rav1e = result
             .crates
@@ -672,13 +665,8 @@ mod tests {
         let metadata = include_str!("../tests/fixtures/metadata.json");
         let cargo_lock = include_str!("../tests/fixtures/Cargo.lock");
 
-        let result = resolve_workspace(
-            metadata,
-            cargo_lock,
-            &linux_x86_64(),
-            &["default".to_string()],
-        )
-        .expect("resolve_workspace failed");
+        let result = resolve_workspace(metadata, cargo_lock, &linux_x86_64())
+            .expect("resolve_workspace failed");
 
         let member_ids: std::collections::HashSet<&str> = result
             .workspace_members

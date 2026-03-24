@@ -33,12 +33,13 @@ struct PluginInput {
     #[serde(default)]
     cargo_config: Vec<String>,
     target: TargetDescription,
-    #[serde(default = "default_root_features")]
+    /// Features to enable on the root package (`--features`). Empty means
+    /// cargo's default behavior (default features unless `noDefaultFeatures`).
+    #[serde(default)]
     root_features: Vec<String>,
-}
-
-fn default_root_features() -> Vec<String> {
-    vec!["default".to_string()]
+    /// Pass `--no-default-features` to the metadata subprocess.
+    #[serde(default)]
+    no_default_features: bool,
 }
 
 /// Validate input and resolve the workspace using the appropriate mode.
@@ -62,8 +63,13 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
             (metadata.clone(), cargo_lock.to_string())
         }
         (None, Some(manifest_path)) => {
-            let metadata_json =
-                run_cargo_metadata(BUILTIN_CARGO_PATH, manifest_path, &input.cargo_config)?;
+            let metadata_json = run_cargo_metadata(
+                BUILTIN_CARGO_PATH,
+                manifest_path,
+                &input.cargo_config,
+                &input.root_features,
+                input.no_default_features,
+            )?;
             let manifest_dir = std::path::Path::new(manifest_path)
                 .parent()
                 .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
@@ -74,12 +80,7 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
         }
     };
 
-    resolve_workspace(
-        &metadata_json,
-        &cargo_lock_str,
-        &input.target,
-        &input.root_features,
-    )
+    resolve_workspace(&metadata_json, &cargo_lock_str, &input.target)
 }
 
 /// Run `cargo metadata` as a subprocess and return its stdout.
@@ -92,6 +93,8 @@ fn run_cargo_metadata(
     cargo_path: &str,
     manifest_path: &str,
     cargo_config: &[String],
+    root_features: &[String],
+    no_default_features: bool,
 ) -> Result<String, String> {
     let manifest_dir = std::path::Path::new(manifest_path)
         .parent()
@@ -107,6 +110,12 @@ fn run_cargo_metadata(
     ]);
     for cfg in cargo_config {
         cmd.args(["--config", cfg]);
+    }
+    if no_default_features {
+        cmd.arg("--no-default-features");
+    }
+    if !root_features.is_empty() {
+        cmd.args(["--features", &root_features.join(",")]);
     }
     let output = cmd
         .output()
@@ -203,7 +212,7 @@ mod tests {
         // `cargo test` runs from CARGO_MANIFEST_DIR (rust/), which has no
         // .cargo/config.toml in its ancestry. Without .current_dir(manifest_dir)
         // the subprocess would search from there and miss the fixture's config.
-        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[])
+        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[], &[], false)
             .expect_err("fixture registry is unreachable; metadata should fail");
 
         assert!(
@@ -213,6 +222,43 @@ mod tests {
         assert!(
             err.contains("registry.invalid") || err.contains("test-registry"),
             "expected registry-contact error, got:\n{err}"
+        );
+    }
+
+    /// Verify rootFeatures + noDefaultFeatures flow through to the cargo
+    /// subprocess. The fixture has a `gated-dep` feature that enables an
+    /// optional dependency. `cargo metadata` lists optional deps in the
+    /// `packages` array regardless, but the `resolve.nodes[].deps` array
+    /// only includes them when the feature is on — and uses the
+    /// underscore-normalized name there.
+    #[test]
+    fn root_features_passed_to_subprocess() {
+        let fixture = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample-project-features/Cargo.toml"
+        );
+        // Underscore form only appears in resolve.nodes[].deps[].name,
+        // which reflects the feature-resolved graph.
+        const MARKER: &str = "gated_dep_marker";
+
+        let default_json = run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[], &[], false)
+            .expect("metadata with defaults");
+        assert!(
+            !default_json.contains(MARKER),
+            "gated dep leaked into default resolve graph"
+        );
+
+        let gated_json = run_cargo_metadata(
+            BUILTIN_CARGO_PATH,
+            fixture,
+            &[],
+            &["gated-dep".to_string()],
+            true,
+        )
+        .expect("metadata with gated-dep");
+        assert!(
+            gated_json.contains(MARKER),
+            "--no-default-features --features gated-dep not applied"
         );
     }
 
@@ -241,7 +287,7 @@ mod tests {
             r#"registries.test-registry.index="sparse+https://registry.invalid/index/""#
                 .to_string(),
         ];
-        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest, &cfg)
+        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest, &cfg, &[], false)
             .expect_err("fixture registry is unreachable; metadata should fail");
 
         assert!(
@@ -297,7 +343,8 @@ mod tests {
             manifest_path: Some(manifest_path.to_string()),
             cargo_config: vec![],
             target: linux_x86_64(),
-            root_features: vec!["default".to_string()],
+            root_features: vec![],
+            no_default_features: false,
         };
 
         let result = validate_and_resolve(&input).expect("subprocess resolution failed");
