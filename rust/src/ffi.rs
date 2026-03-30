@@ -6,18 +6,11 @@ use std::os::raw::c_char;
 use crate::cfg_eval::TargetDescription;
 use crate::resolve::resolve_workspace;
 
-/// The cargo binary path baked in at build time from the Nix store.
-/// Falls back to "cargo" (from PATH) when not set, e.g. during local development.
-const BUILTIN_CARGO_PATH: &str = match option_env!("CARGO_NIX_PLUGIN_CARGO_PATH") {
-    Some(p) => p,
-    None => "cargo",
-};
-
 /// Input from the Nix side — the entire attrset serialized as JSON.
 ///
 /// Two modes:
-/// 1. Explicit: `metadata` + `cargoLock` provided (pure, no subprocess)
-/// 2. Subprocess: `manifestPath` provided (shells out to compiled-in cargo)
+/// 1. Explicit: `metadata` + `cargoLock` provided (pre-generated cargo metadata JSON)
+/// 2. Lockfile: `manifestPath` provided (parses Cargo.lock + registry index, no cargo subprocess)
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginInput {
@@ -25,115 +18,81 @@ struct PluginInput {
     metadata: Option<String>,
     /// Explicit Cargo.lock contents (required with metadata)
     cargo_lock: Option<String>,
-    /// Path to Cargo.toml (mode 2 — subprocess)
+    /// Path to Cargo.toml (mode 2 — lockfile resolve)
     manifest_path: Option<String>,
-    /// Extra `--config` arguments for the cargo metadata subprocess.
-    /// Each entry is passed as a separate `--config <value>` pair; cargo
-    /// accepts both `KEY=VALUE` strings and paths to config.toml files.
-    #[serde(default)]
-    cargo_config: Vec<String>,
     target: TargetDescription,
-    /// Features to enable on the root package (`--features`). Empty means
-    /// cargo's default behavior (default features unless `noDefaultFeatures`).
+    /// Features to enable on the root package.
     #[serde(default)]
     root_features: Vec<String>,
-    /// Pass `--no-default-features` to the metadata subprocess.
+    /// Disable default features on root packages.
     #[serde(default)]
     no_default_features: bool,
+    /// Path to CARGO_HOME (for registry index lookup in lockfile resolve mode).
+    /// Defaults to $CARGO_HOME or ~/.cargo.
+    #[serde(default)]
+    cargo_home: Option<String>,
 }
 
 /// Validate input and resolve the workspace using the appropriate mode.
 fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::WorkspaceResult, String> {
-    let (metadata_json, cargo_lock_str) = match (&input.metadata, &input.manifest_path) {
+    match (&input.metadata, &input.manifest_path) {
         (Some(_), Some(_)) => {
-            return Err("Provide either 'metadata' or 'manifestPath', not both.".to_string());
+            Err("Provide either 'metadata' or 'manifestPath', not both.".to_string())
         }
         (None, None) => {
-            return Err(
-                "Provide either 'metadata' (explicit JSON) or 'manifestPath' (path to Cargo.toml) \
-                 to resolve a cargo workspace."
+            Err(
+                "Provide either 'metadata' (pre-generated cargo metadata JSON) or \
+                 'manifestPath' (path to Cargo.toml for lockfile resolve)."
                     .to_string(),
-            );
+            )
         }
+        // Mode 1: explicit cargo metadata JSON
         (Some(metadata), None) => {
             let cargo_lock = input
                 .cargo_lock
                 .as_deref()
                 .ok_or("'cargoLock' is required when 'metadata' is provided.")?;
-            (metadata.clone(), cargo_lock.to_string())
+            resolve_workspace(metadata, cargo_lock, &input.target)
         }
+        // Mode 2: lockfile resolve from Cargo.lock + registry index
         (None, Some(manifest_path)) => {
-            let metadata_json = run_cargo_metadata(
-                BUILTIN_CARGO_PATH,
-                manifest_path,
-                &input.cargo_config,
-                &input.root_features,
-                input.no_default_features,
-            )?;
-            let manifest_dir = std::path::Path::new(manifest_path)
+            let workspace_root = std::path::Path::new(manifest_path)
                 .parent()
-                .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
-            let lock_path = manifest_dir.join("Cargo.lock");
+                .ok_or_else(|| {
+                    format!("Cannot determine parent directory of {manifest_path}")
+                })?;
+            let lock_path = workspace_root.join("Cargo.lock");
             let cargo_lock_str = std::fs::read_to_string(&lock_path)
                 .map_err(|e| format!("Failed to read {}: {e}", lock_path.display()))?;
-            (metadata_json, cargo_lock_str)
-        }
-    };
 
-    resolve_workspace(&metadata_json, &cargo_lock_str, &input.target)
+            let cargo_home = input
+                .cargo_home
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var("CARGO_HOME")
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                })
+                .unwrap_or_else(|| dirs_home().join(".cargo"));
+
+            crate::lockfile_resolve::resolve_from_lockfile(
+                workspace_root,
+                &cargo_lock_str,
+                &cargo_home,
+                &input.target,
+                &input.root_features,
+                input.no_default_features,
+            )
+        }
+    }
 }
 
-/// Run `cargo metadata` as a subprocess and return its stdout.
-///
-/// Runs with CWD set to the manifest's directory so cargo discovers
-/// `.cargo/config.toml` relative to the workspace (cargo's config search
-/// walks up from CWD, not from `--manifest-path`). Without this, the
-/// result depends on where the nix evaluator happens to be running.
-fn run_cargo_metadata(
-    cargo_path: &str,
-    manifest_path: &str,
-    cargo_config: &[String],
-    root_features: &[String],
-    no_default_features: bool,
-) -> Result<String, String> {
-    let manifest_dir = std::path::Path::new(manifest_path)
-        .parent()
-        .ok_or_else(|| format!("Cannot determine parent directory of {manifest_path}"))?;
-    let mut cmd = std::process::Command::new(cargo_path);
-    cmd.current_dir(manifest_dir).args([
-        "metadata",
-        "--format-version",
-        "1",
-        "--locked",
-        "--manifest-path",
-        manifest_path,
-    ]);
-    for cfg in cargo_config {
-        cmd.args(["--config", cfg]);
-    }
-    if no_default_features {
-        cmd.arg("--no-default-features");
-    }
-    if !root_features.is_empty() {
-        cmd.args(["--features", &root_features.join(",")]);
-    }
-    // Inherit stderr so cargo's warnings/progress are visible in real-time.
-    cmd.stderr(std::process::Stdio::inherit());
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run '{cargo_path} metadata': {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "cargo metadata failed (exit {}). See stderr above.\n\n\
-             Hint: pass 'metadata' explicitly for offline/pure usage.",
-            output.status
-        ));
-    }
-
-    String::from_utf8(output.stdout)
-        .map_err(|e| format!("cargo metadata produced invalid UTF-8: {e}"))
+/// Get the user's home directory.
+fn dirs_home() -> std::path::PathBuf {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/root"))
 }
 
 /// Resolve a cargo workspace. Input and output are JSON strings.
@@ -195,112 +154,6 @@ pub unsafe extern "C" fn free_string(s: *mut c_char) {
 mod tests {
     use super::*;
 
-    /// Verify run_cargo_metadata sets CWD to the manifest dir so cargo
-    /// discovers .cargo/config.toml relative to the workspace, not the
-    /// evaluator's CWD.
-    #[test]
-    fn subprocess_discovers_cargo_config_via_manifest_dir() {
-        let fixture = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sample-project-registry/Cargo.toml"
-        );
-
-        // `cargo test` runs from CARGO_MANIFEST_DIR (rust/), which has no
-        // .cargo/config.toml in its ancestry. Without .current_dir(manifest_dir)
-        // the subprocess would search from there and miss the fixture's config.
-        run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[], &[], false)
-            .expect_err("fixture registry is unreachable; metadata should fail");
-    }
-
-    /// Verify rootFeatures + noDefaultFeatures flow through to the cargo
-    /// subprocess. The fixture has a `gated-dep` feature that enables an
-    /// optional dependency. `cargo metadata` lists optional deps in the
-    /// `packages` array regardless, but the `resolve.nodes[].deps` array
-    /// only includes them when the feature is on — and uses the
-    /// underscore-normalized name there.
-    #[test]
-    fn root_features_passed_to_subprocess() {
-        let fixture = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sample-project-features/Cargo.toml"
-        );
-        // Underscore form only appears in resolve.nodes[].deps[].name,
-        // which reflects the feature-resolved graph.
-        const MARKER: &str = "gated_dep_marker";
-
-        let default_json = run_cargo_metadata(BUILTIN_CARGO_PATH, fixture, &[], &[], false)
-            .expect("metadata with defaults");
-        assert!(
-            !default_json.contains(MARKER),
-            "gated dep leaked into default resolve graph"
-        );
-
-        let gated_json = run_cargo_metadata(
-            BUILTIN_CARGO_PATH,
-            fixture,
-            &[],
-            &["gated-dep".to_string()],
-            true,
-        )
-        .expect("metadata with gated-dep");
-        assert!(
-            gated_json.contains(MARKER),
-            "--no-default-features --features gated-dep not applied"
-        );
-    }
-
-    /// Verify cargoConfig entries are passed through as --config args.
-    /// Same fixture, but we move .cargo/config.toml out of reach by
-    /// pointing at a manifest copy in a tempdir, then supply the registry
-    /// definition via cargoConfig instead.
-    #[test]
-    fn cargo_config_param_defines_registry() {
-        let fixture_dir = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/sample-project-registry"
-        );
-        let tmp = mk_tempdir("cargo-nix-plugin-config-test");
-        for f in ["Cargo.toml", "Cargo.lock"] {
-            std::fs::copy(format!("{fixture_dir}/{f}"), tmp.join(f)).expect("copy fixture file");
-        }
-        std::fs::create_dir(tmp.join("src")).expect("mkdir src");
-        std::fs::write(tmp.join("src/lib.rs"), "").expect("write lib.rs");
-
-        let manifest = tmp.join("Cargo.toml");
-        let manifest = manifest.to_str().expect("utf8 path");
-
-        // No .cargo/config.toml here — registry must come from cargoConfig.
-        let cfg = vec![
-            r#"registries.test-registry.index="sparse+https://registry.invalid/index/""#
-                .to_string(),
-        ];
-        let err = run_cargo_metadata(BUILTIN_CARGO_PATH, manifest, &cfg, &[], false)
-            .expect_err("fixture registry is unreachable; metadata should fail");
-
-        assert!(
-            !err.contains("registry index was not found"),
-            "cargoConfig --config arg not applied?\n{err}"
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    fn mk_tempdir(prefix: &str) -> std::path::PathBuf {
-        loop {
-            let dir = std::env::temp_dir().join(format!(
-                "{prefix}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            match std::fs::create_dir(&dir) {
-                Ok(()) => return dir,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("create tempdir: {e}"),
-            }
-        }
-    }
-
     fn linux_x86_64() -> TargetDescription {
         TargetDescription {
             name: "x86_64-unknown-linux-gnu".to_string(),
@@ -316,33 +169,93 @@ mod tests {
         }
     }
 
-    /// End-to-end test: run cargo metadata on this crate's own workspace
-    /// and verify the subprocess path produces valid output.
-    /// Requires cargo on PATH and network access.
+    /// Lockfile resolve: resolve this crate's workspace from Cargo.lock +
+    /// registry index, without running cargo metadata or downloading crates.
+    /// Requires that the registry index is cached (run `cargo update` first).
+    /// Ignored in sandboxed builds where ~/.cargo is unavailable.
     #[test]
     #[ignore]
-    fn subprocess_resolves_own_workspace() {
+    fn lockfile_resolves_own_workspace() {
         let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
 
         let input = PluginInput {
             metadata: None,
             cargo_lock: None,
             manifest_path: Some(manifest_path.to_string()),
-            cargo_config: vec![],
             target: linux_x86_64(),
             root_features: vec![],
             no_default_features: false,
+            cargo_home: None,
         };
 
-        let result = validate_and_resolve(&input).expect("subprocess resolution failed");
+        let result = validate_and_resolve(&input).expect("lockfile resolution failed");
+
         // This crate itself should be a workspace member
         assert!(
             !result.workspace_members.is_empty(),
             "expected at least one workspace member"
         );
-        assert!(!result.crates.is_empty(), "expected at least one crate");
-        // Spot-check: serde should be in deps (we depend on it)
-        let has_serde = result.crates.values().any(|c| c.crate_name == "serde");
-        assert!(has_serde, "expected serde in resolved crates");
+        assert!(
+            result
+                .workspace_members
+                .contains_key("cargo-nix-plugin-core"),
+            "expected cargo-nix-plugin-core in workspace members"
+        );
+
+        // Should have all lockfile crates
+        assert!(
+            result.crates.len() > 20,
+            "expected >20 crates, got {}",
+            result.crates.len()
+        );
+
+        // External crates should have features from the registry index
+        let serde = result.crates.values().find(|c| c.crate_name == "serde");
+        assert!(serde.is_some(), "serde not found in resolved crates");
+        let serde = serde.unwrap();
+        assert!(
+            serde.features.contains_key("default"),
+            "serde should have 'default' feature from index"
+        );
+        assert!(
+            serde.sha256.is_some(),
+            "serde should have sha256 from lockfile"
+        );
+        assert_eq!(serde.source, Some(crate::resolve::SourceInfo::CratesIo));
+
+        // Workspace member should have edition from Cargo.toml
+        let root_id = result
+            .workspace_members
+            .get("cargo-nix-plugin-core")
+            .unwrap();
+        let root_crate = &result.crates[root_id];
+        assert_eq!(root_crate.edition, "2021");
+
+        // External crates leave edition empty (auto-detected at build time)
+        assert_eq!(
+            serde.edition, "",
+            "external crate edition should be empty for build-time detection"
+        );
+
+        // Feature resolution: serde should have "default" and "std" resolved
+        assert!(
+            serde.resolved_default_features.contains(&"default".to_string()),
+            "serde should have resolved 'default' feature, got: {:?}",
+            serde.resolved_default_features
+        );
+
+        // proc-macro2 should have "proc-macro" feature (needed by serde_derive)
+        let pm2 = result
+            .crates
+            .values()
+            .find(|c| c.crate_name == "proc-macro2");
+        assert!(pm2.is_some(), "proc-macro2 not found");
+        let pm2 = pm2.unwrap();
+        assert!(
+            pm2.resolved_default_features
+                .contains(&"proc-macro".to_string()),
+            "proc-macro2 should have 'proc-macro' feature, got: {:?}",
+            pm2.resolved_default_features
+        );
     }
 }

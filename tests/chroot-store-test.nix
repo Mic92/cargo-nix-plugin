@@ -12,7 +12,7 @@
 {
   pkgs,
   plugin,
-  wrapperLib,
+  pluginSrc,
   sampleProject,
   nix,
 }:
@@ -31,7 +31,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
       jq = pkgs.jq;
       stdenv = pkgs.stdenv;
       sampleProject = sampleProject;
-      wrapperLib = wrapperLib;
+      pluginSrc = pluginSrc;
       nixpkgs = pkgs.path;
     };
   }
@@ -72,7 +72,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
             cargo = builtins.storePath ${pkgs.cargo};
             jq = builtins.storePath ${pkgs.jq};
           };
-        in (import ${wrapperLib} {
+        in (import ${pluginSrc}/lib {
           inherit pkgs;
           src = ${sampleProject};
           buildRustCrateForPkgs = _: pinnedBuildRustCrate;

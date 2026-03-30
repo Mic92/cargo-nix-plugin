@@ -3,4 +3,6 @@ pub mod dep_filter;
 pub mod feature_resolve;
 pub mod ffi;
 pub mod lockfile;
+pub mod lockfile_resolve;
+pub mod registry;
 pub mod resolve;

@@ -1,6 +1,6 @@
 # Nix wrapper that connects the cargo-nix-plugin output to buildRustCrate.
 #
-# Usage (automatic — shells out to cargo during eval):
+# Usage (lockfile resolve):
 #   let
 #     cargoNix = import ./lib {
 #       inherit pkgs;
@@ -8,7 +8,7 @@
 #     };
 #   in cargoNix.workspaceMembers
 #
-# Usage (explicit — pure, no subprocess):
+# Usage (explicit metadata — pre-generated cargo metadata JSON):
 #   let
 #     cargoNix = import ./lib {
 #       inherit pkgs;
@@ -28,41 +28,21 @@
   lib ? pkgs.lib,
   stdenv ? pkgs.stdenv,
   # Optional: output of `cargo metadata --format-version 1 --locked`
-  # If omitted, the plugin shells out to cargo automatically.
+  # When provided, uses the explicit metadata JSON instead of lockfile resolve.
   metadata ? null,
-  # Optional: contents of Cargo.lock (required when metadata is provided)
-  # If omitted with metadata=null, read from src/Cargo.lock automatically.
+  # Contents of Cargo.lock (required when metadata is provided)
   cargoLock ? null,
   # Required: workspace source root (used for buildRustCrate src)
   src ? null,
-  # Optional: path to Cargo.toml for cargo metadata subprocess.
-  # Defaults to "${src}/Cargo.toml" which forces src into the store.
-  # Set this to a real filesystem path (e.g. /path/to/Cargo.toml) when
-  # building into a chroot store (--store), since eval-time subprocess
-  # access needs a host-accessible path, not a chroot store path.
-  manifestPath ? null,
-  # Optional: extra `--config` arguments for the cargo metadata subprocess.
-  # Each entry is passed as `--config <value>`; cargo accepts both
-  # `KEY=VALUE` strings and paths to config.toml files. Use this to
-  # declare private registries when `.cargo/config.toml` isn't reachable
-  # from the manifest directory (e.g. store-path `src` without `.cargo/`
-  # in the fileset):
-  #
-  #   cargoConfig = [ "registries.my-private.index=\"sparse+https://…\"" ];
-  #
-  cargoConfig ? [ ],
-  # Optional: function to create buildRustCrate for a given pkgs
-  buildRustCrateForPkgs ? pkgs: pkgs.buildRustCrate,
+  # Optional: features to enable on the root package.
+  rootFeatures ? [ ],
+  # Optional: disable default features on root packages.
+  noDefaultFeatures ? false,
+
   # Optional: crate overrides
   # If omitted, the default crate overrides from nixpkgs will be used
   crateOverrides ? null,
-  # Optional: features to enable on the root package (`--features`).
-  # Empty means cargo's default behavior (default features unless
-  # `noDefaultFeatures = true`). Only applies in subprocess mode; in
-  # explicit mode the metadata JSON already has features resolved.
-  rootFeatures ? [ ],
-  # Optional: pass `--no-default-features` to the metadata subprocess.
-  noDefaultFeatures ? false,
+
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
   # Optional: function from workspace-relative path (string) to src for
@@ -87,6 +67,10 @@
   extraRegistries ? { },
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
+
+  # Optional: path to CARGO_HOME for registry index lookup in lockfile
+  # resolve mode. Defaults to $CARGO_HOME or ~/.cargo.
+  cargoHome ? null,
 }:
 
 let
@@ -154,9 +138,13 @@ let
 
   resolvedTarget = if target != null then target else defaultTarget;
 
-  # Call the plugin builtin — auto-detect mode based on metadata presence
-  effectiveManifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
+  # Build-time binary for auto-detecting edition/proc-macro from Cargo.toml.
+  cargoTomlInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
 
+  buildRustCrateForPkgs =
+    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit cargoTomlInfo; };
+
+  # Call the plugin builtin — auto-detect mode based on metadata presence
   resolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
@@ -169,9 +157,9 @@ let
         }
       else
         {
-          manifestPath = effectiveManifestPath;
-          inherit cargoConfig;
+          manifestPath = "${src}/Cargo.toml";
         }
+        // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
   );
 
@@ -311,14 +299,21 @@ let
       {
         crateName = crateInfo.crateName;
         version = crateInfo.version;
-        edition = crateInfo.edition or "2021";
         sha256 = crateInfo.sha256 or "";
         src = crateSrc;
         authors = crateInfo.authors or [ ];
         inherit dependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
-        crateBin = if libOnly then [ ] else crateInfo.crateBin or [ ];
+      }
+      # Only pass crateBin when we need to: lib-only (to suppress bins) or
+      # when metadata provides explicit bin targets. When omitted,
+      # buildRustCrate auto-detects from src/main.rs and src/bin/*.
+      // lib.optionalAttrs (libOnly || (crateInfo ? crateBin && crateInfo.crateBin != [ ])) {
+        crateBin = if libOnly then [ ] else crateInfo.crateBin;
+      }
+      // lib.optionalAttrs ((crateInfo.edition or "") != "") {
+        edition = crateInfo.edition;
       }
       // lib.optionalAttrs ((crateInfo.build or null) != null) {
         build = crateInfo.build;

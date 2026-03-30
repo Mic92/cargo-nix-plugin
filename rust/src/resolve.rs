@@ -79,7 +79,7 @@ pub enum SourceInfo {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinTarget {
     pub name: String,
     pub path: String,
