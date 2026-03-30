@@ -556,6 +556,7 @@ mod tests {
             endian: "little".to_string(),
             unix: true,
             windows: false,
+            extra_cfgs: vec![],
         }
     }
 

@@ -16,6 +16,12 @@ pub struct TargetDescription {
     pub endian: String,
     pub unix: bool,
     pub windows: bool,
+    /// Additional bare cfg names (e.g. `my_platform`) to set during
+    /// `[target.'cfg(...)']` dependency resolution — equivalent to
+    /// `RUSTFLAGS="--cfg foo"` at cargo-metadata time. Pair with passing the
+    /// same `--cfg` via rustc opts so `#[cfg(foo)]` in source compiles too.
+    #[serde(default)]
+    pub extra_cfgs: Vec<String>,
 }
 
 /// Create a non-raw `Ident` from a string.
@@ -45,6 +51,9 @@ pub fn target_cfgs(target: &TargetDescription) -> Vec<Cfg> {
     if target.windows {
         cfgs.push(Cfg::Name(ident("windows")));
     }
+    for name in &target.extra_cfgs {
+        cfgs.push(Cfg::Name(ident(name)));
+    }
     cfgs
 }
 
@@ -71,6 +80,7 @@ mod tests {
             endian: "little".to_string(),
             unix: true,
             windows: false,
+            extra_cfgs: vec![],
         }
     }
 
@@ -161,5 +171,32 @@ mod tests {
     fn cfg_target_vendor() {
         let platform = Platform::from_str("cfg(target_vendor = \"unknown\")").unwrap();
         assert!(matches_target(&platform, &linux_x86_64()));
+    }
+
+    #[test]
+    fn extra_cfg_matches() {
+        let target = TargetDescription {
+            extra_cfgs: vec!["my_platform".to_string()],
+            ..linux_x86_64()
+        };
+        let platform = Platform::from_str("cfg(my_platform)").unwrap();
+        assert!(matches_target(&platform, &target));
+    }
+
+    #[test]
+    fn extra_cfg_absent_does_not_match() {
+        let platform = Platform::from_str("cfg(my_platform)").unwrap();
+        assert!(!matches_target(&platform, &linux_x86_64()));
+    }
+
+    #[test]
+    fn extra_cfg_composes_with_all() {
+        let target = TargetDescription {
+            extra_cfgs: vec!["my_platform".to_string()],
+            ..linux_x86_64()
+        };
+        let platform =
+            Platform::from_str("cfg(all(target_os = \"linux\", my_platform))").unwrap();
+        assert!(matches_target(&platform, &target));
     }
 }

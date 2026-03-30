@@ -201,6 +201,17 @@ target = {
 
 The wrapper auto-detects this from `stdenv.hostPlatform`.
 
+To set custom cfgs during `[target.'cfg(...)']` dependency resolution
+(equivalent to `RUSTFLAGS="--cfg foo"` at cargo-metadata time), pass
+`extraCfgs`:
+
+```nix
+extraCfgs = [ "my_platform" ];
+```
+
+Pair with passing the same `--cfg` via rustc opts so `#[cfg(foo)]` in source
+compiles too — `extraCfgs` only affects dependency resolution.
+
 ## Compatibility
 
 - **Nix**: The plugin must be loaded by the **same Nix version** it was compiled
