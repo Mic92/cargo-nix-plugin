@@ -19,7 +19,7 @@ let
     SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     outputHashAlgo = "sha256";
     outputHashMode = "recursive";
-    outputHash = "sha256-7NpVKKeB6A/U+XTApbrHxLsXHwEReLFGhNSuL0md8/I=";
+    outputHash = "sha256-2bqnTR+UyILKWwXnwFcp2H+20nmS6fKT+5OmGChFMa0=";
     buildPhase = ''
       export CARGO_HOME=$out
       # `cargo metadata` populates the sparse index cache (.cache directory)

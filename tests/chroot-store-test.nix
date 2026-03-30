@@ -17,6 +17,9 @@
   nix,
 }:
 
+let
+  buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
+in
 pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
   {
     nativeBuildInputs = [ nix ];
@@ -28,8 +31,8 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     buildClosureSeed = pkgs.linkFarm "chroot-store-seed" {
       rustc = pkgs.rustc;
       cargo = pkgs.cargo;
-      jq = pkgs.jq;
       stdenv = pkgs.stdenv;
+      buildRustCrateBin = buildRustCrateBin;
       sampleProject = sampleProject;
       pluginSrc = pluginSrc;
       nixpkgs = pkgs.path;
@@ -54,11 +57,11 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     # build needs so a single copy covers it.
     ${nix}/bin/nix copy --no-check-sigs --to "local?root=$CHROOT" "$buildClosureSeed"
 
-    # Pin the inner buildRustCrate to the exact store paths copied above so
+    # Pin the inner buildRustCrate to use exact store paths copied above so
     # the derivations match what's in the chroot store — `import pkgs.path`
     # and the flake's pkgs can derive different output paths for the same
-    # package, and a near-miss means rebuilding jq (and perl, and autoconf)
-    # from source. Empty substituters so we never attempt cache.nixos.org.
+    # package, and a near-miss means rebuilding from source.
+    # Empty substituters so we never attempt cache.nixos.org.
     ${nix}/bin/nix build \
       --store "$CHROOT" \
       --substituters "" \
@@ -67,15 +70,9 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
       --expr '
         let
           pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
-          pinnedBuildRustCrate = pkgs.buildRustCrate.override {
-            rustc = builtins.storePath ${pkgs.rustc};
-            cargo = builtins.storePath ${pkgs.cargo};
-            jq = builtins.storePath ${pkgs.jq};
-          };
         in (import ${pluginSrc}/lib {
           inherit pkgs;
           src = ${sampleProject};
-          buildRustCrateForPkgs = _: pinnedBuildRustCrate;
         }).workspaceMembers.nodeps-bin.build
       '
 

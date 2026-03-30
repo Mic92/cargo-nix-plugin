@@ -54,6 +54,17 @@
           enableSanitizers = true;
         };
 
+      # Filtered source: only lib/ and nix/ needed by tests (avoids
+      # rebuilding when unrelated files like cpp/ change).
+      builderSrc = nixpkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = nixpkgs.lib.fileset.unions [
+          ./lib
+          ./nix
+          ./builder
+        ];
+      };
+
       # Generate test derivations for a given nix version.
       mkTests =
         pkgs: plugin: nix:
@@ -66,24 +77,24 @@
           torture-test = pkgs.callPackage ./tests/torture-test.nix {
             inherit plugin nix;
             testFixtures = ./rust/tests/fixtures;
-            pluginSrc = ./.;
+            pluginSrc = builderSrc;
           };
 
           sample-build-test = pkgs.callPackage ./tests/sample-build-test.nix {
             inherit plugin nix;
-            pluginSrc = ./.;
+            pluginSrc = builderSrc;
             sampleProject = ./tests/sample-project;
           };
 
           offline-build-test = pkgs.callPackage ./tests/offline-build-test.nix {
             inherit plugin nix;
-            pluginSrc = ./.;
+            pluginSrc = builderSrc;
             sampleProject = ./tests/sample-project;
           };
 
           chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
             inherit plugin nix;
-            pluginSrc = ./.;
+            pluginSrc = builderSrc;
             # nodeps variant: cargo metadata inside the sandbox can't reach
             # crates.io, and the remap logic under test doesn't need it to.
             sampleProject = ./tests/sample-project-nodeps;
@@ -123,7 +134,7 @@
         {
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
-          read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
+          build-rust-crate = pkgs.callPackage ./nix/build-rust-crate-bin.nix { };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
           (perVersionPackages linuxPkgs)

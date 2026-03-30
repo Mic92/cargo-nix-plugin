@@ -1,0 +1,10 @@
+[package]
+name = "build-rust-crate"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+toml = { version = "1.0", default-features = false, features = ["parse", "serde"] }

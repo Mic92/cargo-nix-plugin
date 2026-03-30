@@ -49,6 +49,9 @@
   # local crates. Default slices into the monolithic `src`. Override to
   # provide narrow per-crate sources (avoids hashing the full workspace).
   localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
+  # Optional: path to Cargo.toml manifest (string). When provided,
+  # used for lockfile resolve instead of ${src}/Cargo.toml.
+  manifestPath ? null,
   # Optional: alternative registry configuration. Maps the index URL
   # (as cargo metadata / Cargo.lock reports it, including the `sparse+`
   # or `registry+` scheme prefix) to { dl, fetchurl? }.
@@ -67,6 +70,17 @@
   extraRegistries ? { },
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
+
+  # Optional: override arguments passed to build-rust-crate/default.nix.
+  # These let callers customize the Rust toolchain, codegen settings, etc.
+  # without replacing the entire buildRustCrate implementation.
+  #   rustc/cargo: override the Rust compiler/cargo (e.g. nightly toolchain)
+  #   defaultCodegenUnits: codegen parallelism (default: 1, cargo default: 16)
+  #   defaultMold: mold package for linking (null to disable, Linux-only default)
+  #   extraBuildRustCrateArgs: attrset merged into every buildRustCrate call
+  #     (e.g. { extraRustcOpts = [...]; nativeBuildInputs = [...]; })
+  buildRustCrateOverrideArgs ? { },
+  extraBuildRustCrateArgs ? { },
 
   # Optional: path to CARGO_HOME for registry index lookup in lockfile
   # resolve mode. Defaults to $CARGO_HOME or ~/.cargo.
@@ -138,11 +152,21 @@ let
 
   resolvedTarget = if target != null then target else defaultTarget;
 
-  # Build-time binary for auto-detecting edition/proc-macro from Cargo.toml.
-  cargoTomlInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
+  buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix {};
 
   buildRustCrateForPkgs =
-    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit cargoTomlInfo; };
+    cratePkgs:
+    let
+      base = cratePkgs.callPackage ../nix/build-rust-crate (
+        { inherit buildRustCrateBin; } // buildRustCrateOverrideArgs
+      );
+    in
+    if extraBuildRustCrateArgs == { } then base
+    else args: base (args // extraBuildRustCrateArgs // {
+      extraRustcOpts = (args.extraRustcOpts or []) ++ (extraBuildRustCrateArgs.extraRustcOpts or []);
+      nativeBuildInputs = (args.nativeBuildInputs or []) ++ (extraBuildRustCrateArgs.nativeBuildInputs or []);
+      buildInputs = (args.buildInputs or []) ++ (extraBuildRustCrateArgs.buildInputs or []);
+    });
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
   resolved = builtins.resolveCargoWorkspace (
@@ -157,7 +181,7 @@ let
         }
       else
         {
-          manifestPath = "${src}/Cargo.toml";
+          manifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
         }
         // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
