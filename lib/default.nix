@@ -65,6 +65,11 @@
   noDefaultFeatures ? false,
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
+  # Optional: additional bare cfg names (e.g. "my_platform") to set during
+  # [target.'cfg(...)'] dependency resolution — equivalent to
+  # RUSTFLAGS="--cfg foo" at cargo-metadata time. Pair with passing the same
+  # --cfg via rustc opts so #[cfg(foo)] in source compiles too.
+  extraCfgs ? [ ],
   # Optional: function from workspace-relative path (string) to src for
   # local crates. Default slices into the monolithic `src`. Override to
   # provide narrow per-crate sources (avoids hashing the full workspace).
@@ -152,7 +157,8 @@ let
     windows = platform.isWindows;
   };
 
-  resolvedTarget = if target != null then target else defaultTarget;
+  resolvedTarget =
+    (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
   effectiveManifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
