@@ -201,6 +201,8 @@ target = {
 
 The wrapper auto-detects this from `stdenv.hostPlatform`.
 
+## Custom cfgs
+
 To set custom cfgs during `[target.'cfg(...)']` dependency resolution
 (equivalent to `RUSTFLAGS="--cfg foo"` at cargo-metadata time), pass
 `extraCfgs`:

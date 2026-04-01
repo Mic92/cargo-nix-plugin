@@ -4,7 +4,7 @@
   pkgs,
   plugin,
   testFixtures,
-  wrapperLib,
+  pluginSrc,
   nix,
 }:
 
@@ -28,7 +28,7 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
     wrapper_expr='
       let
         pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
-      in import ${wrapperLib} {
+      in import ${pluginSrc}/lib {
         inherit pkgs;
         metadata = builtins.readFile "${testFixtures}/metadata.json";
         cargoLock = builtins.readFile "${testFixtures}/Cargo.lock";
@@ -51,7 +51,7 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
     result=$(nix_eval '
       let
         pkgs = import ${pkgs.path} { localSystem = "x86_64-linux"; crossSystem = "aarch64-linux"; };
-        cargoNix = import ${wrapperLib} {
+        cargoNix = import ${pluginSrc}/lib {
           inherit pkgs;
           metadata = builtins.readFile "${testFixtures}/metadata.json";
           cargoLock = builtins.readFile "${testFixtures}/Cargo.lock";

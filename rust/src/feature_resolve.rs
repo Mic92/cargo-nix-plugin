@@ -24,13 +24,29 @@ pub struct DepFeatureInfo {
 
 /// Resolve features for all packages in the graph.
 ///
+/// Result of feature resolution: resolved features and active optional deps.
+pub struct FeatureResolution {
+    /// package_id -> set of resolved features
+    pub features: HashMap<String, BTreeSet<String>>,
+    /// (package_id, local_dep_name) pairs for activated optional deps
+    pub active_optional_deps: std::collections::HashSet<(String, String)>,
+}
+
 /// `root_packages` are the workspace members with their initially requested features.
-/// Returns a map of package_id -> set of resolved features.
+/// Returns resolved features and active optional deps.
 pub fn resolve_features(
     packages: &HashMap<String, PackageFeatureInfo>,
     root_packages: &[(String, Vec<String>)],
-) -> HashMap<String, BTreeSet<String>> {
+) -> FeatureResolution {
     let mut resolved: HashMap<String, BTreeSet<String>> = HashMap::new();
+
+    // Which optional deps are active, keyed by (package_id, local_dep_name).
+    // This is *not* the same as the feature set: `dep:foo` activates the
+    // dep without creating a feature named "foo", whereas legacy `["foo"]`
+    // does both. Cargo reference: "Using dep: [...] does not implicitly
+    // create a feature of the same name".
+    let mut active_optional: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
 
     // Queue of (package_id, features_to_add)
     let mut queue: Vec<(String, Vec<String>)> = Vec::new();
@@ -45,27 +61,37 @@ pub fn resolve_features(
             continue;
         };
 
-        // Expand features for this package
-        let expanded = expand_features(&pkg.features, &new_features, &pkg.optional_deps);
+        // Expand features for this package.
+        let (expanded, activated_deps) =
+            expand_features(&pkg.features, &new_features, &pkg.optional_deps);
 
-        // Check if we're adding anything new
+        // Merge both state stores. Track first visit separately from
+        // "no delta": a crate with zero features (everything dropped by
+        // is_valid_feature, e.g. seeded with ["default"] when no default
+        // exists) still needs its deps propagated once. The old code
+        // masked this by letting expand_features keep the spurious
+        // "default", which made added_new true on every first visit.
+        let first_visit = !resolved.contains_key(&pkg_id);
         let entry = resolved.entry(pkg_id.clone()).or_default();
         let mut added_new = false;
         for feat in &expanded {
-            if entry.insert(feat.clone()) {
-                added_new = true;
-            }
+            added_new |= entry.insert(feat.clone());
+        }
+        for dep in &activated_deps {
+            added_new |= active_optional.insert((pkg_id.clone(), dep.clone()));
         }
 
-        if !added_new && resolved.contains_key(&pkg_id) {
+        if !added_new && !first_visit {
             continue;
         }
 
-        // Process dependencies: propagate features
+        // Propagate to dependencies.
         let current_features = resolved.get(&pkg_id).cloned().unwrap_or_default();
         for dep in &pkg.dependencies {
-            // Skip optional deps that are not enabled
-            if pkg.optional_deps.contains(&dep.name) && !current_features.contains(&dep.name) {
+            // Skip optional deps nothing activated.
+            if pkg.optional_deps.contains(&dep.name)
+                && !active_optional.contains(&(pkg_id.clone(), dep.name.clone()))
+            {
                 continue;
             }
 
@@ -74,12 +100,16 @@ pub fn resolve_features(
                 dep_features.push("default".to_string());
             }
 
-            // Check for dep/feat forwarding: if this package has a feature
-            // that forwards to a dep feature (e.g. "x" enables "dep_name/feat")
+            // dep/feat forwarding. Weak `dep?/feat` is safe to match here:
+            // the gate above already ensured dep is enabled.
+            let strong = format!("{}/", dep.name);
+            let weak = format!("{}?/", dep.name);
             for feat in &current_features {
                 if let Some(rules) = pkg.features.get(feat.as_str()) {
                     for rule in rules {
-                        if let Some(rest) = rule.strip_prefix(&format!("{}/", dep.name)) {
+                        if let Some(rest) =
+                            rule.strip_prefix(&strong).or_else(|| rule.strip_prefix(&weak))
+                        {
                             dep_features.push(rest.to_string());
                         }
                     }
@@ -90,55 +120,102 @@ pub fn resolve_features(
         }
     }
 
-    resolved
+    FeatureResolution {
+        features: resolved,
+        active_optional_deps: active_optional,
+    }
 }
 
 /// Expand a set of feature names for a single package, following feature rules.
-/// Returns the full set of enabled features (including transitively enabled ones).
+///
+/// Returns (enabled features, activated optional deps). These are distinct
+/// sets — `dep:foo` activates optional dep `foo` WITHOUT creating a feature
+/// named `foo`, whereas legacy `["foo"]` does both.
+///
+/// See https://doc.rust-lang.org/cargo/reference/features.html#optional-dependencies
 fn expand_features(
     features_map: &BTreeMap<String, Vec<String>>,
     initial: &[String],
     optional_deps: &BTreeSet<String>,
-) -> BTreeSet<String> {
-    let mut enabled = BTreeSet::new();
-    let mut work: Vec<String> = initial.to_vec();
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    // Cargo semantics for optional dep X and the name "X" as a feature:
+    //
+    // If `dep:X` appears ANYWHERE in the features map, cargo suppresses
+    // the implicit feature — `X` is then ONLY a valid feature name if
+    // the manifest explicitly defines `X = [...]`. Otherwise (legacy),
+    // `X` is always a valid feature that both activates the dep and
+    // sets `--cfg feature="X"`.
+    //
+    // Concretely: whether "X" appears in the resolved feature set depends
+    // entirely on whether "X" is a *valid feature name* (either legacy
+    // implicit or explicit key in the map). Non-weak `X/feat` always
+    // pushes "X" to expand; if it's not a valid feature it's just dropped.
+    //
+    //   legacy (no dep:X anywhere):     X is implicit feature → valid
+    //   dep:X present, no `X = [..]`:   X is NOT a valid feature
+    //   dep:X present, `X = [..]` too:  X is the explicit feature → valid
+    //
+    // Verified empirically against cargo; see tests below for each case.
+    let dep_prefix_used: BTreeSet<&str> = features_map
+        .values()
+        .flatten()
+        .filter_map(|r| r.strip_prefix("dep:"))
+        .collect();
+    let is_valid_feature = |name: &str| -> bool {
+        features_map.contains_key(name)
+            || (optional_deps.contains(name) && !dep_prefix_used.contains(name))
+    };
 
-    while let Some(feat) = work.pop() {
-        if !enabled.insert(feat.clone()) {
-            continue; // already processed
+    let mut enabled = BTreeSet::new();
+    let mut active_deps = BTreeSet::new();
+    let mut work: Vec<String> = initial.to_vec();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    while let Some(item) = work.pop() {
+        if !seen.insert(item.clone()) {
+            continue;
         }
 
-        // Handle "dep:name" syntax — activates the optional dep as a feature
-        if let Some(dep_name) = feat.strip_prefix("dep:") {
-            if !enabled.insert(dep_name.to_string()) {
-                continue;
-            }
-            // Also expand the dep name if it's in the features map
-            if let Some(rules) = features_map.get(dep_name) {
-                work.extend(rules.iter().cloned());
+        // `dep:X` activates the optional dep. Never creates a self-feature.
+        if let Some(dep_name) = item.strip_prefix("dep:") {
+            active_deps.insert(dep_name.to_string());
+            continue;
+        }
+
+        // `X/feat` (non-weak) on an optional dep activates the dep and
+        // pushes "X" to expand as a feature — whether it sticks depends
+        // on is_valid_feature above. `X?/feat` activates nothing here.
+        if let Some((lhs, _)) = item.split_once('/') {
+            let (dep, weak) = match lhs.strip_suffix('?') {
+                Some(d) => (d, true),
+                None => (lhs, false),
+            };
+            if !weak && optional_deps.contains(dep) {
+                active_deps.insert(dep.to_string());
+                work.push(dep.to_string());
             }
             continue;
         }
 
-        // If this feature name matches an optional dep, it implicitly enables it
-        if optional_deps.contains(&feat) {
-            // The dep is enabled; no further expansion needed for the dep name itself
-            // unless there are feature rules for it
+        // Plain feature name. Only sticks if valid; otherwise it was a
+        // dangling reference to a suppressed implicit feature.
+        if !is_valid_feature(&item) {
+            continue;
+        }
+        enabled.insert(item.clone());
+
+        // Legacy implicit feature activates the dep.
+        if optional_deps.contains(&item) && !dep_prefix_used.contains(item.as_str()) {
+            active_deps.insert(item.clone());
         }
 
-        // Follow feature rules
-        if let Some(rules) = features_map.get(&feat) {
-            for rule in rules {
-                // Skip dep/feat forwarding here — handled during dependency propagation
-                if rule.contains('/') && !rule.starts_with("dep:") {
-                    continue;
-                }
-                work.push(rule.clone());
-            }
+        // Follow feature rules.
+        if let Some(rules) = features_map.get(&item) {
+            work.extend(rules.iter().cloned());
         }
     }
 
-    enabled
+    (enabled, active_deps)
 }
 
 #[cfg(test)]
@@ -180,8 +257,8 @@ mod tests {
                 &[],
             ),
         );
-        let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
-        let feats = result.get("A").unwrap();
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let feats = result_raw.features.get("A").unwrap();
         assert!(feats.contains("default"));
         assert!(feats.contains("foo"));
         assert!(feats.contains("bar"));
@@ -204,21 +281,23 @@ mod tests {
             "C".to_string(),
             make_package(&[("default", &[]), ("x", &[]), ("y", &[])], &[], &[]),
         );
-        let result = resolve_features(
+        let result_raw = resolve_features(
             &packages,
             &[
                 ("A".to_string(), vec!["default".to_string()]),
                 ("B".to_string(), vec!["default".to_string()]),
             ],
         );
-        let c_feats = result.get("C").unwrap();
+        let c_feats = result_raw.features.get("C").unwrap();
         assert!(c_feats.contains("x"), "C missing feature x: {:?}", c_feats);
         assert!(c_feats.contains("y"), "C missing feature y: {:?}", c_feats);
     }
 
+    /// `dep:foo` activates the dep but does NOT create feature "foo".
+    /// Verified: cargo with `use-foo = ["dep:foo"]` emits only
+    /// ["default", "use-foo"] — no "foo".
     #[test]
-    fn optional_dep_activation_via_dep_syntax() {
-        // Feature "use-foo" enables "dep:foo" (optional dep)
+    fn dep_syntax_activates_without_self_feature() {
         let mut packages = HashMap::new();
         packages.insert(
             "A".to_string(),
@@ -232,17 +311,57 @@ mod tests {
             "foo-pkg".to_string(),
             make_package(&[("default", &[])], &[], &[]),
         );
-        let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
-        let a_feats = result.get("A").unwrap();
-        assert!(
-            a_feats.contains("use-foo"),
-            "A missing use-foo: {:?}",
-            a_feats
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let a = result_raw.features.get("A").unwrap();
+        assert!(a.contains("use-foo"));
+        assert!(!a.contains("foo"), "dep: leaked self-feature: {a:?}");
+        // But the dep itself was reached.
+        assert!(result_raw.features.contains_key("foo-pkg"));
+    }
+
+    /// Legacy optional dep (no `dep:` anywhere) DOES create an implicit
+    /// self-feature when activated by name. Verified: cargo emits "foo".
+    #[test]
+    fn legacy_optional_creates_implicit_feature() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "A".to_string(),
+            make_package(
+                // no dep: anywhere — "foo" is the implicit feature
+                &[("default", &["use-foo"]), ("use-foo", &["foo"])],
+                &[("foo", "foo-pkg", true, &[])],
+                &["foo"],
+            ),
         );
-        // The optional dep "foo" should be activated
-        assert!(a_feats.contains("foo"), "A missing foo: {:?}", a_feats);
-        // foo-pkg should have been reached and resolved
-        assert!(result.contains_key("foo-pkg"));
+        packages.insert(
+            "foo-pkg".to_string(),
+            make_package(&[("default", &[])], &[], &[]),
+        );
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let a = result_raw.features.get("A").unwrap();
+        assert!(a.contains("foo"), "legacy implicit missing: {a:?}");
+        assert!(result_raw.features.contains_key("foo-pkg"));
+    }
+
+    /// `dep:X` + non-weak `X/feat` + NO explicit `X = [..]` → no "X" in
+    /// features (suppressed). Verified: cargo emits only ["b-std", "default"].
+    #[test]
+    fn dep_prefix_suppresses_implicit_even_via_non_weak() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "A".to_string(),
+            make_package(
+                &[("default", &["b-std"]), ("b-std", &["dep:b", "b/std"])],
+                &[("b", "B", false, &[])],
+                &["b"],
+            ),
+        );
+        packages.insert("B".to_string(), make_package(&[("std", &[])], &[], &[]));
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let a = result_raw.features.get("A").unwrap();
+        assert!(!a.contains("b"), "suppressed implicit leaked: {a:?}");
+        assert!(result_raw.features.get("B").unwrap().contains("std"));
     }
 
     #[test]
@@ -258,11 +377,159 @@ mod tests {
             make_package(&[("x", &["c/y"])], &[("c", "C", false, &[])], &[]),
         );
         packages.insert("C".to_string(), make_package(&[("y", &[])], &[], &[]));
-        let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
-        let b_feats = result.get("B").unwrap();
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let b_feats = result_raw.features.get("B").unwrap();
         assert!(b_feats.contains("x"), "B missing x: {:?}", b_feats);
-        let c_feats = result.get("C").unwrap();
+        let c_feats = result_raw.features.get("C").unwrap();
         assert!(c_feats.contains("y"), "C missing y: {:?}", c_feats);
+    }
+
+    /// num-rational's `num-bigint-std = ["num-bigint/std"]`.
+    ///
+    /// `num-bigint` is an optional dep with an EXPLICIT same-named feature
+    /// `num-bigint = ["dep:num-bigint"]`. Non-weak `num-bigint/std` activates
+    /// the dep AND pushes "num-bigint" to expand — which is a valid feature
+    /// (explicit key in the map), so it sticks and its rule `dep:num-bigint`
+    /// fires too.
+    ///
+    /// Verified against `cargo metadata`: num-rational with
+    /// `num-bigint-std` + `std` resolves to `["num-bigint", "num-bigint-std", "std"]`.
+    #[test]
+    fn non_weak_enables_explicit_same_named_feature() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "num-rational".to_string(),
+            make_package(
+                &[
+                    ("num-bigint", &["dep:num-bigint"]),
+                    ("num-bigint-std", &["num-bigint/std"]),
+                    ("std", &["num-bigint?/std"]),
+                ],
+                &[("num-bigint", "num-bigint-pkg", false, &[])],
+                &["num-bigint"],
+            ),
+        );
+        packages.insert(
+            "num-bigint-pkg".to_string(),
+            make_package(&[("std", &[])], &[], &[]),
+        );
+
+        let result_raw = resolve_features(
+            &packages,
+            &[(
+                "num-rational".to_string(),
+                vec!["num-bigint-std".to_string(), "std".to_string()],
+            )],
+        );
+
+        let feats = result_raw.features.get("num-rational").unwrap();
+        assert!(feats.contains("num-bigint-std"));
+        assert!(feats.contains("std"));
+        assert!(
+            feats.contains("num-bigint"),
+            "non-weak dep/feat must enable explicit feature 'num-bigint': {feats:?}"
+        );
+        // And the dep itself got std.
+        assert!(result_raw.features.get("num-bigint-pkg").unwrap().contains("std"));
+    }
+
+    /// Weak `dep?/feat` must NOT activate the optional dep or its
+    /// self-feature — it only forwards `feat` if something else already
+    /// enabled the dep.
+    #[test]
+    fn weak_dep_feature_does_not_enable_self_feature() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "A".to_string(),
+            make_package(
+                &[("std", &["opt?/std"])],
+                &[("opt", "opt-pkg", false, &[])],
+                &["opt"],
+            ),
+        );
+        packages.insert(
+            "opt-pkg".to_string(),
+            make_package(&[("std", &[])], &[], &[]),
+        );
+
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["std".to_string()])]);
+
+        let feats = result_raw.features.get("A").unwrap();
+        assert!(feats.contains("std"));
+        assert!(
+            !feats.contains("opt"),
+            "weak dep?/feat leaked self-feature: {feats:?}"
+        );
+        // opt-pkg should not even be in the graph.
+        assert!(!result_raw.features.contains_key("opt-pkg"));
+    }
+
+    /// Regression: rustls `[dependencies.webpki] package = "rustls-webpki"`.
+    /// Feature rules use the local dep name (`"webpki/ring"`), not the
+    /// actual crate name. DepFeatureInfo.name must carry the rename so
+    /// forwarding matches.
+    #[test]
+    fn dep_feature_forwarding_uses_rename() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "rustls".to_string(),
+            make_package(
+                // rule references "webpki" (local name), not "rustls-webpki"
+                &[("ring", &["webpki/ring"])],
+                // dep.name must be the local rename, not the crate name
+                &[("webpki", "rustls-webpki", false, &["alloc"])],
+                &[],
+            ),
+        );
+        packages.insert(
+            "rustls-webpki".to_string(),
+            make_package(&[("alloc", &[]), ("ring", &[])], &[], &[]),
+        );
+
+        let result_raw = resolve_features(
+            &packages,
+            &[("rustls".to_string(), vec!["ring".to_string()])],
+        );
+
+        let webpki = result_raw.features.get("rustls-webpki").unwrap();
+        assert!(webpki.contains("alloc"));
+        assert!(
+            webpki.contains("ring"),
+            "dep/feat forward dropped under rename: {webpki:?}"
+        );
+    }
+
+    /// Weak `dep?/feat` *does* forward once the dep is independently enabled.
+    /// This is num-rational's `std = ["num-bigint?/std"]`: if num-bigint-std
+    /// activates the dep, then std's weak rule must forward std to it.
+    #[test]
+    fn weak_dep_feature_forwards_when_dep_enabled() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "A".to_string(),
+            make_package(
+                &[
+                    ("use-opt", &["dep:opt"]),
+                    ("std", &["opt?/std"]),
+                ],
+                &[("opt", "opt-pkg", false, &[])],
+                &["opt"],
+            ),
+        );
+        packages.insert(
+            "opt-pkg".to_string(),
+            make_package(&[("std", &[])], &[], &[]),
+        );
+
+        let result_raw = resolve_features(
+            &packages,
+            &[("A".to_string(), vec!["use-opt".to_string(), "std".to_string()])],
+        );
+
+        // use-opt enabled the dep; std's weak rule must now forward.
+        let opt = result_raw.features.get("opt-pkg").expect("opt-pkg in graph");
+        assert!(opt.contains("std"), "weak forward dropped: {opt:?}");
     }
 
     #[test]
@@ -278,13 +545,93 @@ mod tests {
             "B".to_string(),
             make_package(&[("default", &["net"]), ("net", &[])], &[], &[]),
         );
-        let result = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
-        let b_feats = result.get("B").unwrap();
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let b_feats = result_raw.features.get("B").unwrap();
         assert!(
             b_feats.contains("default"),
             "B missing default: {:?}",
             b_feats
         );
         assert!(b_feats.contains("net"), "B missing net: {:?}", b_feats);
+    }
+
+    /// A featureless crate in the middle of the graph must still propagate
+    /// to its deps. Regression: seeding a crate with ["default"] when it
+    /// has no `default` key yields expanded={} — the skip-unchanged check
+    /// was short-circuiting before the propagation loop, so its deps were
+    /// never visited.
+    ///
+    /// Real-world case: aws-sdk-ec2 → regex-lite. regex-lite requires std
+    /// (compile_error! otherwise) and gets it via default → [std, string].
+    /// aws-sdk-ec2 depends with plain default-features=true.
+    #[test]
+    fn featureless_middle_crate_propagates_to_deps() {
+        let mut packages = HashMap::new();
+        // Root has features; pulls middle with default-features=true.
+        packages.insert(
+            "root".to_string(),
+            make_package(
+                &[("default", &[])],
+                &[("middle", "middle", true, &[])],
+                &[],
+            ),
+        );
+        // Middle has NO feature keys at all. "default" is not valid here.
+        packages.insert(
+            "middle".to_string(),
+            make_package(&[], &[("leaf", "leaf", true, &[])], &[]),
+        );
+        // Leaf's std is gated on default — regex-lite's shape.
+        packages.insert(
+            "leaf".to_string(),
+            make_package(&[("default", &["std"]), ("std", &[])], &[], &[]),
+        );
+
+        let result_raw = resolve_features(
+            &packages,
+            &[("root".to_string(), vec!["default".to_string()])],
+        );
+
+        // Middle was visited, resolved to empty (correct per cargo).
+        assert_eq!(result_raw.features.get("middle"), Some(&BTreeSet::new()));
+        // Leaf was REACHED via middle and got default → std.
+        let leaf = result_raw.features.get("leaf").expect("leaf must be reached via middle");
+        assert!(leaf.contains("std"), "leaf missing std: {leaf:?}");
+    }
+
+    /// The other half: a crate with no features visited TWICE (from two
+    /// dependers) must not re-propagate. first_visit must be false on
+    /// the second pass even though the entry is still empty.
+    #[test]
+    fn featureless_crate_not_reprocessed_on_second_visit() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "a".to_string(),
+            make_package(&[("default", &[])], &[("m", "m", true, &[])], &[]),
+        );
+        packages.insert(
+            "b".to_string(),
+            make_package(&[("default", &[])], &[("m", "m", true, &[])], &[]),
+        );
+        packages.insert(
+            "m".to_string(),
+            make_package(&[], &[("leaf", "leaf", true, &[])], &[]),
+        );
+        packages.insert(
+            "leaf".to_string(),
+            make_package(&[("default", &["x"]), ("x", &[])], &[], &[]),
+        );
+
+        let result_raw = resolve_features(
+            &packages,
+            &[
+                ("a".to_string(), vec!["default".to_string()]),
+                ("b".to_string(), vec!["default".to_string()]),
+            ],
+        );
+        // m reached once is enough; leaf gets x.
+        assert!(result_raw.features.get("leaf").unwrap().contains("x"));
+        // Weak assertion but proves we didn't blow up or loop.
+        assert_eq!(result_raw.features.get("m"), Some(&BTreeSet::new()));
     }
 }

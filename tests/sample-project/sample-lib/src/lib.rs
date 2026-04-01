@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+// Regression: renamed dependency (my_http = { package = "http" }) must
+// be linked via --extern my_http=... so this import resolves.
+pub use my_http::StatusCode;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Greeting {
     pub message: String,

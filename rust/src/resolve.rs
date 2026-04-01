@@ -38,11 +38,15 @@ pub struct CrateInfo {
     pub features: BTreeMap<String, Vec<String>>,
     pub resolved_default_features: Vec<String>,
     pub proc_macro: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lib_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lib_name: Option<String>,
     pub crate_bin: Vec<BinTarget>,
     pub lib_crate_types: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<String>,
     pub authors: Vec<String>,
 }
@@ -56,6 +60,19 @@ pub struct DepInfo {
     pub rename: Option<String>,
     pub uses_default_features: bool,
     pub features: Vec<String>,
+    /// Whether this dep is optional. Not serialized — only used during
+    /// feature resolution to know which deps create an implicit self-feature
+    /// and which to skip when no feature activates them.
+    #[serde(skip, default)]
+    pub optional: bool,
+}
+
+impl DepInfo {
+    /// The local dep key as it appears in `[dependencies]` (rename if any,
+    /// else package name). Feature rules (`dep:X`, `X/feat`) reference this.
+    pub fn local_name(&self) -> &str {
+        self.rename.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -79,7 +96,7 @@ pub enum SourceInfo {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinTarget {
     pub name: String,
     pub path: String,
@@ -513,6 +530,7 @@ fn resolve_dependencies(
             rename,
             uses_default_features: dep.uses_default_features,
             features: dep.features.clone(),
+            optional: dep.optional,
         };
 
         match dep.kind {

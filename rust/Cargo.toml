@@ -14,5 +14,13 @@ toml = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["unbounded_depth"] }
 base64 = "0.22"
+tame-index = { version = "0.26", default-features = false }
+# Already pulled by tame-index; direct dep for VersionReq in lockfile disambiguation.
+semver = "1"
+# ureq for remote sparse index fetching — sync, no tokio/hyper.
+# webpki-roots bundles Mozilla certs so we don't depend on the system store.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+http = "1"
+netrc = "0.4"
 
 [dev-dependencies]
