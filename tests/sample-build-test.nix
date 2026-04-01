@@ -5,7 +5,7 @@
 {
   pkgs,
   plugin,
-  wrapperLib,
+  pluginSrc,
   sampleProject,
   nix,
 }:
@@ -24,7 +24,7 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
     cargoNixExpr='
       let
         pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
-      in import ${wrapperLib} {
+      in import ${pluginSrc}/lib {
         inherit pkgs;
         metadata = builtins.readFile "${sampleProject}/metadata.json";
         cargoLock = builtins.readFile "${sampleProject}/Cargo.lock";
@@ -38,7 +38,7 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
       --expr "($cargoNixExpr).workspaceMembers.sample-bin.build")
 
     # --realize may print multiple outputs (out + lib); take the first.
-    built=$(nix-store --realize "$drv" | head -1)
+    built=$(nix-store --realize "$drv" | grep -v -- '-lib$' | head -1)
     out_json=$("$built"/bin/sample-bin)
     echo "Output: $out_json"
 

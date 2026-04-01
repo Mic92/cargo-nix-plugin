@@ -66,18 +66,30 @@
           torture-test = pkgs.callPackage ./tests/torture-test.nix {
             inherit plugin nix;
             testFixtures = ./rust/tests/fixtures;
-            wrapperLib = ./lib;
+            pluginSrc = ./.;
           };
 
           sample-build-test = pkgs.callPackage ./tests/sample-build-test.nix {
             inherit plugin nix;
-            wrapperLib = ./lib;
+            pluginSrc = ./.;
+            sampleProject = ./tests/sample-project;
+          };
+
+          offline-build-test = pkgs.callPackage ./tests/offline-build-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+            sampleProject = ./tests/sample-project;
+          };
+
+          remote-sparse-test = pkgs.callPackage ./tests/remote-sparse-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
             sampleProject = ./tests/sample-project;
           };
 
           chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
             inherit plugin nix;
-            wrapperLib = ./lib;
+            pluginSrc = ./.;
             # nodeps variant: cargo metadata inside the sandbox can't reach
             # crates.io, and the remap logic under test doesn't need it to.
             sampleProject = ./tests/sample-project-nodeps;
@@ -117,6 +129,7 @@
         {
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
+          read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
           (perVersionPackages linuxPkgs)
