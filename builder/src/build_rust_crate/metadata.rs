@@ -24,6 +24,28 @@ pub fn run(config: &mut BuildConfig, rmeta_out_dir: &str) -> Result<(), Box<dyn 
     // Run the configure phase to set up deps and build scripts
     super::configure::run(config)?;
 
+    // Symlink .rmeta files from pipelined deps into target/deps.
+    // NIX_INC_RMETA_DIRS contains "\n"-separated "store_path\trmeta_dir" pairs
+    // from deps whose full build hasn't finished but whose .rmeta is ready.
+    if let Ok(dirs) = std::env::var("NIX_INC_RMETA_DIRS") {
+        for line in dirs.lines() {
+            if let Some((_drv, dir)) = line.split_once('\t') {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        if name_str.ends_with(".rmeta") {
+                            let dest = Path::new("target/deps").join(&*name);
+                            if !dest.exists() {
+                                let _ = std::os::unix::fs::symlink(entry.path(), &dest);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     detect_cargo_toml_info(config);
 
     let bso = if Path::new("target/build-script-outputs.json").exists() {
