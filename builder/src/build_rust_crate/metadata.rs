@@ -53,6 +53,39 @@ pub fn run(config: &mut BuildConfig, rmeta_out_dir: &str) -> Result<(), Box<dyn 
         }
     }
 
+    // For pipelining consistency, convert all .rlib deps to .rmeta.
+    // rustc records the SVH of each dependency; mixing .rmeta and .rlib
+    // for the same crate causes E0460 ("possibly newer version") errors.
+    // Extract .rmeta from .rlib archives so all --extern flags use .rmeta.
+    if let Ok(entries) = fs::read_dir("target/deps") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".rlib") {
+                let rmeta_name = name.replace(".rlib", ".rmeta");
+                let rmeta_path = Path::new("target/deps").join(&rmeta_name);
+                if !rmeta_path.exists() {
+                    // Extract lib.rmeta from the .rlib archive
+                    let rlib_path = entry.path();
+                    let status = std::process::Command::new("ar")
+                        .arg("p")
+                        .arg(&rlib_path)
+                        .arg("lib.rmeta")
+                        .stdout(std::process::Stdio::from(
+                            fs::File::create(&rmeta_path).unwrap(),
+                        ))
+                        .status();
+                    if status.map(|s| !s.success()).unwrap_or(true) {
+                        // If extraction fails, remove the partial file
+                        let _ = fs::remove_file(&rmeta_path);
+                    } else {
+                        // Remove the .rlib so find_by_metadata picks .rmeta
+                        let _ = fs::remove_file(&rlib_path);
+                    }
+                }
+            }
+        }
+    }
+
     detect_cargo_toml_info(config);
 
     let bso = if Path::new("target/build-script-outputs.json").exists() {
