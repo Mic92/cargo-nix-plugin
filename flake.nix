@@ -141,8 +141,8 @@
         {
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
-          read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
           cargo-nix-prefetch = pkgs.callPackage ./nix/cargo-nix-prefetch.nix { };
+          build-rust-crate-bin = pkgs.callPackage ./nix/build-rust-crate-bin.nix { };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
           (perVersionPackages linuxPkgs)
