@@ -22,5 +22,10 @@ semver = "1"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 http = "1"
 netrc = "0.4"
+# Jitter for retry backoff. Already a transitive dep via ureq/tame-index;
+# direct entry pins it explicitly.
+getrandom = "0.3"
+# RFC 7231 / 9110 HTTP-date parsing for Retry-After. ~5KB, no deps.
+httpdate = "1"
 
 [dev-dependencies]
