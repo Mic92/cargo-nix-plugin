@@ -336,16 +336,29 @@ fn classify_status(
 
 /// Parse the `Retry-After` header (RFC 9110 §10.2.3) into a `Duration`.
 ///
-/// Currently parses **integer seconds** only — the form CDNs and
-/// sparse-index proxies (Cloudflare/Fastly) emit. HTTP-date support is
-/// added in a follow-up commit.
+/// Two valid forms:
+/// - **Integer seconds** (most common from CDNs/sparse-index proxies):
+///   `Retry-After: 120` → `Duration::from_secs(120)`
+/// - **HTTP-date** (RFC 1123): `Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`
+///   → delta from `SystemTime::now()`. A date in the past returns `None`
+///   so the retry loop falls back to backoff (clock skew shouldn't pin
+///   the loop on a 0ms sleep).
 ///
 /// Returns `None` if the header is missing or unparseable; the retry
 /// loop falls back to its computed backoff schedule in that case.
 fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
     let v = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?.trim();
-    let secs = v.parse::<u64>().ok()?;
-    Some(Duration::from_secs(secs))
+
+    // Form 1: integer seconds.
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+
+    // Form 2: HTTP-date — compute delta from now.
+    // httpdate parses all three RFC-7231/9110 date formats (IMF-fixdate,
+    // obsolete RFC-850, asctime).
+    let when = httpdate::parse_http_date(v).ok()?;
+    when.duration_since(std::time::SystemTime::now()).ok()
 }
 
 const MAX_ATTEMPTS: u32 = 5; // initial + 4 retries
@@ -620,9 +633,30 @@ mod tests {
         // Missing.
         assert_eq!(parse_retry_after(&http::HeaderMap::new()), None);
 
-        // Garbage (HTTP-date is parsed in a follow-up; for now this is None).
+        // Truly malformed value.
         let mut h = http::HeaderMap::new();
-        h.insert(http::header::RETRY_AFTER, "not a number".parse().unwrap());
+        h.insert(http::header::RETRY_AFTER, "not a date".parse().unwrap());
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        // A date well in the future — exact delta varies, just bound it.
+        let mut h = http::HeaderMap::new();
+        h.insert(
+            http::header::RETRY_AFTER,
+            // RFC 1123 / IMF-fixdate.
+            "Sun, 06 Nov 2050 08:49:37 GMT".parse().unwrap(),
+        );
+        let d = parse_retry_after(&h).expect("future date should parse");
+        assert!(d > Duration::from_secs(60 * 60 * 24)); // > 1 day
+
+        // A date in the past returns None (clock skew, stale header).
+        let mut h = http::HeaderMap::new();
+        h.insert(
+            http::header::RETRY_AFTER,
+            "Wed, 01 Jan 1990 00:00:00 GMT".parse().unwrap(),
+        );
         assert_eq!(parse_retry_after(&h), None);
     }
 
