@@ -85,6 +85,16 @@ pub fn run(config: &mut BuildConfig, rmeta_out_dir: &str) -> Result<(), Box<dyn 
         None => return Ok(()), // no lib target → nothing to emit
     };
 
+    // If this crate is a proc-macro, metadata-only compilation isn't
+    // useful — consumers need the full dylib. Write a marker so the
+    // scheduler can detect this and require a full build for dependents.
+    if config.crate_type.iter().any(|t| t == "proc-macro") {
+        fs::create_dir_all(rmeta_out_dir)?;
+        fs::write(format!("{rmeta_out_dir}/.proc-macro"), b"")?;
+        // Fall through to emit metadata anyway (for type-checking),
+        // but the scheduler will require a full build for dependents.
+    }
+
     fs::create_dir_all(rmeta_out_dir)?;
 
     let crate_types: Vec<&str> = config.crate_type.iter().map(|s| s.as_str()).collect();
