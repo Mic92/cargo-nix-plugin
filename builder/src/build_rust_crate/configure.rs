@@ -530,6 +530,18 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
+    // Auto-detect build script path from Cargo.toml if not set in drv
+    if config.build.is_empty() {
+        if let Some(build_path) = doc.get("package")
+            .and_then(|p| p.get("build"))
+            .and_then(|v| v.as_str())
+        {
+            if Path::new(build_path).exists() {
+                config.build = build_path.to_string();
+            }
+        }
+    }
+
     // Auto-detect proc-macro
     let is_proc_macro = doc
         .get("lib")
