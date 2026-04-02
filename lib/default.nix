@@ -78,7 +78,7 @@
   # a working-tree Cargo.toml without copying it into the store.
   manifestPath ? null,
   # Optional: override for buildRustCrate. When provided, receives the
-  # vendored buildRustCrate (with cargoTomlInfo auto-detection) as its
+  # vendored buildRustCrate (with build-rust-crate binary) as its
   # second argument so callers can customize on top rather than replace:
   #
   #   buildRustCrateForPkgs = cratePkgs: base: args:
@@ -157,11 +157,11 @@ let
   resolvedTarget =
     (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
 
-  # Build-time binary for auto-detecting edition/proc-macro from Cargo.toml.
-  cargoTomlInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
+  # Rust binary that replaces bash configure/build/install phases.
+  buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
 
   defaultBuildRustCrateForPkgs =
-    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit cargoTomlInfo; };
+    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit buildRustCrateBin; };
 
   effectiveBuildRustCrateForPkgs =
     if buildRustCrateForPkgs != null then

@@ -238,7 +238,7 @@ pub fn resolve_from_lockfile(
                     dev_dependencies: Vec::new(), // Not needed for external crates
                     features: features_btree,
                     resolved_default_features: Vec::new(), // filled in below
-                    proc_macro: false, // Auto-detected at build time by read-crate-info
+                    proc_macro: false, // Auto-detected at build time by build-rust-crate
                     build: None,       // Auto-detected at build time
                     lib_path: None,    // Auto-detected at build time
                     lib_name: None,    // Auto-detected at build time
@@ -1302,7 +1302,7 @@ dependencies = [
     /// through to "2021" and hit "let chains are only allowed in Rust
     /// 2024 or later".
     ///
-    /// These fields cannot be fixed at build time by read-crate-info:
+    /// These fields cannot be fixed at build time by build-rust-crate:
     /// the workspace root Cargo.toml is not in the sandbox. Must be
     /// eval-time.
     #[test]
