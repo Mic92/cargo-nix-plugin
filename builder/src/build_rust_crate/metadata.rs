@@ -35,6 +35,13 @@ pub fn run(config: &mut BuildConfig, rmeta_out_dir: &str) -> Result<(), Box<dyn 
                         let name = entry.file_name();
                         let name_str = name.to_string_lossy();
                         if name_str.ends_with(".rmeta") {
+                            // Only symlink .rmeta if no .rlib exists for the same crate.
+                            // Having both causes "colliding StableCrateId" errors.
+                            let rlib_name = name_str.replace(".rmeta", ".rlib");
+                            let rlib_path = Path::new("target/deps").join(&rlib_name);
+                            if rlib_path.exists() {
+                                continue;
+                            }
                             let dest = Path::new("target/deps").join(&*name);
                             if !dest.exists() {
                                 let _ = std::os::unix::fs::symlink(entry.path(), &dest);
