@@ -6,6 +6,7 @@
 use base64::Engine;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use tame_index::index::{FileLock, SparseIndex};
 use tame_index::{IndexKrate, IndexVersion, KrateName};
@@ -118,12 +119,18 @@ fn netrc_credentials_for_url(url: &str) -> Option<(String, String)> {
 /// Shared HTTP agent: ureq's Agent is Arc-backed, so clones share the
 /// connection pool. Sized for the prefetch thread pool — one pooled
 /// connection per worker lets every thread keep-alive between requests.
+///
+/// `http_status_as_error` is disabled so 4xx/5xx responses come back as
+/// `Ok(Response)` rather than `Err(Error::StatusCode)` — we need access
+/// to the response headers (`Retry-After` in particular) to make retry
+/// decisions, which ureq drops on the floor when it raises `StatusCode`.
 fn shared_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .max_idle_connections_per_host(PREFETCH_WORKERS)
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .timeout_global(Some(Duration::from_secs(30)))
+            .http_status_as_error(false)
             .build()
             .into()
     })
@@ -173,22 +180,56 @@ fn index_for_url(cargo_home: &Path, url: &str) -> Result<std::sync::Arc<SparseIn
     Ok(idx)
 }
 
+/// Internal classification of a fetch attempt's failure mode.
+///
+/// Drives `retry_with_backoff`: `Retryable` re-runs the closure after
+/// backing off; `Permanent` aborts immediately. The `delay` on
+/// `Retryable` is a server-suggested wait (parsed from `Retry-After`);
+/// `None` means "use the computed exponential-backoff schedule".
+enum FetchError {
+    Retryable { msg: String, delay: Option<Duration> },
+    Permanent(String),
+}
+
 /// Issue one sparse-index HTTP GET through the shared agent and write
 /// the result to tame-index's cache. Used by both the prefetch pool and
 /// the serial fallback.
+///
+/// Wraps [`do_fetch_one`] in [`retry_with_backoff`]: transient HTTP
+/// failures (5xx, 429, connection drops, parse errors from a corrupt
+/// response body) are retried with full-jitter exponential backoff up to
+/// `MAX_ATTEMPTS` times. `Retry-After` (seconds form for now) is honored
+/// when present on 429/503 responses. Permanent failures (404, 4xx other
+/// than 429, malformed input) abort immediately.
 fn fetch_one(
     agent: &ureq::Agent,
     sparse_index: &SparseIndex,
     url: &str,
     name: &str,
 ) -> Result<Option<IndexKrate>, String> {
-    let krate_name =
-        KrateName::crates_io(name).map_err(|e| format!("invalid crate name '{name}': {e}"))?;
+    retry_with_backoff(name, || do_fetch_one(agent, sparse_index, url, name))
+}
+
+/// Single fetch attempt — no retry. The callee of [`fetch_one`].
+///
+/// Returns `FetchError::Retryable` for failures the retry loop should
+/// re-attempt (5xx, 429, IO/timeout/TLS, corrupted body that
+/// `parse_remote_response` rejects), and `FetchError::Permanent` for
+/// failures that won't change on a re-fetch (404, 4xx other than 429,
+/// invalid crate name, request-build errors).
+fn do_fetch_one(
+    agent: &ureq::Agent,
+    sparse_index: &SparseIndex,
+    url: &str,
+    name: &str,
+) -> Result<Option<IndexKrate>, FetchError> {
+    let krate_name = KrateName::crates_io(name)
+        .map_err(|e| FetchError::Permanent(format!("invalid crate name '{name}': {e}")))?;
     let lock = FileLock::unlocked();
 
     let req = sparse_index
         .make_remote_request(krate_name, None, &lock)
-        .map_err(|e| format!("failed to build request for '{name}': {e}"))?;
+        .map_err(|e| FetchError::Permanent(format!("failed to build request for '{name}': {e}")))?;
     let (parts, _) = req.into_parts();
     let uri = parts.uri.to_string();
 
@@ -204,15 +245,24 @@ fn fetch_one(
         agent_req = agent_req.header("authorization", &format!("Basic {credentials}"));
     }
 
+    // shared_agent() sets http_status_as_error=false, so 4xx/5xx come back
+    // as Ok(Response) — we need the headers to read Retry-After.
     let mut response = agent_req
         .call()
-        .map_err(|e| format!("failed to fetch '{name}' from '{url}': {e}"))?;
+        .map_err(|e| classify_ureq_error(e, name, url))?;
 
     let status = response.status();
+    if !status.is_success() {
+        return Err(classify_status(status.as_u16(), response.headers(), name, url));
+    }
+
     let body = response
         .body_mut()
         .read_to_vec()
-        .map_err(|e| format!("failed to read response body for '{name}': {e}"))?;
+        .map_err(|e| FetchError::Retryable {
+            msg: format!("failed to read response body for '{name}': {e}"),
+            delay: None,
+        })?;
 
     let mut http_resp = http::Response::builder().status(status.as_u16());
     for (key, value) in response.headers().iter() {
@@ -220,11 +270,166 @@ fn fetch_one(
     }
     let http_resp = http_resp
         .body(body)
-        .map_err(|e| format!("failed to build http response: {e}"))?;
+        .map_err(|e| FetchError::Permanent(format!("failed to build http response: {e}")))?;
 
+    // A parse failure here is the asn1-rs case from #349206 — a
+    // CDN/proxy returned a truncated or otherwise malformed body. Almost
+    // always transient, so retry.
     sparse_index
         .parse_remote_response(krate_name, http_resp, true, &lock)
-        .map_err(|e| format!("failed to parse response for '{name}' from '{url}': {e}"))
+        .map_err(|e| FetchError::Retryable {
+            msg: format!("failed to parse response for '{name}' from '{url}': {e}"),
+            delay: None,
+        })
+}
+
+/// Map a `ureq::Error` (from a transport-level call failure, before any
+/// HTTP status is seen) into [`FetchError`]. With `http_status_as_error`
+/// disabled, this never sees `StatusCode` — those are surfaced via
+/// [`classify_status`] from the response path.
+fn classify_ureq_error(e: ureq::Error, name: &str, url: &str) -> FetchError {
+    use ureq::Error::*;
+    let msg = format!("failed to fetch '{name}' from '{url}': {e}");
+    match e {
+        // Transport-level — almost always transient.
+        Io(_) | Timeout(_) | Protocol(_) | ConnectionFailed | HostNotFound | Tls(_)
+        | TooManyRedirects => FetchError::Retryable { msg, delay: None },
+        // Local programming errors. Won't change on retry.
+        BadUri(_) | Http(_) | InvalidProxyUrl | RedirectFailed | BodyExceedsLimit(_) => {
+            FetchError::Permanent(msg)
+        }
+        // shared_agent() disables http_status_as_error, so this branch
+        // never fires from the response path. Treat conservatively as
+        // retryable in case a future ureq config drift re-enables it.
+        StatusCode(_) => FetchError::Retryable { msg, delay: None },
+        // ureq::Error is non_exhaustive — default to retryable rather
+        // than turning a future variant into a hard failure.
+        _ => FetchError::Retryable { msg, delay: None },
+    }
+}
+
+/// Map an HTTP response status into [`FetchError`].
+///
+/// 5xx and 429 are retryable; on 429/503 we look for `Retry-After` and
+/// pass it to the backoff loop. Other 4xx are permanent.
+fn classify_status(
+    status: u16,
+    headers: &http::HeaderMap,
+    name: &str,
+    url: &str,
+) -> FetchError {
+    let msg = format!("HTTP {status} fetching '{name}' from '{url}'");
+    match status {
+        429 | 503 => {
+            let delay = parse_retry_after(headers);
+            FetchError::Retryable { msg, delay }
+        }
+        500..=599 => FetchError::Retryable { msg, delay: None },
+        404 => FetchError::Permanent(format!("crate '{name}' not found in remote index '{url}' (HTTP 404)")),
+        // Other 4xx (400, 401, 403, ...) — permanent client/auth errors.
+        400..=499 => FetchError::Permanent(msg),
+        // Anything else (1xx, 3xx that ureq didn't follow): conservative
+        // retry, since neither side of this loop expects to see them.
+        _ => FetchError::Retryable { msg, delay: None },
+    }
+}
+
+/// Parse the `Retry-After` header (RFC 9110 §10.2.3) into a `Duration`.
+///
+/// Currently parses **integer seconds** only — the form CDNs and
+/// sparse-index proxies (Cloudflare/Fastly) emit. HTTP-date support is
+/// added in a follow-up commit.
+///
+/// Returns `None` if the header is missing or unparseable; the retry
+/// loop falls back to its computed backoff schedule in that case.
+fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
+    let v = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let secs = v.parse::<u64>().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
+const MAX_ATTEMPTS: u32 = 5; // initial + 4 retries
+const BASE_DELAY_MS: u64 = 100;
+const MAX_DELAY_MS: u64 = 30_000; // cap each individual sleep at 30s
+const MAX_TOTAL_MS: u64 = 60_000; // cap cumulative wait at 60s
+
+/// Run `f` with full-jitter exponential backoff retries on
+/// [`FetchError::Retryable`]; abort immediately on
+/// [`FetchError::Permanent`].
+///
+/// Schedule: per-attempt cap = `BASE_DELAY_MS * 2^attempt` clamped to
+/// `MAX_DELAY_MS`; actual sleep = uniform random in `[0, cap)` (full
+/// jitter — see AWS Architecture Blog "Exponential Backoff And Jitter").
+/// Server-supplied `Retry-After` overrides the computed cap when present
+/// (clamped to `MAX_DELAY_MS`). The loop also gives up if cumulative
+/// sleep would exceed `MAX_TOTAL_MS`, returning the last error.
+fn retry_with_backoff<T>(
+    name: &str,
+    mut f: impl FnMut() -> Result<T, FetchError>,
+) -> Result<T, String> {
+    let mut total_slept = Duration::ZERO;
+    let mut last_msg = String::new();
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(FetchError::Permanent(msg)) => return Err(msg),
+            Err(FetchError::Retryable { msg, delay }) => {
+                last_msg = msg;
+                if attempt + 1 == MAX_ATTEMPTS {
+                    break; // exhausted, fall through to error
+                }
+
+                // Server-suggested delay overrides backoff (but stays
+                // capped — a CDN can't pin us for an hour).
+                let sleep = match delay {
+                    Some(d) => d.min(Duration::from_millis(MAX_DELAY_MS)),
+                    None => {
+                        let cap_ms = BASE_DELAY_MS
+                            .saturating_mul(1u64 << attempt)
+                            .min(MAX_DELAY_MS);
+                        Duration::from_millis(jitter_ms(cap_ms))
+                    }
+                };
+
+                if total_slept + sleep > Duration::from_millis(MAX_TOTAL_MS) {
+                    break;
+                }
+
+                eprintln!(
+                    "cargo-nix: retrying '{name}' (attempt {}/{}) after {}ms: {}",
+                    attempt + 2,
+                    MAX_ATTEMPTS,
+                    sleep.as_millis(),
+                    last_msg,
+                );
+
+                std::thread::sleep(sleep);
+                total_slept += sleep;
+            }
+        }
+    }
+
+    Err(format!(
+        "{last_msg} (gave up after {MAX_ATTEMPTS} attempts, {}ms total)",
+        total_slept.as_millis()
+    ))
+}
+
+/// Full-jitter helper: uniform random `u64` in `[0, max_ms)`.
+///
+/// `getrandom` is infallible on Linux/macOS in practice; if it ever
+/// fails, return `max_ms / 2` (deterministic, never panics, avoids
+/// thundering herds slightly worse than true random).
+fn jitter_ms(max_ms: u64) -> u64 {
+    if max_ms <= 1 {
+        return 0;
+    }
+    let mut buf = [0u8; 8];
+    if getrandom::fill(&mut buf).is_err() {
+        return max_ms / 2;
+    }
+    u64::from_ne_bytes(buf) % max_ms
 }
 
 /// Concurrently warm the local index cache for a set of crates.
@@ -396,5 +601,98 @@ mod tests {
         assert!(!krate.versions.is_empty(), "serde should have versions");
         let v = find_version(&krate, "1.0.228");
         assert!(v.is_some(), "serde 1.0.228 should exist");
+    }
+
+    #[test]
+    fn parse_retry_after_seconds() {
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(120)));
+
+        // Whitespace is trimmed.
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::RETRY_AFTER, "  5  ".parse().unwrap());
+        assert_eq!(parse_retry_after(&h), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_retry_after_missing_or_garbage() {
+        // Missing.
+        assert_eq!(parse_retry_after(&http::HeaderMap::new()), None);
+
+        // Garbage (HTTP-date is parsed in a follow-up; for now this is None).
+        let mut h = http::HeaderMap::new();
+        h.insert(http::header::RETRY_AFTER, "not a number".parse().unwrap());
+        assert_eq!(parse_retry_after(&h), None);
+    }
+
+    #[test]
+    fn jitter_is_bounded() {
+        for max in [1u64, 2, 100, 30_000] {
+            for _ in 0..100 {
+                let j = jitter_ms(max);
+                assert!(j < max.max(1), "jitter {j} >= max {max}");
+            }
+        }
+        // Edge cases.
+        assert_eq!(jitter_ms(0), 0);
+        assert_eq!(jitter_ms(1), 0);
+    }
+
+    #[test]
+    fn retry_succeeds_immediately() {
+        let mut calls = 0;
+        let result: Result<i32, String> = retry_with_backoff("test", || {
+            calls += 1;
+            Ok(42)
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_aborts_on_permanent() {
+        let mut calls = 0;
+        let result: Result<i32, String> = retry_with_backoff("test", || {
+            calls += 1;
+            Err(FetchError::Permanent("nope".into()))
+        });
+        assert_eq!(result, Err("nope".into()));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_succeeds_after_transient_failures() {
+        let mut calls = 0;
+        let result: Result<i32, String> = retry_with_backoff("test", || {
+            calls += 1;
+            if calls < 3 {
+                Err(FetchError::Retryable {
+                    msg: format!("attempt {calls} failed"),
+                    // Force min jitter so the test stays fast.
+                    delay: Some(Duration::from_millis(1)),
+                })
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn retry_gives_up_after_max_attempts() {
+        let mut calls = 0;
+        let result: Result<i32, String> = retry_with_backoff("test", || {
+            calls += 1;
+            Err(FetchError::Retryable {
+                msg: "always fails".into(),
+                delay: Some(Duration::from_millis(1)),
+            })
+        });
+        assert_eq!(calls, MAX_ATTEMPTS as usize);
+        let err = result.unwrap_err();
+        assert!(err.contains("always fails"));
+        assert!(err.contains("gave up"));
     }
 }
