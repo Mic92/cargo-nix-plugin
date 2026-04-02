@@ -107,7 +107,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Append build-script link search/lib flags to target/link and
 /// target/link.final, mirroring what the bash setup_link_paths did.
-fn persist_bso_link_flags(
+pub fn persist_bso_link_flags(
     bso: &BuildScriptOutputs,
     config: &BuildConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -191,7 +191,7 @@ fn build_bin(
     Ok(())
 }
 
-fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
+pub fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
     if !config.lib_path.is_empty() && Path::new(&config.lib_path).exists() {
         Some(config.lib_path.clone())
     } else if Path::new("src/lib.rs").exists() {
