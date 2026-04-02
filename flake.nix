@@ -87,6 +87,12 @@
             sampleProject = ./tests/sample-project;
           };
 
+          retry-test = pkgs.callPackage ./tests/retry-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+            sampleProject = ./tests/sample-project;
+          };
+
           chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
             inherit plugin nix;
             pluginSrc = ./.;
