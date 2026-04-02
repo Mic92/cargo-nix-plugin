@@ -24,68 +24,6 @@ pub fn run(config: &mut BuildConfig, rmeta_out_dir: &str) -> Result<(), Box<dyn 
     // Run the configure phase to set up deps and build scripts
     super::configure::run(config)?;
 
-    // Symlink .rmeta files from pipelined deps into target/deps.
-    // NIX_INC_RMETA_DIRS contains "\n"-separated "store_path\trmeta_dir" pairs
-    // from deps whose full build hasn't finished but whose .rmeta is ready.
-    if let Ok(dirs) = std::env::var("NIX_INC_RMETA_DIRS") {
-        for line in dirs.lines() {
-            if let Some((_drv, dir)) = line.split_once('\t') {
-                if let Ok(entries) = fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name();
-                        let name_str = name.to_string_lossy();
-                        if name_str.ends_with(".rmeta") {
-                            // Only symlink .rmeta if no .rlib exists for the same crate.
-                            // Having both causes "colliding StableCrateId" errors.
-                            let rlib_name = name_str.replace(".rmeta", ".rlib");
-                            let rlib_path = Path::new("target/deps").join(&rlib_name);
-                            if rlib_path.exists() {
-                                continue;
-                            }
-                            let dest = Path::new("target/deps").join(&*name);
-                            if !dest.exists() {
-                                let _ = std::os::unix::fs::symlink(entry.path(), &dest);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // For pipelining consistency, convert all .rlib deps to .rmeta.
-    // rustc records the SVH of each dependency; mixing .rmeta and .rlib
-    // for the same crate causes E0460 ("possibly newer version") errors.
-    // Extract .rmeta from .rlib archives so all --extern flags use .rmeta.
-    if let Ok(entries) = fs::read_dir("target/deps") {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.ends_with(".rlib") {
-                let rmeta_name = name.replace(".rlib", ".rmeta");
-                let rmeta_path = Path::new("target/deps").join(&rmeta_name);
-                if !rmeta_path.exists() {
-                    // Extract lib.rmeta from the .rlib archive
-                    let rlib_path = entry.path();
-                    let status = std::process::Command::new("ar")
-                        .arg("p")
-                        .arg(&rlib_path)
-                        .arg("lib.rmeta")
-                        .stdout(std::process::Stdio::from(
-                            fs::File::create(&rmeta_path).unwrap(),
-                        ))
-                        .status();
-                    if status.map(|s| !s.success()).unwrap_or(true) {
-                        // If extraction fails, remove the partial file
-                        let _ = fs::remove_file(&rmeta_path);
-                    } else {
-                        // Remove the .rlib so find_by_metadata picks .rmeta
-                        let _ = fs::remove_file(&rlib_path);
-                    }
-                }
-            }
-        }
-    }
-
     detect_cargo_toml_info(config);
 
     let bso = if Path::new("target/build-script-outputs.json").exists() {

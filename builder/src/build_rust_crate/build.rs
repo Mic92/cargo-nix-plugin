@@ -65,6 +65,24 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             fs::write("target/lib/proc-macro.marker", b"")?;
         }
 
+        // Pipelining: emit .rmeta and signal the scheduler mid-build.
+        // NIX_INC_RMETA_DIR is set by nix-inc's executor; absent in normal
+        // nix builds so this block is a no-op.
+        if let Ok(rmeta_dir) = std::env::var("NIX_INC_RMETA_DIR") {
+            fs::create_dir_all(&rmeta_dir)?;
+            // Emit metadata to the rmeta dir. With incremental compilation,
+            // the frontend work from the full build above is cached, so this
+            // is fast (~50ms for most crates).
+            let mut meta_cmd = flags.cmd(
+                &crate_name, &lib_src, &rmeta_dir, &crate_types, &extra, false,
+            );
+            meta_cmd.arg("--emit=metadata");
+            run_cmd(&mut meta_cmd, config.verbose)?;
+
+            // Signal via fd 3 (inherited from the worker's saved stdout).
+            signal_meta_ready(&rmeta_dir);
+        }
+
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
             run_cmd(
@@ -189,6 +207,23 @@ fn build_bin(
         }
     }
     Ok(())
+}
+
+/// Write `__META_READY__ <dir>` to fd 3 (the worker's signal channel).
+/// fd 3 is set up by nix-inc's persistent bash worker; if it doesn't
+/// exist (normal nix build), the write silently fails.
+fn signal_meta_ready(rmeta_dir: &str) {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+        // SAFETY: fd 3 is inherited from the worker parent process.
+        // We must not close it (other signals may follow), so we
+        // forget the File after writing.
+        let mut f = unsafe { std::fs::File::from_raw_fd(3) };
+        let _ = writeln!(f, "__META_READY__ {rmeta_dir}");
+        std::mem::forget(f);
+    }
 }
 
 pub fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
