@@ -28,8 +28,8 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     buildClosureSeed = pkgs.linkFarm "chroot-store-seed" {
       rustc = pkgs.rustc;
       cargo = pkgs.cargo;
-      jq = pkgs.jq;
       stdenv = pkgs.stdenv;
+      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix {};
       sampleProject = sampleProject;
       pluginSrc = pluginSrc;
       nixpkgs = pkgs.path;
@@ -67,10 +67,11 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
       --expr '
         let
           pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
-          pinnedBuildRustCrate = pkgs.buildRustCrate.override {
+          buildRustCrateBin = builtins.storePath ${pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate-bin.nix) {}};
+          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
             rustc = builtins.storePath ${pkgs.rustc};
             cargo = builtins.storePath ${pkgs.cargo};
-            jq = builtins.storePath ${pkgs.jq};
+            inherit buildRustCrateBin;
           };
         in (import ${pluginSrc}/lib {
           inherit pkgs;

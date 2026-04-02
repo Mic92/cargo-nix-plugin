@@ -138,11 +138,11 @@ let
 
   resolvedTarget = if target != null then target else defaultTarget;
 
-  # Build-time binary for auto-detecting edition/proc-macro from Cargo.toml.
-  cargoTomlInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
+  # Rust binary that replaces bash configure/build/install phases.
+  buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
 
   buildRustCrateForPkgs =
-    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit cargoTomlInfo; };
+    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit buildRustCrateBin; };
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
   resolved = builtins.resolveCargoWorkspace (

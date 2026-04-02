@@ -226,7 +226,7 @@ pub fn resolve_from_lockfile(
                     dev_dependencies: Vec::new(), // Not needed for external crates
                     features: features_btree,
                     resolved_default_features: Vec::new(), // TODO: feature resolution
-                    proc_macro: false, // Auto-detected at build time by read-crate-info
+                    proc_macro: false, // Auto-detected at build time by build-rust-crate
                     build: None,                           // Auto-detected at build time
                     lib_path: None,                        // Auto-detected at build time
                     lib_name: None,                        // Auto-detected at build time
