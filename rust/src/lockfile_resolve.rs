@@ -189,20 +189,32 @@ pub fn resolve_from_lockfile(
 
             let index_url = source_to_index_url(pkg.source.as_deref());
 
-            // Look up in the registry index via tame-index
-            let index_version = index_url.as_deref().and_then(|url| {
-                let krate = match registry::lookup_crate(cargo_home, url, &pkg.name) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        eprintln!(
-                            "warning: failed to look up {} {} in index: {}",
-                            pkg.name, pkg.version, e
-                        );
-                        return None;
-                    }
-                };
-                registry::find_version(&krate, &pkg.version).cloned()
-            });
+            // Look up in the registry index via tame-index. Hard-fail
+            // the whole resolution rather than silently continuing with
+            // empty dependencies — the previous eprintln!+continue path
+            // produced derivations with no --extern flags that compiled
+            // with E0433 errors deep inside the build sandbox.
+            let index_version = match index_url.as_deref() {
+                None => None, // local/git source — no index lookup needed
+                Some(url) => {
+                    let krate = registry::lookup_crate(cargo_home, url, &pkg.name).map_err(|e| {
+                        format!(
+                            "failed to look up {} {} in index '{}': {e}",
+                            pkg.name, pkg.version, url
+                        )
+                    })?;
+                    Some(
+                        registry::find_version(&krate, &pkg.version)
+                            .ok_or_else(|| {
+                                format!(
+                                    "version {} of {} not found in index '{}'",
+                                    pkg.version, pkg.name, url
+                                )
+                            })?
+                            .clone(),
+                    )
+                }
+            };
 
             let (dependencies, build_dependencies, features, links) =
                 if let Some(ref version) = index_version {
