@@ -88,6 +88,68 @@ A helper is also available:
 nix run .#generate-metadata -- > metadata.json
 ```
 
+### Lockfile resolve (no `cargo metadata`, no crate sources at eval time)
+
+The third mode reads `Cargo.lock` plus the sparse registry index directly,
+so evaluation needs neither a `cargo` binary nor downloaded crate sources —
+only the per-crate index entries:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;             # Cargo.toml + Cargo.lock
+  # no metadata, no cargoHome — nothing else needed
+};
+```
+
+On first use the resolver fetches each crate's index entry (a few hundred
+bytes) into `$CARGO_HOME` and reuses it thereafter. If your environment
+already redirects cargo to a mirror, the resolver follows the same
+configuration — `CARGO_REGISTRIES_CRATES_IO_INDEX` or
+`[source.crates-io] replace-with` in `.cargo/config.toml` — so no
+plugin-specific setup is required:
+
+```toml
+# .cargo/config.toml — honoured by both cargo and the plugin
+[source.crates-io]
+replace-with = "mirror"
+[source.mirror]
+registry = "sparse+https://artifactory.example/api/cargo/crates/index/"
+```
+
+If every index lookup fails (e.g. egress to `index.crates.io` is blocked and
+no mirror is configured), evaluation fails loudly rather than silently
+producing derivations with missing features.
+
+#### Warming the cache out of band
+
+In the rare case where the evaluating host has *no* reachable index at all,
+`cargo-nix-prefetch` can populate `$CARGO_HOME` ahead of time on a connected
+host (it observes the same mirror precedence as the plugin):
+
+```bash
+nix run .#cargo-nix-prefetch -- --manifest-path ./Cargo.toml
+nix run .#cargo-nix-prefetch -- --manifest-path ./Cargo.toml --check   # verify
+```
+
+Use `--output DIR` to write into a fresh directory instead of the ambient
+`$CARGO_HOME`, then point the resolver at it explicitly:
+
+```bash
+nix run .#cargo-nix-prefetch -- --manifest-path ./Cargo.toml --output ./.cargo-index
+```
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  cargoHome = ./.cargo-index;   # pre-warmed by cargo-nix-prefetch
+};
+```
+
+The same shape works wrapped in a fixed-output derivation if you want the
+cache pinned by hash rather than checked in.
+
 ## Example
 
 The plugin must be loaded by the same Nix version it was compiled against

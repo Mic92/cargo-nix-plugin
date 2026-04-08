@@ -87,6 +87,12 @@
             sampleProject = ./tests/sample-project;
           };
 
+          mirror-test = pkgs.callPackage ./tests/mirror-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+            sampleProject = ./tests/sample-project;
+          };
+
           retry-test = pkgs.callPackage ./tests/retry-test.nix {
             inherit plugin nix;
             pluginSrc = ./.;
@@ -136,6 +142,7 @@
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
           read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
+          cargo-nix-prefetch = pkgs.callPackage ./nix/cargo-nix-prefetch.nix { };
         }
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
           (perVersionPackages linuxPkgs)
@@ -166,12 +173,17 @@
         };
       });
 
-      apps.${linuxSystem} = {
+      apps = forAllSystems (pkgs: {
+        cargo-nix-prefetch = {
+          type = "app";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch}/bin/cargo-nix-prefetch";
+        };
+      } // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) {
         generate-metadata = {
           type = "app";
           program = "${self.packages.${linuxSystem}.generate-metadata}/bin/generate-metadata";
         };
-      };
+      });
 
       # Checks run against every nix version in the matrix.
       checks.${linuxSystem} = builtins.foldl' (
