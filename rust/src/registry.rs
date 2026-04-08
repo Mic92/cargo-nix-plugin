@@ -103,19 +103,32 @@ pub fn normalize_index_url(url: &str) -> String {
 /// The hash depends on the cargo version (changed in 1.85.0). Rather than
 /// reproducing the hash algorithm (which requires running `cargo --version`),
 /// we scan the directory for a prefix match on the URL's hostname.
-fn find_index_dir(cargo_home: &Path, url: &str) -> Option<std::path::PathBuf> {
-    let hostname = host_from_url(url)?;
+///
+/// Returns *every* matching directory: a machine that has run both
+/// pre-1.85 and post-1.85 cargo will have two `index.crates.io-<hash>`
+/// siblings, and we can't know which one holds the entry without
+/// looking. Callers probe each in turn.
+fn find_index_dirs(cargo_home: &Path, url: &str) -> Vec<std::path::PathBuf> {
+    let Some(hostname) = host_from_url(url) else {
+        return Vec::new();
+    };
     let index_dir = cargo_home.join("registry").join("index");
-    let entries = std::fs::read_dir(&index_dir).ok()?;
+    let Ok(entries) = std::fs::read_dir(&index_dir) else {
+        return Vec::new();
+    };
 
-    // Directory names look like "index.crates.io-1949cf8c6b5b557f"
+    // Directory names look like "index.crates.io-1949cf8c6b5b557f".
+    // Match on `<host>-` (not bare `<host>`) so e.g. `crates.io` doesn't
+    // accidentally pick up `crates.iomirror-...`.
+    let prefix = format!("{hostname}-");
     entries
         .flatten()
-        .find(|e| {
-            e.file_name().to_string_lossy().starts_with(hostname)
+        .filter(|e| {
+            e.file_name().to_string_lossy().starts_with(&prefix)
                 && e.file_type().is_ok_and(|t| t.is_dir())
         })
         .map(|e| e.path())
+        .collect()
 }
 
 /// Look up a crate in the registry index cache, falling back to a remote
@@ -130,7 +143,7 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
     let lock = FileLock::unlocked();
 
     // Probe for a cargo-created (or user-provided) cache dir first.
-    // find_index_dir scans by hostname prefix, which handles both
+    // find_index_dirs scans by hostname prefix, which handles both
     // cargo's internal hash-suffixed dirs and user-provided dirs
     // (e.g. read-only nix store paths).
     if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name) {
@@ -155,7 +168,7 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
 /// e.g. `sparse+https://index.crates.io/` → `index.crates.io`,
 /// `sparse+http://mirror:8081/` → `mirror`.
 ///
-/// Stripping the port matters for [`find_index_dir`]: cargo's on-disk
+/// Stripping the port matters for [`find_index_dirs`]: cargo's on-disk
 /// directory name is `<host>-<hash>` *without* the port, so a mirror on
 /// a non-default port would otherwise never prefix-match.
 fn host_from_url(url: &str) -> Option<&str> {
@@ -735,24 +748,15 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<()
 
 /// Is this crate already in the local tame-index cache?
 ///
-/// Probes both tame-index's own cache layout and any cargo-created /
-/// user-supplied index dir (the same two paths [`lookup_crate`] tries),
-/// so a fully pre-seeded `cargoHome` correctly short-circuits the
-/// prefetch pool instead of attempting (doomed) network fetches.
+/// Read-only: probes existing index dirs via [`cached_in_existing_dir`]
+/// (hostname-prefix scan), which covers both cargo-populated and
+/// plugin-populated layouts. Never creates directories, so `--check`
+/// stays side-effect-free and a read-only store-path `cargoHome` works.
 pub fn is_cached(cargo_home: &Path, url: &str, name: &str) -> bool {
     let Ok(krate_name) = KrateName::crates_io(name) else {
         return false;
     };
-    if cached_in_existing_dir(cargo_home, url, krate_name).is_some() {
-        return true;
-    }
-    let Ok(idx) = index_for_url(cargo_home, url) else {
-        return false;
-    };
-    matches!(
-        idx.cached_krate(krate_name, &FileLock::unlocked()),
-        Ok(Some(_))
-    )
+    cached_in_existing_dir(cargo_home, url, krate_name).is_some()
 }
 
 /// Probe for `name` in a pre-existing index dir under `cargo_home`
@@ -764,18 +768,22 @@ fn cached_in_existing_dir(
     url: &str,
     krate_name: KrateName<'_>,
 ) -> Option<IndexKrate> {
-    let exact_path = find_index_dir(cargo_home, url)?;
-    let location = tame_index::index::IndexLocation {
-        url: tame_index::index::IndexUrl::from(url),
-        root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
-            exact_path.to_string_lossy().as_ref(),
-        )),
-        cargo_version: None,
-    };
-    SparseIndex::new(location)
-        .ok()?
-        .cached_krate(krate_name, &FileLock::unlocked())
-        .ok()?
+    for exact_path in find_index_dirs(cargo_home, url) {
+        let location = tame_index::index::IndexLocation {
+            url: tame_index::index::IndexUrl::from(url),
+            root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
+                exact_path.to_string_lossy().as_ref(),
+            )),
+            cargo_version: None,
+        };
+        if let Some(k) = SparseIndex::new(location)
+            .ok()
+            .and_then(|idx| idx.cached_krate(krate_name, &FileLock::unlocked()).ok()?)
+        {
+            return Some(k);
+        }
+    }
+    None
 }
 
 /// Find a specific version in an `IndexKrate`.
