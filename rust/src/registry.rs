@@ -151,8 +151,13 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
         .ok_or_else(|| format!("crate '{name}' not found in remote index '{url}'"))
 }
 
-/// Extract the hostname from a registry URL.
-/// e.g. `sparse+https://index.crates.io/` → `index.crates.io`
+/// Extract the hostname (without port) from a registry URL.
+/// e.g. `sparse+https://index.crates.io/` → `index.crates.io`,
+/// `sparse+http://mirror:8081/` → `mirror`.
+///
+/// Stripping the port matters for [`find_index_dir`]: cargo's on-disk
+/// directory name is `<host>-<hash>` *without* the port, so a mirror on
+/// a non-default port would otherwise never prefix-match.
 fn host_from_url(url: &str) -> Option<&str> {
     let url = url
         .strip_prefix("sparse+")
@@ -161,7 +166,8 @@ fn host_from_url(url: &str) -> Option<&str> {
     let url = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    url.split('/').next()
+    let authority = url.split('/').next()?;
+    Some(authority.split(':').next().unwrap_or(authority))
 }
 
 /// Look up credentials for a URL's host in ~/.netrc (or $NETRC).
@@ -890,6 +896,11 @@ mod tests {
         assert_eq!(
             host_from_url("sparse+https://artifactory.infra.ant.dev/artifactory/api/cargo/crates-internal/index/"),
             Some("artifactory.infra.ant.dev")
+        );
+        // Port must be stripped to match cargo's on-disk dir name.
+        assert_eq!(
+            host_from_url("sparse+http://mirror.example:8081/index/"),
+            Some("mirror.example")
         );
     }
 
