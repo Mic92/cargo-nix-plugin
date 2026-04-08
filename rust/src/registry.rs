@@ -38,16 +38,15 @@ pub fn resolve_crates_io_index(
 ) -> String {
     use crate::cargo_config::{discover_crates_io_replacement, SourceReplacement};
 
+    let env = |k: &str| std::env::var(k).ok();
+
     if let Some(url) = explicit {
         return normalize_index_url(url);
     }
-    if let Some(url) = std::env::var(CRATES_IO_INDEX_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(url) = env(CRATES_IO_INDEX_ENV).filter(|s| !s.is_empty()) {
         return normalize_index_url(&url);
     }
-    match discover_crates_io_replacement(workspace_root, cargo_home) {
+    match discover_crates_io_replacement(workspace_root, cargo_home, &env) {
         SourceReplacement::Registry(url) => {
             eprintln!("cargo-nix: using crates.io replacement from .cargo/config.toml: {url}");
             normalize_index_url(&url)
