@@ -43,13 +43,15 @@ let
         --index "sparse+http://127.0.0.1:$PORT/" \
         --output "$out" --check
 
-      # Normalize the dir name so lookup_crate's hostname-prefix scan
-      # finds it when the plugin is later pointed at upstream crates.io:
-      # the prefetch wrote it under 127.0.0.1-<hash>, but the eval will
-      # look for index.crates.io-*. Rename rather than re-prefetch so the
-      # cache contents are exactly what the tool produced.
+      # Normalize the dir name so the eval (which sees Cargo.lock's
+      # crates.io source URLs) finds it: the prefetch wrote it under
+      # 127.0.0.1-<hash>, but find_index_dir computes the exact 1.85+
+      # stable hash for sparse+https://index.crates.io/. Rename rather
+      # than re-prefetch so the cache contents are exactly what the tool
+      # produced. The hash is stable by construction — cargo froze it
+      # in 1.85 (rust-lang/cargo#13684) and tame-index reproduces it.
       mv "$out"/registry/index/127.0.0.1-* \
-         "$out"/registry/index/index.crates.io-offline
+         "$out"/registry/index/index.crates.io-1949cf8c6b5b557f
     '';
 in
 pkgs.runCommand "cargo-nix-plugin-offline-build-test"

@@ -63,50 +63,89 @@ pub fn find_configs(start: &Path, cargo_home: &Path) -> Vec<std::path::PathBuf> 
 /// redirected to, following `replace-with` chains. Also honours
 /// `[registries.crates-io] index = "..."`, the config-file twin of
 /// `$CARGO_REGISTRIES_CRATES_IO_INDEX`.
-pub fn crates_io_replacement(config: &str) -> SourceReplacement {
+///
+/// `env` is consulted for `CARGO_REGISTRIES_<NAME>_INDEX` overrides.
+/// Threading it through (rather than reading `std::env::var` inline)
+/// keeps this pure for tests and lets callers snapshot env once, the
+/// way cargo's `GlobalContext` does.
+pub fn crates_io_replacement(
+    config: &str,
+    env: &impl Fn(&str) -> Option<String>,
+) -> SourceReplacement {
     let Ok(doc) = toml::from_str::<toml::Value>(config) else {
         return SourceReplacement::None;
     };
 
     // `[source.crates-io] replace-with` takes precedence over
     // `[registries.crates-io] index` in cargo, so resolve sources first.
-    if let Some(r) = resolve_source_chain(&doc) {
+    if let Some(r) = resolve_source_chain(&doc, env) {
         return r;
     }
 
-    if let Some(url) = doc
-        .get("registries")
-        .and_then(|r| r.get("crates-io"))
-        .and_then(|c| c.get("index"))
-        .and_then(|v| v.as_str())
-    {
-        return SourceReplacement::Registry(url.to_string());
+    if let Some(url) = registry_index(&doc, "crates-io", env) {
+        return SourceReplacement::Registry(url);
     }
 
     SourceReplacement::None
+}
+
+/// Look up `registries.<name>.index`, honouring cargo's
+/// `$CARGO_REGISTRIES_<NAME>_INDEX` env override. The env key is
+/// derived the way cargo's `ConfigKey::push` does it: hyphens become
+/// underscores, then ASCII-uppercase.
+fn registry_index(
+    doc: &toml::Value,
+    name: &str,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let env_key = format!(
+        "CARGO_REGISTRIES_{}_INDEX",
+        name.replace('-', "_").to_uppercase()
+    );
+    if let Some(v) = env(&env_key).filter(|s| !s.is_empty()) {
+        return Some(v);
+    }
+    doc.get("registries")
+        .and_then(|r| r.get(name))
+        .and_then(|c| c.get("index"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
 }
 
 /// Resolve `[source.crates-io] replace-with` chains. Returns `None`
 /// (rather than `SourceReplacement::None`) when no `[source.crates-io]`
 /// is configured at all, so the caller can fall through to
 /// `[registries.crates-io]`.
-fn resolve_source_chain(doc: &toml::Value) -> Option<SourceReplacement> {
-    let sources = doc.get("source").and_then(|s| s.as_table())?;
+fn resolve_source_chain(
+    doc: &toml::Value,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Option<SourceReplacement> {
+    let sources = doc.get("source").and_then(|s| s.as_table());
 
     // Follow the replace-with chain starting from crates-io. Cap the
     // hop count so a cycle in a broken config can't spin forever.
     let mut current = "crates-io";
     for _ in 0..16 {
-        let Some(src) = sources.get(current).and_then(|s| s.as_table()) else {
-            // Chain points at an undefined source. crates-io itself
-            // missing means "this file says nothing about it"; a
-            // dangling hop later in the chain is a misconfiguration we
-            // surface as "no replacement" rather than guessing.
-            return if current == "crates-io" {
-                None
-            } else {
-                Some(SourceReplacement::None)
-            };
+        let Some(src) = sources
+            .and_then(|s| s.get(current))
+            .and_then(|s| s.as_table())
+        else {
+            // Chain points at a name with no `[source.<name>]` table.
+            // crates-io itself missing means "this file says nothing
+            // about it". For any other name, do what cargo's
+            // `SourceConfigMap::load` does and treat it as an
+            // alt-registry name: resolve `registries.<name>.index`
+            // (with the `CARGO_REGISTRIES_<NAME>_INDEX` env override).
+            // Cargo bails if that lookup also fails; we surface "no
+            // replacement" so discovery moves on to the next config
+            // file rather than aborting eval.
+            if current == "crates-io" {
+                return None;
+            }
+            return Some(match registry_index(doc, current, env) {
+                Some(url) => SourceReplacement::Registry(url),
+                None => SourceReplacement::None,
+            });
         };
         if let Some(next) = src.get("replace-with").and_then(|v| v.as_str()) {
             current = next;
@@ -141,12 +180,13 @@ fn resolve_source_chain(doc: &toml::Value) -> Option<SourceReplacement> {
 pub fn discover_crates_io_replacement(
     workspace_root: &Path,
     cargo_home: &Path,
+    env: &impl Fn(&str) -> Option<String>,
 ) -> SourceReplacement {
     for path in find_configs(workspace_root, cargo_home) {
         let Ok(s) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match crates_io_replacement(&s) {
+        match crates_io_replacement(&s, env) {
             SourceReplacement::None => continue,
             hit => return hit,
         }
@@ -157,6 +197,15 @@ pub fn discover_crates_io_replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Env lookup that always misses.
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn crates_io_replacement(cfg: &str) -> SourceReplacement {
+        super::crates_io_replacement(cfg, &no_env)
+    }
 
     #[test]
     fn no_source_section() {
@@ -218,6 +267,68 @@ mod tests {
             replace-with = "missing"
         "#;
         assert_eq!(crates_io_replacement(cfg), SourceReplacement::None);
+    }
+
+    /// Regression: cargo accepts `replace-with = "<name>"` where
+    /// `<name>` is defined under `[registries]` rather than `[source]`
+    /// (`SourceConfigMap::load` falls back to `SourceId::alt_registry`).
+    /// We previously treated that as a dangling hop and fell through to
+    /// upstream crates.io.
+    #[test]
+    fn replace_with_falls_through_to_registries_table() {
+        let cfg = r#"
+            [source.crates-io]
+            replace-with = "artifactory"
+            [registries.artifactory]
+            index = "sparse+https://artifactory.example/api/cargo/crates-io/index/"
+        "#;
+        assert_eq!(
+            crates_io_replacement(cfg),
+            SourceReplacement::Registry(
+                "sparse+https://artifactory.example/api/cargo/crates-io/index/".into()
+            )
+        );
+    }
+
+    /// `CARGO_REGISTRIES_<NAME>_INDEX` overrides `[registries.<name>].index`
+    /// — same precedence cargo's config layer applies. The env key uses
+    /// cargo's hyphen→underscore + uppercase mapping.
+    #[test]
+    fn replace_with_registries_honours_env_override() {
+        let cfg = r#"
+            [source.crates-io]
+            replace-with = "my-mirror"
+            [registries.my-mirror]
+            index = "sparse+https://wrong.example/"
+        "#;
+        let env = |k: &str| {
+            (k == "CARGO_REGISTRIES_MY_MIRROR_INDEX")
+                .then(|| "sparse+https://right.example/".to_string())
+        };
+        assert_eq!(
+            super::crates_io_replacement(cfg, &env),
+            SourceReplacement::Registry("sparse+https://right.example/".into())
+        );
+    }
+
+    /// The env override applies even when the `[registries.<name>]`
+    /// table is absent entirely — cargo's `get_registry_index` reads
+    /// `registries.<name>.index` through the unified config layer, so
+    /// `CARGO_REGISTRIES_<NAME>_INDEX` alone is enough to define it.
+    #[test]
+    fn replace_with_env_only_registry() {
+        let cfg = r#"
+            [source.crates-io]
+            replace-with = "artifactory"
+        "#;
+        let env = |k: &str| {
+            (k == "CARGO_REGISTRIES_ARTIFACTORY_INDEX")
+                .then(|| "sparse+http://mirror.local:8080/index/".to_string())
+        };
+        assert_eq!(
+            super::crates_io_replacement(cfg, &env),
+            SourceReplacement::Registry("sparse+http://mirror.local:8080/index/".into())
+        );
     }
 
     #[test]
@@ -313,7 +424,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            discover_crates_io_replacement(&ws, Path::new("/nonexistent-cargo-home")),
+            discover_crates_io_replacement(&ws, Path::new("/nonexistent-cargo-home"), &no_env),
             SourceReplacement::Registry("sparse+https://mirror.example/".into())
         );
     }
