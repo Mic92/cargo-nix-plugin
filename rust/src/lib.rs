@@ -1,3 +1,4 @@
+pub mod cargo_config;
 pub mod cfg_eval;
 pub mod dep_filter;
 pub mod feature_resolve;

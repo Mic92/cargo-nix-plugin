@@ -13,18 +13,43 @@
 }:
 
 let
-  readCrateInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
+  cargoNixPrefetch = pkgs.callPackage ../nix/cargo-nix-prefetch.nix { };
 
-  # Build a synthetic CARGO_HOME with binary index cache entries from
-  # the fake-sparse-index fixtures.  `read-crate-info populate-cache`
-  # converts the raw JSON-lines files into tame-index's binary cache
-  # format so SparseIndex::cached_krate can read them directly.
+  # Build a CARGO_HOME by dogfooding `cargo-nix-prefetch` against the
+  # checked-in fixture served over loopback. This is the exact workflow
+  # users in network-restricted environments are expected to use
+  # (prefetch → ship cache dir → point cargoHome at it), so the offline
+  # build is gated on the public tool rather than a bespoke test helper.
   cargoHome = pkgs.runCommand "sample-project-cargo-home"
-    { nativeBuildInputs = [ readCrateInfo ]; }
+    { nativeBuildInputs = [ cargoNixPrefetch pkgs.python3 ]; }
     ''
-      read-crate-info populate-cache \
-        ${./fake-sparse-index} $out \
-        index.crates.io-offline
+      set -euo pipefail
+      PORT_FILE=$(mktemp)
+      ACCESS_LOG=$(mktemp)
+      python3 ${./fake-sparse-server.py} \
+        "$PORT_FILE" "$ACCESS_LOG" ${./fake-sparse-index} &
+      SERVER_PID=$!
+      trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+      while [[ ! -s $PORT_FILE ]]; do kill -0 $SERVER_PID; done
+      PORT=$(<"$PORT_FILE")
+
+      cargo-nix-prefetch \
+        --manifest-path ${sampleProject}/Cargo.toml \
+        --index "sparse+http://127.0.0.1:$PORT/" \
+        --output "$out"
+
+      cargo-nix-prefetch \
+        --manifest-path ${sampleProject}/Cargo.toml \
+        --index "sparse+http://127.0.0.1:$PORT/" \
+        --output "$out" --check
+
+      # Normalize the dir name so lookup_crate's hostname-prefix scan
+      # finds it when the plugin is later pointed at upstream crates.io:
+      # the prefetch wrote it under 127.0.0.1-<hash>, but the eval will
+      # look for index.crates.io-*. Rename rather than re-prefetch so the
+      # cache contents are exactly what the tool produced.
+      mv "$out"/registry/index/127.0.0.1-* \
+         "$out"/registry/index/index.crates.io-offline
     '';
 in
 pkgs.runCommand "cargo-nix-plugin-offline-build-test"

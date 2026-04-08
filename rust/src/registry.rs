@@ -11,6 +11,91 @@ use std::time::Duration;
 use tame_index::index::{FileLock, SparseIndex};
 use tame_index::{IndexKrate, IndexVersion, KrateName};
 
+/// Canonical upstream crates.io sparse index URL.
+pub const CRATES_IO_SPARSE_URL: &str = "sparse+https://index.crates.io/";
+
+/// Cargo's own env var for `registries.crates-io.index` (config-env mapping,
+/// see `cargo help environment-variables`). Reusing it means a shell that
+/// already redirects `cargo` redirects us too.
+pub const CRATES_IO_INDEX_ENV: &str = "CARGO_REGISTRIES_CRATES_IO_INDEX";
+
+/// Decide which sparse index URL to use for crates.io packages.
+///
+/// Precedence (first match wins):
+/// 1. Explicit override (`--index` on the prefetch CLI).
+/// 2. `$CARGO_REGISTRIES_CRATES_IO_INDEX` — cargo's own override.
+/// 3. `[source.crates-io] replace-with` chain in `.cargo/config.toml`
+///    (discovered upward from `workspace_root`, then `$CARGO_HOME`).
+/// 4. Upstream `sparse+https://index.crates.io/`.
+///
+/// Shared by the FFI entry point and `cargo-nix-prefetch` so both observe
+/// the exact same mirror in a given environment.
+pub fn resolve_crates_io_index(
+    explicit: Option<&str>,
+    workspace_root: &Path,
+    cargo_home: &Path,
+) -> String {
+    use crate::cargo_config::{discover_crates_io_replacement, SourceReplacement};
+
+    if let Some(url) = explicit {
+        return normalize_index_url(url);
+    }
+    if let Some(url) = std::env::var(CRATES_IO_INDEX_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return normalize_index_url(&url);
+    }
+    match discover_crates_io_replacement(workspace_root, cargo_home) {
+        SourceReplacement::Registry(url) => {
+            eprintln!("cargo-nix: using crates.io replacement from .cargo/config.toml: {url}");
+            normalize_index_url(&url)
+        }
+        SourceReplacement::Unsupported { kind } => {
+            eprintln!(
+                "cargo-nix: warning: .cargo/config.toml replaces crates-io with a \
+                 {kind} source, which cannot serve sparse-index metadata; \
+                 falling back to upstream index.crates.io"
+            );
+            CRATES_IO_SPARSE_URL.to_string()
+        }
+        SourceReplacement::None => CRATES_IO_SPARSE_URL.to_string(),
+    }
+}
+
+/// Map a Cargo.lock `source` string to the sparse index URL it should be
+/// fetched from, redirecting crates.io through `crates_io_index`.
+///
+/// Returns `None` for non-registry sources (path/git) where no index
+/// lookup is needed. Shared by the lockfile resolver and the prefetch
+/// CLI so both classify sources identically.
+pub fn source_to_index_url(source: Option<&str>, crates_io_index: &str) -> Option<String> {
+    const CRATES_IO_GIT: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    match source? {
+        s if s == CRATES_IO_GIT || s.contains("index.crates.io") => {
+            Some(crates_io_index.to_string())
+        }
+        s if s.starts_with("sparse+") || s.starts_with("registry+") => Some(normalize_index_url(s)),
+        _ => None,
+    }
+}
+
+/// Normalize a registry index URL to the `sparse+https://.../` form
+/// tame-index expects: ensure a `sparse+` prefix and a trailing slash.
+/// Accepts bare `https://` (as cargo's `[source.x] registry = ...` uses)
+/// and `registry+https://` (lockfile-style) and rewrites both.
+pub fn normalize_index_url(url: &str) -> String {
+    let stripped = url
+        .strip_prefix("sparse+")
+        .or_else(|| url.strip_prefix("registry+"))
+        .unwrap_or(url);
+    let mut out = format!("sparse+{stripped}");
+    if !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
 /// Find the on-disk index directory for a given registry URL.
 ///
 /// Cargo stores index caches under `$CARGO_HOME/registry/index/<name>-<hash>/`.
@@ -47,21 +132,8 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
     // find_index_dir scans by hostname prefix, which handles both
     // cargo's internal hash-suffixed dirs and user-provided dirs
     // (e.g. read-only nix store paths).
-    if let Some(exact_path) = find_index_dir(cargo_home, url) {
-        // First try tame-index's native sparse cache format.
-        let location = tame_index::index::IndexLocation {
-            url: tame_index::index::IndexUrl::from(url),
-            root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
-                exact_path.to_string_lossy().as_ref(),
-            )),
-            cargo_version: None,
-        };
-        if let Ok(idx) = SparseIndex::new(location) {
-            if let Ok(Some(krate)) = idx.cached_krate(krate_name, &lock) {
-                return Ok(krate);
-            }
-        }
-
+    if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name) {
+        return Ok(krate);
     }
 
     // Fall back to tame-index's own cache layout + remote fetch.
@@ -81,7 +153,9 @@ fn host_from_url(url: &str) -> Option<&str> {
         .strip_prefix("sparse+")
         .or_else(|| url.strip_prefix("registry+"))
         .unwrap_or(url);
-    let url = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
     url.split('/').next()
 }
 
@@ -92,11 +166,7 @@ fn netrc_credentials_for_url(url: &str) -> Option<(String, String)> {
 
     let netrc_path = std::env::var("NETRC")
         .ok()
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| format!("{}/.netrc", h))
-        })?;
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{}/.netrc", h)))?;
 
     let file = std::fs::File::open(&netrc_path).ok()?;
     let reader = std::io::BufReader::new(file);
@@ -110,10 +180,7 @@ fn netrc_credentials_for_url(url: &str) -> Option<(String, String)> {
         .map(|(_, m)| m)
         .or(netrc.default.as_ref())?;
 
-    Some((
-        machine.login.clone(),
-        machine.password.clone()?,
-    ))
+    Some((machine.login.clone(), machine.password.clone()?))
 }
 
 /// Shared HTTP agent: ureq's Agent is Arc-backed, so clones share the
@@ -187,7 +254,10 @@ fn index_for_url(cargo_home: &Path, url: &str) -> Result<std::sync::Arc<SparseIn
 /// `Retryable` is a server-suggested wait (parsed from `Retry-After`);
 /// `None` means "use the computed exponential-backoff schedule".
 enum FetchError {
-    Retryable { msg: String, delay: Option<Duration> },
+    Retryable {
+        msg: String,
+        delay: Option<Duration>,
+    },
     Permanent(String),
 }
 
@@ -253,7 +323,12 @@ fn do_fetch_one(
 
     let status = response.status();
     if !status.is_success() {
-        return Err(classify_status(status.as_u16(), response.headers(), name, url));
+        return Err(classify_status(
+            status.as_u16(),
+            response.headers(),
+            name,
+            url,
+        ));
     }
 
     let body = response
@@ -312,12 +387,7 @@ fn classify_ureq_error(e: ureq::Error, name: &str, url: &str) -> FetchError {
 ///
 /// 5xx and 429 are retryable; on 429/503 we look for `Retry-After` and
 /// pass it to the backoff loop. Other 4xx are permanent.
-fn classify_status(
-    status: u16,
-    headers: &http::HeaderMap,
-    name: &str,
-    url: &str,
-) -> FetchError {
+fn classify_status(status: u16, headers: &http::HeaderMap, name: &str, url: &str) -> FetchError {
     let msg = format!("HTTP {status} fetching '{name}' from '{url}'");
     match status {
         429 | 503 => {
@@ -325,7 +395,9 @@ fn classify_status(
             FetchError::Retryable { msg, delay }
         }
         500..=599 => FetchError::Retryable { msg, delay: None },
-        404 => FetchError::Permanent(format!("crate '{name}' not found in remote index '{url}' (HTTP 404)")),
+        404 => FetchError::Permanent(format!(
+            "crate '{name}' not found in remote index '{url}' (HTTP 404)"
+        )),
         // Other 4xx (400, 401, 403, ...) — permanent client/auth errors.
         400..=499 => FetchError::Permanent(msg),
         // Anything else (1xx, 3xx that ureq didn't follow): conservative
@@ -347,7 +419,11 @@ fn classify_status(
 /// Returns `None` if the header is missing or unparseable; the retry
 /// loop falls back to its computed backoff schedule in that case.
 fn parse_retry_after(headers: &http::HeaderMap) -> Option<Duration> {
-    let v = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let v = headers
+        .get(http::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
 
     // Form 1: integer seconds.
     if let Ok(secs) = v.parse::<u64>() {
@@ -454,7 +530,13 @@ fn jitter_ms(max_ms: u64) -> u64 {
 /// because the serial [`lookup_crate`] path surfaces them cleanly later.
 ///
 /// No-ops for crates already in the local cache.
-pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) {
+///
+/// Returns `Err` if **every** fetch failed. Per-crate errors are still
+/// otherwise swallowed (the serial [`lookup_crate`] path reports them
+/// with proper context), but a 100% failure rate almost always means
+/// the index is unreachable, and letting that degrade silently produces
+/// derivations whose hashes diverge from a connected build (#20).
+pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
     use std::sync::Mutex;
 
     // Skip anything already cached. Cheap: just a file stat per entry.
@@ -465,13 +547,12 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) {
         .collect();
 
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Force-create all SparseIndex objects (and their cache dirs) on the
     // main thread before workers touch them, so there's no mkdir race.
-    let urls: std::collections::BTreeSet<&str> =
-        pending.iter().map(|(u, _)| u.as_str()).collect();
+    let urls: std::collections::BTreeSet<&str> = pending.iter().map(|(u, _)| u.as_str()).collect();
     for url in &urls {
         let _ = index_for_url(cargo_home, url);
     }
@@ -480,6 +561,8 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) {
     let total = pending.len();
     let queue = Mutex::new(pending.into_iter());
     let agent = shared_agent();
+    let ok_count = std::sync::atomic::AtomicUsize::new(0);
+    let last_err: Mutex<Option<String>> = Mutex::new(None);
 
     std::thread::scope(|s| {
         for _ in 0..PREFETCH_WORKERS.min(total) {
@@ -488,29 +571,85 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) {
                     return;
                 };
                 let Ok(idx) = index_for_url(cargo_home, &url) else {
+                    *last_err.lock().unwrap() = Some(format!("failed to open index for '{url}'"));
                     continue;
                 };
-                let _ = fetch_one(agent, &idx, &url, &name);
+                match fetch_one(agent, &idx, &url, &name) {
+                    Ok(_) => {
+                        ok_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        *last_err.lock().unwrap() = Some(e);
+                    }
+                }
             });
         }
     });
 
+    let ok = ok_count.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
-        "cargo-nix: prefetched {total} index entries in {:.2}s",
+        "cargo-nix: prefetched {ok}/{total} index entries in {:.2}s",
         start.elapsed().as_secs_f64()
     );
+
+    if ok == 0 {
+        let detail = last_err
+            .into_inner()
+            .unwrap()
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(format!(
+            "all {total} registry index fetches failed — is the index reachable? \
+             Set CARGO_REGISTRIES_CRATES_IO_INDEX or configure \
+             [source.crates-io] replace-with in .cargo/config.toml to point at a mirror. \
+             Last error: {detail}"
+        ));
+    }
+    Ok(())
 }
 
 /// Is this crate already in the local tame-index cache?
-fn is_cached(cargo_home: &Path, url: &str, name: &str) -> bool {
-    let Ok(idx) = index_for_url(cargo_home, url) else {
-        return false;
-    };
+///
+/// Probes both tame-index's own cache layout and any cargo-created /
+/// user-supplied index dir (the same two paths [`lookup_crate`] tries),
+/// so a fully pre-seeded `cargoHome` correctly short-circuits the
+/// prefetch pool instead of attempting (doomed) network fetches.
+pub fn is_cached(cargo_home: &Path, url: &str, name: &str) -> bool {
     let Ok(krate_name) = KrateName::crates_io(name) else {
         return false;
     };
-    let lock = FileLock::unlocked();
-    matches!(idx.cached_krate(krate_name, &lock), Ok(Some(_)))
+    if cached_in_existing_dir(cargo_home, url, krate_name).is_some() {
+        return true;
+    }
+    let Ok(idx) = index_for_url(cargo_home, url) else {
+        return false;
+    };
+    matches!(
+        idx.cached_krate(krate_name, &FileLock::unlocked()),
+        Ok(Some(_))
+    )
+}
+
+/// Probe for `name` in a pre-existing index dir under `cargo_home`
+/// (cargo-populated or user-provided). Unlike [`index_for_url`] this
+/// never creates directories, so it is safe against a read-only
+/// `cargoHome` from the nix store.
+fn cached_in_existing_dir(
+    cargo_home: &Path,
+    url: &str,
+    krate_name: KrateName<'_>,
+) -> Option<IndexKrate> {
+    let exact_path = find_index_dir(cargo_home, url)?;
+    let location = tame_index::index::IndexLocation {
+        url: tame_index::index::IndexUrl::from(url),
+        root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
+            exact_path.to_string_lossy().as_ref(),
+        )),
+        cargo_version: None,
+    };
+    SparseIndex::new(location)
+        .ok()?
+        .cached_krate(krate_name, &FileLock::unlocked())
+        .ok()?
 }
 
 /// Find a specific version in an `IndexKrate`.
@@ -574,7 +713,53 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn source_to_index_url_classifies() {
+        let mirror = "sparse+https://mirror.example/";
+        // crates.io — both lockfile spellings — redirects to the mirror.
+        assert_eq!(
+            source_to_index_url(
+                Some("registry+https://github.com/rust-lang/crates.io-index"),
+                mirror
+            ),
+            Some(mirror.into())
+        );
+        assert_eq!(
+            source_to_index_url(Some("sparse+https://index.crates.io/"), mirror),
+            Some(mirror.into())
+        );
+        // Third-party registry passes through normalized.
+        assert_eq!(
+            source_to_index_url(Some("registry+https://other.example/index"), mirror),
+            Some("sparse+https://other.example/index/".into())
+        );
+        // Non-registry sources → None.
+        assert_eq!(
+            source_to_index_url(Some("git+https://github.com/x/y#abc"), mirror),
+            None
+        );
+        assert_eq!(source_to_index_url(None, mirror), None);
+    }
 
+    /// Regression for #20: an unreachable index must surface as an
+    /// error, not silently degrade to "no features".
+    #[test]
+    fn prefetch_total_failure_is_an_error() {
+        let tmp =
+            std::env::temp_dir().join(format!("cargo-nix-prefetch-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 0.0.0.0:1 refuses connections without leaving the sandbox.
+        let jobs = vec![
+            ("sparse+http://0.0.0.0:1/".to_string(), "serde".to_string()),
+            ("sparse+http://0.0.0.0:1/".to_string(), "http".to_string()),
+        ];
+        let err = prefetch_index(&tmp, &jobs).expect_err("expected total failure");
+        assert!(err.contains("all 2 registry index fetches failed"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn test_host_from_url() {
@@ -602,11 +787,7 @@ mod tests {
         fs::create_dir_all(&tmp).expect("create tempdir");
 
         // Empty cargo home — no local index cache at all.
-        let result = lookup_crate(
-            &tmp,
-            "sparse+https://index.crates.io/",
-            "serde",
-        );
+        let result = lookup_crate(&tmp, "sparse+https://index.crates.io/", "serde");
 
         let _ = fs::remove_dir_all(&tmp);
 

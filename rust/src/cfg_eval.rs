@@ -195,8 +195,7 @@ mod tests {
             extra_cfgs: vec!["my_platform".to_string()],
             ..linux_x86_64()
         };
-        let platform =
-            Platform::from_str("cfg(all(target_os = \"linux\", my_platform))").unwrap();
+        let platform = Platform::from_str("cfg(all(target_os = \"linux\", my_platform))").unwrap();
         assert!(matches_target(&platform, &target));
     }
 }

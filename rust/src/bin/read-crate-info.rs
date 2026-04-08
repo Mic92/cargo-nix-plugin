@@ -25,13 +25,11 @@ fn main() {
         Some("configure") if args.len() >= 3 => configure(&args[2]),
         Some("build") if args.len() >= 6 => build(&args[2], &args[3], &args[4], &args[5]),
         Some("fixup-deps") if args.len() >= 4 => fixup_deps(&args[2], &args[3]),
-        Some("populate-cache") if args.len() >= 4 => populate_cache(&args[2], &args[3], args.get(4).map(|s| s.as_str())),
         _ => {
             eprintln!("usage:");
             eprintln!("  read-crate-info configure <Cargo.toml>");
             eprintln!("  read-crate-info build <Cargo.toml> <LIB_RUSTC_OPTS> <BIN_RUSTC_OPTS> <SHARED_LIB_EXT>");
             eprintln!("  read-crate-info fixup-deps <DEPS_OPTS> <SHARED_LIB_EXT>");
-            eprintln!("  read-crate-info populate-cache <raw-index-dir> <cargo-home> [index-name]");
             std::process::exit(1);
         }
     }
@@ -116,7 +114,10 @@ fn configure(manifest_path: &str) {
         }
     }
     // authors is an array; CARGO_PKG_AUTHORS is colon-separated.
-    if let Some(authors) = pkg.and_then(|p| p.get("authors")).and_then(|v| v.as_array()) {
+    if let Some(authors) = pkg
+        .and_then(|p| p.get("authors"))
+        .and_then(|v| v.as_array())
+    {
         let joined: Vec<&str> = authors.iter().filter_map(|a| a.as_str()).collect();
         shell_assign("CRATE_PKG_AUTHORS", &joined.join(":"));
     }
@@ -394,7 +395,10 @@ mod tests {
             out.contains(&format!("bytes={}", plain.display())),
             "unmarked crate stays verbatim: {out}"
         );
-        assert!(out.contains("--edition 2021"), "non-extern tokens preserved");
+        assert!(
+            out.contains("--edition 2021"),
+            "non-extern tokens preserved"
+        );
         assert!(!out.contains("utf_8"), "old name gone: {out}");
     }
 
@@ -421,7 +425,10 @@ mod tests {
         assert!(changed);
         // name: my_derive → realderive; ext: .rlib → .so
         assert!(
-            out.contains(&format!("realderive={}/librealderive-abc.so", lib.display())),
+            out.contains(&format!(
+                "realderive={}/librealderive-abc.so",
+                lib.display()
+            )),
             "got: {out}"
         );
     }
@@ -455,59 +462,4 @@ mod tests {
         // Plain token preserved byte-for-byte
         assert!(out.contains(&format!("plain={}/libplain-yyy.rlib", plain.display())));
     }
-}
-
-/// Convert raw JSON-lines index files into tame-index's binary cache format.
-///
-/// Walks `raw_dir` for JSON-lines files (the crates.io sparse index layout),
-/// parses each via `IndexKrate::from_slice`, then writes a proper binary
-/// cache entry so `SparseIndex::cached_krate` can read it.
-fn populate_cache(raw_dir: &str, cargo_home: &str, index_name: Option<&str>) {
-    use tame_index::index::{FileLock, IndexCache, SparseIndex};
-    use tame_index::IndexKrate;
-
-    let raw = Path::new(raw_dir);
-    let home = Path::new(cargo_home);
-
-    // Place under registry/index/ with the given name (or raw dir's basename).   
-    let default_name = raw.file_name().unwrap_or_default();
-    let index_name = index_name.map(std::ffi::OsStr::new).unwrap_or(default_name);
-    let index_root = home.join("registry").join("index").join(index_name);
-    std::fs::create_dir_all(&index_root).expect("create index dir");
-
-    let location = tame_index::index::IndexLocation {
-        url: tame_index::index::IndexUrl::from("sparse+https://index.crates.io/"),
-        root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
-            index_root.to_string_lossy().as_ref(),
-        )),
-        cargo_version: None,
-    };
-    let idx = SparseIndex::new(location).expect("create SparseIndex");
-    let cache = idx.cache();
-    let lock = FileLock::unlocked();
-
-    let mut count = 0usize;
-    fn visit(dir: &Path, cache: &IndexCache, lock: &FileLock, count: &mut usize) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                visit(&path, cache, lock, count);
-            } else if path.file_name().map_or(true, |n| n != "config.json") {
-                let data = std::fs::read(&path).expect("read index file");
-                let krate = match IndexKrate::from_slice(&data) {
-                    Ok(k) => k,
-                    Err(e) => {
-                        eprintln!("warning: skipping {}: {e}", path.display());
-                        continue;
-                    }
-                };
-                cache.write_to_cache(&krate, "offline", lock)
-                    .unwrap_or_else(|e| panic!("write cache for {}: {e}", path.display()));
-                *count += 1;
-            }
-        }
-    }
-    visit(raw, cache, &lock, &mut count);
-    eprintln!("populate-cache: wrote {count} entries to {}", index_root.display());
 }

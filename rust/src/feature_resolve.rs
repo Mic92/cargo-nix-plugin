@@ -107,8 +107,9 @@ pub fn resolve_features(
             for feat in &current_features {
                 if let Some(rules) = pkg.features.get(feat.as_str()) {
                     for rule in rules {
-                        if let Some(rest) =
-                            rule.strip_prefix(&strong).or_else(|| rule.strip_prefix(&weak))
+                        if let Some(rest) = rule
+                            .strip_prefix(&strong)
+                            .or_else(|| rule.strip_prefix(&weak))
                         {
                             dep_features.push(rest.to_string());
                         }
@@ -257,7 +258,8 @@ mod tests {
                 &[],
             ),
         );
-        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let feats = result_raw.features.get("A").unwrap();
         assert!(feats.contains("default"));
         assert!(feats.contains("foo"));
@@ -311,7 +313,8 @@ mod tests {
             "foo-pkg".to_string(),
             make_package(&[("default", &[])], &[], &[]),
         );
-        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let a = result_raw.features.get("A").unwrap();
         assert!(a.contains("use-foo"));
         assert!(!a.contains("foo"), "dep: leaked self-feature: {a:?}");
@@ -337,7 +340,8 @@ mod tests {
             "foo-pkg".to_string(),
             make_package(&[("default", &[])], &[], &[]),
         );
-        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let a = result_raw.features.get("A").unwrap();
         assert!(a.contains("foo"), "legacy implicit missing: {a:?}");
         assert!(result_raw.features.contains_key("foo-pkg"));
@@ -377,7 +381,8 @@ mod tests {
             make_package(&[("x", &["c/y"])], &[("c", "C", false, &[])], &[]),
         );
         packages.insert("C".to_string(), make_package(&[("y", &[])], &[], &[]));
-        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let b_feats = result_raw.features.get("B").unwrap();
         assert!(b_feats.contains("x"), "B missing x: {:?}", b_feats);
         let c_feats = result_raw.features.get("C").unwrap();
@@ -430,7 +435,11 @@ mod tests {
             "non-weak dep/feat must enable explicit feature 'num-bigint': {feats:?}"
         );
         // And the dep itself got std.
-        assert!(result_raw.features.get("num-bigint-pkg").unwrap().contains("std"));
+        assert!(result_raw
+            .features
+            .get("num-bigint-pkg")
+            .unwrap()
+            .contains("std"));
     }
 
     /// Weak `dep?/feat` must NOT activate the optional dep or its
@@ -452,8 +461,7 @@ mod tests {
             make_package(&[("std", &[])], &[], &[]),
         );
 
-        let result_raw =
-            resolve_features(&packages, &[("A".to_string(), vec!["std".to_string()])]);
+        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["std".to_string()])]);
 
         let feats = result_raw.features.get("A").unwrap();
         assert!(feats.contains("std"));
@@ -509,10 +517,7 @@ mod tests {
         packages.insert(
             "A".to_string(),
             make_package(
-                &[
-                    ("use-opt", &["dep:opt"]),
-                    ("std", &["opt?/std"]),
-                ],
+                &[("use-opt", &["dep:opt"]), ("std", &["opt?/std"])],
                 &[("opt", "opt-pkg", false, &[])],
                 &["opt"],
             ),
@@ -524,11 +529,17 @@ mod tests {
 
         let result_raw = resolve_features(
             &packages,
-            &[("A".to_string(), vec!["use-opt".to_string(), "std".to_string()])],
+            &[(
+                "A".to_string(),
+                vec!["use-opt".to_string(), "std".to_string()],
+            )],
         );
 
         // use-opt enabled the dep; std's weak rule must now forward.
-        let opt = result_raw.features.get("opt-pkg").expect("opt-pkg in graph");
+        let opt = result_raw
+            .features
+            .get("opt-pkg")
+            .expect("opt-pkg in graph");
         assert!(opt.contains("std"), "weak forward dropped: {opt:?}");
     }
 
@@ -545,7 +556,8 @@ mod tests {
             "B".to_string(),
             make_package(&[("default", &["net"]), ("net", &[])], &[], &[]),
         );
-        let result_raw = resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
+        let result_raw =
+            resolve_features(&packages, &[("A".to_string(), vec!["default".to_string()])]);
         let b_feats = result_raw.features.get("B").unwrap();
         assert!(
             b_feats.contains("default"),
@@ -570,11 +582,7 @@ mod tests {
         // Root has features; pulls middle with default-features=true.
         packages.insert(
             "root".to_string(),
-            make_package(
-                &[("default", &[])],
-                &[("middle", "middle", true, &[])],
-                &[],
-            ),
+            make_package(&[("default", &[])], &[("middle", "middle", true, &[])], &[]),
         );
         // Middle has NO feature keys at all. "default" is not valid here.
         packages.insert(
@@ -595,7 +603,10 @@ mod tests {
         // Middle was visited, resolved to empty (correct per cargo).
         assert_eq!(result_raw.features.get("middle"), Some(&BTreeSet::new()));
         // Leaf was REACHED via middle and got default → std.
-        let leaf = result_raw.features.get("leaf").expect("leaf must be reached via middle");
+        let leaf = result_raw
+            .features
+            .get("leaf")
+            .expect("leaf must be reached via middle");
         assert!(leaf.contains("std"), "leaf missing std: {leaf:?}");
     }
 
