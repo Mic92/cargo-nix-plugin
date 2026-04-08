@@ -6,8 +6,9 @@ primop.
 
 ## What It Does
 
-- Resolves Cargo workspaces at native speed — either by shelling out to
-  `cargo metadata` automatically, or by parsing pre-provided metadata JSON
+- Resolves Cargo workspaces at native speed — directly from `Cargo.lock` and
+  the sparse registry index, no `cargo` binary required (or, optionally, from
+  pre-generated `cargo metadata` JSON)
 - Pre-evaluates `cfg()` target expressions for the requested platform
 - Returns a Nix attrset compatible with `buildRustCrate`
 - Eliminates the `crate2nix generate` step and the 50K-100K line `Cargo.nix`
@@ -31,9 +32,9 @@ Or use the flake output:
 
 ## Usage
 
-### Simple (automatic)
+### Default (lockfile resolve)
 
-Just point at your workspace root — the plugin calls `cargo metadata` for you:
+Just point at your workspace root:
 
 ```nix
 cargoNix = cargo-nix-plugin.lib {
@@ -42,30 +43,31 @@ cargoNix = cargo-nix-plugin.lib {
 };
 ```
 
-This shells out to `cargo metadata --format-version 1 --locked` during Nix
-evaluation. It uses the user's `CARGO_HOME` cache, so it's near-instant when
-dependencies have been fetched before. Network access is required on first use.
+The plugin reads `Cargo.lock` plus the sparse registry index directly — no
+`cargo` binary, no crate sources at eval time. On first use it fetches each
+crate's index entry (a few hundred bytes) into `$CARGO_HOME` and reuses it
+thereafter.
 
-The subprocess runs with its working directory set to the manifest's parent,
-so cargo discovers `.cargo/config.toml` relative to your workspace. If your
-workspace references a private registry and you pass `src` as a store path,
-include `.cargo/config.toml` in the source fileset — or pass the registry
-explicitly via `cargoConfig`:
+If your environment already redirects cargo to a mirror, the resolver follows
+the same configuration — `CARGO_REGISTRIES_CRATES_IO_INDEX` or
+`[source.crates-io] replace-with` in `.cargo/config.toml` — so no
+plugin-specific setup is required:
 
-```nix
-cargoNix = cargo-nix-plugin.lib {
-  inherit pkgs;
-  src = ./.;
-  cargoConfig = [ ''registries.my-private.index="sparse+https://…/index/"'' ];
-};
+```toml
+# .cargo/config.toml — honoured by both cargo and the plugin
+[source.crates-io]
+replace-with = "mirror"
+[source.mirror]
+registry = "sparse+https://artifactory.example/api/cargo/crates/index/"
 ```
 
-Each `cargoConfig` entry is forwarded as `--config <value>`; cargo accepts
-both `KEY=VALUE` strings and paths to `.toml` files.
+If every index lookup fails (e.g. egress to `index.crates.io` is blocked and
+no mirror is configured), evaluation fails loudly rather than silently
+producing derivations with missing features.
 
-### Explicit (pure, offline)
+### Explicit metadata
 
-For pure evaluation or CI without network, pre-generate the metadata:
+Alternatively, pre-generate cargo's resolution and pass it in:
 
 ```bash
 cargo metadata --format-version 1 --locked > metadata.json
@@ -88,40 +90,7 @@ A helper is also available:
 nix run .#generate-metadata -- > metadata.json
 ```
 
-### Lockfile resolve (no `cargo metadata`, no crate sources at eval time)
-
-The third mode reads `Cargo.lock` plus the sparse registry index directly,
-so evaluation needs neither a `cargo` binary nor downloaded crate sources —
-only the per-crate index entries:
-
-```nix
-cargoNix = cargo-nix-plugin.lib {
-  inherit pkgs;
-  src = ./.;             # Cargo.toml + Cargo.lock
-  # no metadata, no cargoHome — nothing else needed
-};
-```
-
-On first use the resolver fetches each crate's index entry (a few hundred
-bytes) into `$CARGO_HOME` and reuses it thereafter. If your environment
-already redirects cargo to a mirror, the resolver follows the same
-configuration — `CARGO_REGISTRIES_CRATES_IO_INDEX` or
-`[source.crates-io] replace-with` in `.cargo/config.toml` — so no
-plugin-specific setup is required:
-
-```toml
-# .cargo/config.toml — honoured by both cargo and the plugin
-[source.crates-io]
-replace-with = "mirror"
-[source.mirror]
-registry = "sparse+https://artifactory.example/api/cargo/crates/index/"
-```
-
-If every index lookup fails (e.g. egress to `index.crates.io` is blocked and
-no mirror is configured), evaluation fails loudly rather than silently
-producing derivations with missing features.
-
-#### Warming the cache out of band
+### Warming the index cache out of band
 
 In the rare case where the evaluating host has *no* reachable index at all,
 `cargo-nix-prefetch` can populate `$CARGO_HOME` ahead of time on a connected
@@ -240,8 +209,9 @@ compilation.
 1. **Nix plugin**: Adds a `builtins.resolveCargoWorkspace` primop to Nix. When
    you call `cargo-nix-plugin.lib { ... }`, this primop resolves your entire
    Cargo workspace — dependencies, features, platform-specific conditionals —
-   and returns the crate graph as a Nix attrset. In automatic mode it shells
-   out to `cargo metadata`; in explicit mode it parses pre-provided JSON.
+   and returns the crate graph as a Nix attrset. In the default mode it reads
+   `Cargo.lock` and the sparse registry index directly; in explicit mode it
+   parses pre-provided `cargo metadata` JSON.
 
 2. **Nix wrapper**: Takes the resolved crate graph and
    builds each crate with `buildRustCrate`, wiring up dependencies
