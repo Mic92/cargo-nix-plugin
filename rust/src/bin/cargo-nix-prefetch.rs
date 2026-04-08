@@ -76,20 +76,31 @@ fn main() -> ExitCode {
         }
     };
 
-    // Where to write the cache. --output takes precedence; otherwise
-    // --cargo-home; otherwise $CARGO_HOME / ~/.cargo.
-    let cargo_home = output
-        .or(cargo_home_arg)
-        .or_else(|| std::env::var_os("CARGO_HOME").map(PathBuf::from))
+    // The user's ambient CARGO_HOME — where cargo's own config.toml
+    // lives. Always consulted for mirror discovery, regardless of where
+    // the cache is written.
+    let ambient_cargo_home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
+            std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .unwrap_or_default();
-            home.join(".cargo")
+                .unwrap_or_default()
+                .join(".cargo")
         });
 
-    let crates_io_url =
-        registry::resolve_crates_io_index(index_override.as_deref(), &workspace_root, &cargo_home);
+    // Where to write the cache. --output takes precedence; otherwise
+    // --cargo-home; otherwise the ambient $CARGO_HOME. Decoupled from
+    // config discovery so `--output ./fresh` still picks up a mirror
+    // from `~/.cargo/config.toml`.
+    let cargo_home = output
+        .or(cargo_home_arg)
+        .unwrap_or_else(|| ambient_cargo_home.clone());
+
+    let crates_io_url = registry::resolve_crates_io_index(
+        index_override.as_deref(),
+        &workspace_root,
+        &ambient_cargo_home,
+    );
 
     let jobs = match collect_jobs(&cargo_lock, &crates_io_url) {
         Ok(j) => j,
