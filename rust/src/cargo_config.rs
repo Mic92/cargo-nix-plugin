@@ -34,83 +34,124 @@ pub enum SourceReplacement {
     Unsupported { kind: &'static str },
 }
 
-/// Look for a `.cargo/config.toml` (or legacy `.cargo/config`) by
-/// walking up from `start` and in `$CARGO_HOME`, mirroring cargo's own
-/// search order. Returns the first one found.
-pub fn find_config(start: &Path, cargo_home: &Path) -> Option<std::path::PathBuf> {
+/// Enumerate every `.cargo/config.toml` cargo would read, in the order
+/// it merges them (nearest first): walking up from `start`, then
+/// `$CARGO_HOME`. Unlike cargo we don't merge — callers iterate and
+/// take the first hit — but yielding *all* of them means a
+/// workspace-local config without a `[source]` section doesn't shadow a
+/// mirror configured in `$CARGO_HOME/config.toml`.
+///
+/// The legacy extensionless `.cargo/config` (deprecated since 1.39,
+/// hard-warned since 1.79) is intentionally not consulted.
+pub fn find_configs(start: &Path, cargo_home: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut push_if_file = |p: std::path::PathBuf| {
+        if p.is_file() {
+            out.push(p);
+        }
+    };
     let mut dir = Some(start);
     while let Some(d) = dir {
-        for name in ["config.toml", "config"] {
-            let p = d.join(".cargo").join(name);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
+        push_if_file(d.join(".cargo").join("config.toml"));
         dir = d.parent();
     }
-    for name in ["config.toml", "config"] {
-        let p = cargo_home.join(name);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    push_if_file(cargo_home.join("config.toml"));
+    out
 }
 
 /// Parse a cargo config TOML string and resolve where `crates-io` is
-/// redirected to, following `replace-with` chains.
+/// redirected to, following `replace-with` chains. Also honours
+/// `[registries.crates-io] index = "..."`, the config-file twin of
+/// `$CARGO_REGISTRIES_CRATES_IO_INDEX`.
 pub fn crates_io_replacement(config: &str) -> SourceReplacement {
     let Ok(doc) = toml::from_str::<toml::Value>(config) else {
         return SourceReplacement::None;
     };
-    let Some(sources) = doc.get("source").and_then(|s| s.as_table()) else {
-        return SourceReplacement::None;
-    };
+
+    // `[source.crates-io] replace-with` takes precedence over
+    // `[registries.crates-io] index` in cargo, so resolve sources first.
+    if let Some(r) = resolve_source_chain(&doc) {
+        return r;
+    }
+
+    if let Some(url) = doc
+        .get("registries")
+        .and_then(|r| r.get("crates-io"))
+        .and_then(|c| c.get("index"))
+        .and_then(|v| v.as_str())
+    {
+        return SourceReplacement::Registry(url.to_string());
+    }
+
+    SourceReplacement::None
+}
+
+/// Resolve `[source.crates-io] replace-with` chains. Returns `None`
+/// (rather than `SourceReplacement::None`) when no `[source.crates-io]`
+/// is configured at all, so the caller can fall through to
+/// `[registries.crates-io]`.
+fn resolve_source_chain(doc: &toml::Value) -> Option<SourceReplacement> {
+    let sources = doc.get("source").and_then(|s| s.as_table())?;
 
     // Follow the replace-with chain starting from crates-io. Cap the
     // hop count so a cycle in a broken config can't spin forever.
     let mut current = "crates-io";
     for _ in 0..16 {
         let Some(src) = sources.get(current).and_then(|s| s.as_table()) else {
-            // Chain points at an undefined source — treat as no
-            // replacement rather than guessing.
-            return SourceReplacement::None;
+            // Chain points at an undefined source. crates-io itself
+            // missing means "this file says nothing about it"; a
+            // dangling hop later in the chain is a misconfiguration we
+            // surface as "no replacement" rather than guessing.
+            return if current == "crates-io" {
+                None
+            } else {
+                Some(SourceReplacement::None)
+            };
         };
         if let Some(next) = src.get("replace-with").and_then(|v| v.as_str()) {
             current = next;
             continue;
         }
         // Terminal source. crates-io itself with no replace-with means
-        // "not replaced".
+        // "not replaced" — but it *is* a statement, so don't fall
+        // through to [registries].
         if current == "crates-io" {
-            return SourceReplacement::None;
+            return Some(SourceReplacement::None);
         }
         if let Some(url) = src.get("registry").and_then(|v| v.as_str()) {
-            return SourceReplacement::Registry(url.to_string());
+            return Some(SourceReplacement::Registry(url.to_string()));
         }
         for kind in ["local-registry", "directory", "git"] {
             if src.get(kind).is_some() {
-                return SourceReplacement::Unsupported { kind };
+                return Some(SourceReplacement::Unsupported { kind });
             }
         }
-        return SourceReplacement::None;
+        return Some(SourceReplacement::None);
     }
-    SourceReplacement::None
+    Some(SourceReplacement::None)
 }
 
-/// Convenience: search for a config file and resolve the crates.io
-/// replacement in one step.
+/// Convenience: search every applicable config file (nearest first) and
+/// return the first one that expresses a crates.io replacement.
+///
+/// Stopping at the first *hit* (rather than the first *file*) is what
+/// makes this match cargo's merge semantics for our purposes: a
+/// workspace-local `.cargo/config.toml` that only sets `[build]` no
+/// longer shadows a mirror in `$CARGO_HOME/config.toml`.
 pub fn discover_crates_io_replacement(
     workspace_root: &Path,
     cargo_home: &Path,
 ) -> SourceReplacement {
-    let Some(path) = find_config(workspace_root, cargo_home) else {
-        return SourceReplacement::None;
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(s) => crates_io_replacement(&s),
-        Err(_) => SourceReplacement::None,
+    for path in find_configs(workspace_root, cargo_home) {
+        let Ok(s) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match crates_io_replacement(&s) {
+            SourceReplacement::None => continue,
+            hit => return hit,
+        }
     }
+    SourceReplacement::None
 }
 
 #[cfg(test)]
@@ -192,26 +233,89 @@ mod tests {
     }
 
     #[test]
-    fn find_config_walks_up() {
+    fn registries_crates_io_index() {
+        let cfg = r#"
+            [registries.crates-io]
+            index = "sparse+https://mirror.example/"
+        "#;
+        assert_eq!(
+            crates_io_replacement(cfg),
+            SourceReplacement::Registry("sparse+https://mirror.example/".into())
+        );
+    }
+
+    #[test]
+    fn source_replace_with_beats_registries_index() {
+        let cfg = r#"
+            [registries.crates-io]
+            index = "sparse+https://wrong.example/"
+            [source.crates-io]
+            replace-with = "m"
+            [source.m]
+            registry = "sparse+https://right.example/"
+        "#;
+        assert_eq!(
+            crates_io_replacement(cfg),
+            SourceReplacement::Registry("sparse+https://right.example/".into())
+        );
+    }
+
+    #[test]
+    fn find_configs_walks_up_and_includes_cargo_home() {
         let tmp = tempdir();
         let nested = tmp.join("a/b/c");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(tmp.join(".cargo")).unwrap();
         std::fs::write(tmp.join(".cargo/config.toml"), "").unwrap();
 
-        let found = find_config(&nested, Path::new("/nonexistent")).unwrap();
-        assert_eq!(found, tmp.join(".cargo/config.toml"));
-    }
-
-    #[test]
-    fn find_config_falls_back_to_cargo_home() {
         let home = tempdir();
         std::fs::write(home.join("config.toml"), "").unwrap();
-        // Start from a path with no real ancestors so the walk-up phase
-        // cannot accidentally find a .cargo/config.toml that the build
-        // sandbox (or developer machine) happens to have lying around.
-        let found = find_config(Path::new("/nonexistent-workspace-root"), &home).unwrap();
-        assert_eq!(found, home.join("config.toml"));
+
+        let found = find_configs(&nested, &home);
+        // The walk-up may also pick up `.cargo/config.toml` files from
+        // ancestors outside our tempdir (e.g. the cargo vendoring config
+        // that nixpkgs' cargoSetupHook writes at /build/.cargo). Assert
+        // only on what we control: both expected entries present, in
+        // order, with the workspace-local one first.
+        let ws_cfg = tmp.join(".cargo/config.toml");
+        let home_cfg = home.join("config.toml");
+        let pos = |p: &std::path::Path| found.iter().position(|f| f == p).unwrap();
+        assert_eq!(found.first(), Some(&ws_cfg), "found = {found:?}");
+        assert!(pos(&ws_cfg) < pos(&home_cfg), "found = {found:?}");
+    }
+
+    /// Regression: a workspace-local config without a [source] section
+    /// must not shadow a mirror configured further out.
+    ///
+    /// We can't rely on `$CARGO_HOME/config.toml` here because the
+    /// walk-up to `/` may encounter unrelated configs first (the nix
+    /// build sandbox places one at `/build/.cargo`). Instead we put the
+    /// mirror one level *above* the workspace — still found by walk-up,
+    /// still proves the "skip files that say nothing" behaviour.
+    #[test]
+    fn discover_skips_configs_without_source() {
+        let tmp = tempdir();
+        let ws = tmp.join("outer/ws");
+        std::fs::create_dir_all(ws.join(".cargo")).unwrap();
+        std::fs::write(ws.join(".cargo/config.toml"), "[build]\njobs = 4\n").unwrap();
+
+        let outer = tmp.join("outer");
+        std::fs::create_dir_all(outer.join(".cargo")).unwrap();
+        std::fs::write(
+            outer.join(".cargo/config.toml"),
+            r#"
+                [source.crates-io]
+                replace-with = "m"
+                [source.m]
+                registry = "sparse+https://mirror.example/"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            discover_crates_io_replacement(&ws, Path::new("/nonexistent-cargo-home")),
+            SourceReplacement::Registry("sparse+https://mirror.example/".into())
+        );
     }
 
     fn tempdir() -> std::path::PathBuf {

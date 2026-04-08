@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tame_index::index::{FileLock, SparseIndex};
+use tame_index::utils::flock::LockOptions;
 use tame_index::{IndexKrate, IndexVersion, KrateName};
 
 /// Canonical upstream crates.io sparse index URL.
@@ -102,19 +103,32 @@ pub fn normalize_index_url(url: &str) -> String {
 /// The hash depends on the cargo version (changed in 1.85.0). Rather than
 /// reproducing the hash algorithm (which requires running `cargo --version`),
 /// we scan the directory for a prefix match on the URL's hostname.
-fn find_index_dir(cargo_home: &Path, url: &str) -> Option<std::path::PathBuf> {
-    let hostname = host_from_url(url)?;
+///
+/// Returns *every* matching directory: a machine that has run both
+/// pre-1.85 and post-1.85 cargo will have two `index.crates.io-<hash>`
+/// siblings, and we can't know which one holds the entry without
+/// looking. Callers probe each in turn.
+fn find_index_dirs(cargo_home: &Path, url: &str) -> Vec<std::path::PathBuf> {
+    let Some(hostname) = host_from_url(url) else {
+        return Vec::new();
+    };
     let index_dir = cargo_home.join("registry").join("index");
-    let entries = std::fs::read_dir(&index_dir).ok()?;
+    let Ok(entries) = std::fs::read_dir(&index_dir) else {
+        return Vec::new();
+    };
 
-    // Directory names look like "index.crates.io-1949cf8c6b5b557f"
+    // Directory names look like "index.crates.io-1949cf8c6b5b557f".
+    // Match on `<host>-` (not bare `<host>`) so e.g. `crates.io` doesn't
+    // accidentally pick up `crates.iomirror-...`.
+    let prefix = format!("{hostname}-");
     entries
         .flatten()
-        .find(|e| {
-            e.file_name().to_string_lossy().starts_with(hostname)
+        .filter(|e| {
+            e.file_name().to_string_lossy().starts_with(&prefix)
                 && e.file_type().is_ok_and(|t| t.is_dir())
         })
         .map(|e| e.path())
+        .collect()
 }
 
 /// Look up a crate in the registry index cache, falling back to a remote
@@ -129,7 +143,7 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
     let lock = FileLock::unlocked();
 
     // Probe for a cargo-created (or user-provided) cache dir first.
-    // find_index_dir scans by hostname prefix, which handles both
+    // find_index_dirs scans by hostname prefix, which handles both
     // cargo's internal hash-suffixed dirs and user-provided dirs
     // (e.g. read-only nix store paths).
     if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name) {
@@ -142,12 +156,21 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
         return Ok(krate);
     }
 
+    // Cache miss → fetch. No cross-process lock needed: the write goes
+    // through `write_cache_atomic`, so the worst a concurrent fetcher
+    // sees is "still absent" and does its own fetch. The package lock
+    // is reserved for herd-collapse in the bulk prefetch path.
     fetch_one(shared_agent(), &sparse_index, url, name)?
         .ok_or_else(|| format!("crate '{name}' not found in remote index '{url}'"))
 }
 
-/// Extract the hostname from a registry URL.
-/// e.g. `sparse+https://index.crates.io/` → `index.crates.io`
+/// Extract the hostname (without port) from a registry URL.
+/// e.g. `sparse+https://index.crates.io/` → `index.crates.io`,
+/// `sparse+http://mirror:8081/` → `mirror`.
+///
+/// Stripping the port matters for [`find_index_dirs`]: cargo's on-disk
+/// directory name is `<host>-<hash>` *without* the port, so a mirror on
+/// a non-default port would otherwise never prefix-match.
 fn host_from_url(url: &str) -> Option<&str> {
     let url = url
         .strip_prefix("sparse+")
@@ -156,7 +179,8 @@ fn host_from_url(url: &str) -> Option<&str> {
     let url = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    url.split('/').next()
+    let authority = url.split('/').next()?;
+    Some(authority.split(':').next().unwrap_or(authority))
 }
 
 /// Look up credentials for a URL's host in ~/.netrc (or $NETRC).
@@ -350,11 +374,118 @@ fn do_fetch_one(
     // A parse failure here is the asn1-rs case from #349206 — a
     // CDN/proxy returned a truncated or otherwise malformed body. Almost
     // always transient, so retry.
-    sparse_index
-        .parse_remote_response(krate_name, http_resp, true, &lock)
+    //
+    // We deliberately pass `write_cache_entry = false` and persist the
+    // entry ourselves below: tame-index's own writer does
+    // `File::create(path)` then streams into it, which a concurrent
+    // reader (another nix-eval-jobs worker, or `cargo` itself) can
+    // observe half-written. Doing the write to a sibling tempfile and
+    // renaming makes the on-disk state always either "absent" or
+    // "complete".
+    let krate = sparse_index
+        .parse_remote_response(krate_name, http_resp, false, &lock)
         .map_err(|e| FetchError::Retryable {
             msg: format!("failed to parse response for '{name}' from '{url}': {e}"),
             delay: None,
+        })?;
+
+    if let Some(ref krate) = krate {
+        let revision = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|etag| format!("etag: {etag}"))
+            .or_else(|| {
+                response
+                    .headers()
+                    .get("last-modified")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|lm| format!("last-modified: {lm}"))
+            })
+            .unwrap_or_else(|| "Unknown".to_owned());
+        // As with tame-index's own write path, a cache write failure is
+        // unfortunate but not fatal: we already have the parsed krate.
+        if let Err(e) = write_cache_atomic(sparse_index, krate_name, krate, &revision) {
+            eprintln!("cargo-nix: warning: failed to cache index entry for '{name}': {e}");
+        }
+    }
+
+    Ok(krate)
+}
+
+/// Persist `krate` to tame-index's cache path via a same-directory
+/// tempfile + `rename`, so concurrent readers never observe a torn entry.
+///
+/// This is the second half of the cross-process safety story: the
+/// `.package-cache` flock around [`prefetch_index`] serializes the bulk
+/// warm-up, and atomic rename keeps individual writes safe even when the
+/// flock is unavailable (NFS, read-only fallback) or when this is reached
+/// via [`lookup_crate`]'s single-crate fallback.
+fn write_cache_atomic(
+    sparse_index: &SparseIndex,
+    name: KrateName<'_>,
+    krate: &IndexKrate,
+    revision: &str,
+) -> Result<(), std::io::Error> {
+    let cache_path = sparse_index.cache().cache_path(name);
+    let cache_path: &Path = cache_path.as_ref();
+    let dir = cache_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+
+    // Same-directory tempfile so `persist` is a rename on the same
+    // filesystem. NamedTempFile cleans itself up on drop if we bail out
+    // before persisting, so no `.tmp` debris on error.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    krate.write_cache_entry(tmp.as_file_mut(), revision)?;
+    // NamedTempFile defaults to mode 0600; cargo's own writer leaves
+    // these umask-default. Match that so a shared CARGO_HOME stays
+    // readable across UIDs.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tmp
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644));
+    }
+    tmp.as_file().sync_data()?;
+    tmp.persist(cache_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Take cargo's global `.package-cache` advisory lock exclusively for the
+/// duration of a cache-mutating operation, blocking until available.
+///
+/// This is the same flock `cargo` itself acquires (exclusive) around index
+/// and source updates, so we follow its contract: hold exclusive while
+/// writing, never write under shared. That serializes us correctly against
+/// a concurrent `cargo fetch` as well as other plugin instances (parallel
+/// `nix-eval-jobs` workers).
+///
+/// `exclusive(true)` enables cargo's read-only-FS → shared fallback, and
+/// tame-index already short-circuits on NFS; any remaining failure is
+/// exotic enough that we degrade to [`FileLock::unlocked`] and let the
+/// atomic-rename writes carry correctness on their own — only herd
+/// collapse is lost.
+fn acquire_package_lock(cargo_home: &Path) -> FileLock {
+    let root = tame_index::PathBuf::from(cargo_home.to_string_lossy().as_ref());
+    LockOptions::cargo_package_lock(Some(root))
+        .and_then(|o| {
+            o.exclusive(true).lock(|_path| {
+                eprintln!(
+                    "cargo-nix: waiting for cargo package lock at {}",
+                    cargo_home.join(".package-cache").display()
+                );
+                None
+            })
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "cargo-nix: warning: failed to acquire cargo package lock \
+                 ({e}); continuing without cross-process serialization"
+            );
+            FileLock::unlocked()
         })
 }
 
@@ -539,13 +670,31 @@ fn jitter_ms(max_ms: u64) -> u64 {
 pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
     use std::sync::Mutex;
 
-    // Skip anything already cached. Cheap: just a file stat per entry.
-    let pending: Vec<(String, String)> = jobs
-        .iter()
-        .filter(|(url, name)| !is_cached(cargo_home, url, name))
-        .cloned()
-        .collect();
+    let filter_pending = || -> Vec<(String, String)> {
+        jobs.iter()
+            .filter(|(url, name)| !is_cached(cargo_home, url, name))
+            .cloned()
+            .collect()
+    };
 
+    // Double-checked locking against cargo's `.package-cache` flock.
+    //
+    // 1. Lock-free probe. If everything is cached, don't touch the lock
+    //    file at all — keeps a read-only store-path `cargoHome` working
+    //    and makes warm steady-state evals contention-free. Safe because
+    //    cache writes are atomic renames: a racing read sees either
+    //    "absent" or "complete", never torn.
+    if filter_pending().is_empty() {
+        return Ok(());
+    }
+
+    // 2. Acquire exclusive (blocking). With N nix-eval-jobs workers on a
+    //    cold cache the first holder warms it; the rest queue here.
+    let _guard = acquire_package_lock(cargo_home);
+
+    // 3. Re-filter under the lock: whoever held it before us likely
+    //    populated some or all of what we need.
+    let pending = filter_pending();
     if pending.is_empty() {
         return Ok(());
     }
@@ -609,24 +758,15 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<()
 
 /// Is this crate already in the local tame-index cache?
 ///
-/// Probes both tame-index's own cache layout and any cargo-created /
-/// user-supplied index dir (the same two paths [`lookup_crate`] tries),
-/// so a fully pre-seeded `cargoHome` correctly short-circuits the
-/// prefetch pool instead of attempting (doomed) network fetches.
+/// Read-only: probes existing index dirs via [`cached_in_existing_dir`]
+/// (hostname-prefix scan), which covers both cargo-populated and
+/// plugin-populated layouts. Never creates directories, so `--check`
+/// stays side-effect-free and a read-only store-path `cargoHome` works.
 pub fn is_cached(cargo_home: &Path, url: &str, name: &str) -> bool {
     let Ok(krate_name) = KrateName::crates_io(name) else {
         return false;
     };
-    if cached_in_existing_dir(cargo_home, url, krate_name).is_some() {
-        return true;
-    }
-    let Ok(idx) = index_for_url(cargo_home, url) else {
-        return false;
-    };
-    matches!(
-        idx.cached_krate(krate_name, &FileLock::unlocked()),
-        Ok(Some(_))
-    )
+    cached_in_existing_dir(cargo_home, url, krate_name).is_some()
 }
 
 /// Probe for `name` in a pre-existing index dir under `cargo_home`
@@ -638,18 +778,22 @@ fn cached_in_existing_dir(
     url: &str,
     krate_name: KrateName<'_>,
 ) -> Option<IndexKrate> {
-    let exact_path = find_index_dir(cargo_home, url)?;
-    let location = tame_index::index::IndexLocation {
-        url: tame_index::index::IndexUrl::from(url),
-        root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
-            exact_path.to_string_lossy().as_ref(),
-        )),
-        cargo_version: None,
-    };
-    SparseIndex::new(location)
-        .ok()?
-        .cached_krate(krate_name, &FileLock::unlocked())
-        .ok()?
+    for exact_path in find_index_dirs(cargo_home, url) {
+        let location = tame_index::index::IndexLocation {
+            url: tame_index::index::IndexUrl::from(url),
+            root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
+                exact_path.to_string_lossy().as_ref(),
+            )),
+            cargo_version: None,
+        };
+        if let Some(k) = SparseIndex::new(location)
+            .ok()
+            .and_then(|idx| idx.cached_krate(krate_name, &FileLock::unlocked()).ok()?)
+        {
+            return Some(k);
+        }
+    }
+    None
 }
 
 /// Find a specific version in an `IndexKrate`.
@@ -770,6 +914,11 @@ mod tests {
         assert_eq!(
             host_from_url("sparse+https://artifactory.infra.ant.dev/artifactory/api/cargo/crates-internal/index/"),
             Some("artifactory.infra.ant.dev")
+        );
+        // Port must be stripped to match cargo's on-disk dir name.
+        assert_eq!(
+            host_from_url("sparse+http://mirror.example:8081/index/"),
+            Some("mirror.example")
         );
     }
 
