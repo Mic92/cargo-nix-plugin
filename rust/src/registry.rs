@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tame_index::index::{FileLock, SparseIndex};
+use tame_index::utils::flock::LockOptions;
 use tame_index::{IndexKrate, IndexVersion, KrateName};
 
 /// Canonical upstream crates.io sparse index URL.
@@ -142,6 +143,10 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
         return Ok(krate);
     }
 
+    // Cache miss → fetch. No cross-process lock needed: the write goes
+    // through `write_cache_atomic`, so the worst a concurrent fetcher
+    // sees is "still absent" and does its own fetch. The package lock
+    // is reserved for herd-collapse in the bulk prefetch path.
     fetch_one(shared_agent(), &sparse_index, url, name)?
         .ok_or_else(|| format!("crate '{name}' not found in remote index '{url}'"))
 }
@@ -350,11 +355,108 @@ fn do_fetch_one(
     // A parse failure here is the asn1-rs case from #349206 — a
     // CDN/proxy returned a truncated or otherwise malformed body. Almost
     // always transient, so retry.
-    sparse_index
-        .parse_remote_response(krate_name, http_resp, true, &lock)
+    //
+    // We deliberately pass `write_cache_entry = false` and persist the
+    // entry ourselves below: tame-index's own writer does
+    // `File::create(path)` then streams into it, which a concurrent
+    // reader (another nix-eval-jobs worker, or `cargo` itself) can
+    // observe half-written. Doing the write to a sibling tempfile and
+    // renaming makes the on-disk state always either "absent" or
+    // "complete".
+    let krate = sparse_index
+        .parse_remote_response(krate_name, http_resp, false, &lock)
         .map_err(|e| FetchError::Retryable {
             msg: format!("failed to parse response for '{name}' from '{url}': {e}"),
             delay: None,
+        })?;
+
+    if let Some(ref krate) = krate {
+        let revision = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|etag| format!("etag: {etag}"))
+            .or_else(|| {
+                response
+                    .headers()
+                    .get("last-modified")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|lm| format!("last-modified: {lm}"))
+            })
+            .unwrap_or_else(|| "Unknown".to_owned());
+        // As with tame-index's own write path, a cache write failure is
+        // unfortunate but not fatal: we already have the parsed krate.
+        if let Err(e) = write_cache_atomic(sparse_index, krate_name, krate, &revision) {
+            eprintln!("cargo-nix: warning: failed to cache index entry for '{name}': {e}");
+        }
+    }
+
+    Ok(krate)
+}
+
+/// Persist `krate` to tame-index's cache path via a same-directory
+/// tempfile + `rename`, so concurrent readers never observe a torn entry.
+///
+/// This is the second half of the cross-process safety story: the
+/// `.package-cache` flock around [`prefetch_index`] serializes the bulk
+/// warm-up, and atomic rename keeps individual writes safe even when the
+/// flock is unavailable (NFS, read-only fallback) or when this is reached
+/// via [`lookup_crate`]'s single-crate fallback.
+fn write_cache_atomic(
+    sparse_index: &SparseIndex,
+    name: KrateName<'_>,
+    krate: &IndexKrate,
+    revision: &str,
+) -> Result<(), std::io::Error> {
+    let cache_path = sparse_index.cache().cache_path(name);
+    let cache_path: &Path = cache_path.as_ref();
+    let dir = cache_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
+
+    // Same-directory tempfile so `persist` is a rename on the same
+    // filesystem. NamedTempFile cleans itself up on drop if we bail out
+    // before persisting, so no `.tmp` debris on error.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    krate.write_cache_entry(tmp.as_file_mut(), revision)?;
+    tmp.as_file().sync_data()?;
+    tmp.persist(cache_path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+/// Take cargo's global `.package-cache` advisory lock exclusively for the
+/// duration of a cache-mutating operation, blocking until available.
+///
+/// This is the same flock `cargo` itself acquires (exclusive) around index
+/// and source updates, so we follow its contract: hold exclusive while
+/// writing, never write under shared. That serializes us correctly against
+/// a concurrent `cargo fetch` as well as other plugin instances (parallel
+/// `nix-eval-jobs` workers).
+///
+/// `exclusive(true)` enables cargo's read-only-FS → shared fallback, and
+/// tame-index already short-circuits on NFS; any remaining failure is
+/// exotic enough that we degrade to [`FileLock::unlocked`] and let the
+/// atomic-rename writes carry correctness on their own — only herd
+/// collapse is lost.
+fn acquire_package_lock(cargo_home: &Path) -> FileLock {
+    let root = tame_index::PathBuf::from(cargo_home.to_string_lossy().as_ref());
+    LockOptions::cargo_package_lock(Some(root))
+        .and_then(|o| {
+            o.exclusive(true).lock(|_path| {
+                eprintln!(
+                    "cargo-nix: waiting for cargo package lock at {}",
+                    cargo_home.join(".package-cache").display()
+                );
+                None
+            })
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "cargo-nix: warning: failed to acquire cargo package lock \
+                 ({e}); continuing without cross-process serialization"
+            );
+            FileLock::unlocked()
         })
 }
 
@@ -539,13 +641,31 @@ fn jitter_ms(max_ms: u64) -> u64 {
 pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
     use std::sync::Mutex;
 
-    // Skip anything already cached. Cheap: just a file stat per entry.
-    let pending: Vec<(String, String)> = jobs
-        .iter()
-        .filter(|(url, name)| !is_cached(cargo_home, url, name))
-        .cloned()
-        .collect();
+    let filter_pending = || -> Vec<(String, String)> {
+        jobs.iter()
+            .filter(|(url, name)| !is_cached(cargo_home, url, name))
+            .cloned()
+            .collect()
+    };
 
+    // Double-checked locking against cargo's `.package-cache` flock.
+    //
+    // 1. Lock-free probe. If everything is cached, don't touch the lock
+    //    file at all — keeps a read-only store-path `cargoHome` working
+    //    and makes warm steady-state evals contention-free. Safe because
+    //    cache writes are atomic renames: a racing read sees either
+    //    "absent" or "complete", never torn.
+    if filter_pending().is_empty() {
+        return Ok(());
+    }
+
+    // 2. Acquire exclusive (blocking). With N nix-eval-jobs workers on a
+    //    cold cache the first holder warms it; the rest queue here.
+    let _guard = acquire_package_lock(cargo_home);
+
+    // 3. Re-filter under the lock: whoever held it before us likely
+    //    populated some or all of what we need.
+    let pending = filter_pending();
     if pending.is_empty() {
         return Ok(());
     }

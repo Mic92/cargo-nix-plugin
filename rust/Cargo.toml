@@ -27,5 +27,7 @@ netrc = "0.4"
 getrandom = "0.3"
 # RFC 7231 / 9110 HTTP-date parsing for Retry-After. ~5KB, no deps.
 httpdate = "1"
+# Atomic NamedTempFile-then-persist for cross-process-safe index cache writes.
+tempfile = "3"
 
 [dev-dependencies]
