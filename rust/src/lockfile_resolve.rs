@@ -83,10 +83,14 @@ struct ManifestDep {
 /// `workspace_root` is the directory containing the workspace Cargo.toml.
 /// `cargo_lock` is the contents of Cargo.lock.
 /// `cargo_home` is the path to the cargo home directory (for registry index).
+/// `crates_io_index` is the (already normalized) sparse index URL used for
+/// crates whose lockfile source is crates.io — callers obtain it via
+/// [`registry::resolve_crates_io_index`].
 pub fn resolve_from_lockfile(
     workspace_root: &Path,
     cargo_lock: &str,
     cargo_home: &Path,
+    crates_io_index: &str,
     target: &TargetDescription,
     root_features: &[String],
     no_default_features: bool,
@@ -105,24 +109,12 @@ pub fn resolve_from_lockfile(
     let workspace_member_names: HashSet<String> =
         workspace.members.iter().map(|m| m.name.clone()).collect();
 
-    // Sparse index URL for crates.io — used for both the old registry+
-    // source string and the new sparse+ format.
-    let crates_io_sparse_url = "sparse+https://index.crates.io/";
-    let crates_io_source = "registry+https://github.com/rust-lang/crates.io-index";
-
     // Map a lockfile source string to the sparse index URL we'd fetch
-    // from. None for local/git sources (no index involved).
-    let source_to_index_url = |source: Option<&str>| -> Option<String> {
-        match source {
-            Some(s) if s == crates_io_source || s.contains("index.crates.io") => {
-                Some(crates_io_sparse_url.to_string())
-            }
-            Some(s) if s.starts_with("sparse+") || s.starts_with("registry+") => {
-                Some(s.to_string())
-            }
-            _ => None,
-        }
-    };
+    // from. None for local/git sources (no index involved). crates.io
+    // is redirected through `crates_io_index` so network-restricted
+    // environments can point at a mirror (#20).
+    let source_to_index_url =
+        |source: Option<&str>| registry::source_to_index_url(source, crates_io_index);
 
     // Prefetch: the lockfile lists every (registry, name) pair we'll
     // ever need, so warm the cache concurrently before the serial
@@ -133,7 +125,7 @@ pub fn resolve_from_lockfile(
         .filter(|p| !workspace_member_names.contains(&p.name))
         .filter_map(|p| Some((source_to_index_url(p.source.as_deref())?, p.name.clone())))
         .collect();
-    registry::prefetch_index(cargo_home, &prefetch_jobs);
+    registry::prefetch_index(cargo_home, &prefetch_jobs)?;
 
     let mut crates = BTreeMap::new();
     let mut workspace_members = BTreeMap::new();
@@ -197,12 +189,13 @@ pub fn resolve_from_lockfile(
             let index_version = match index_url.as_deref() {
                 None => None, // local/git source — no index lookup needed
                 Some(url) => {
-                    let krate = registry::lookup_crate(cargo_home, url, &pkg.name).map_err(|e| {
-                        format!(
-                            "failed to look up {} {} in index '{}': {e}",
-                            pkg.name, pkg.version, url
-                        )
-                    })?;
+                    let krate =
+                        registry::lookup_crate(cargo_home, url, &pkg.name).map_err(|e| {
+                            format!(
+                                "failed to look up {} {} in index '{}': {e}",
+                                pkg.name, pkg.version, url
+                            )
+                        })?;
                     Some(
                         registry::find_version(&krate, &pkg.version)
                             .ok_or_else(|| {
@@ -597,10 +590,8 @@ fn parse_member_manifest(
 
     // Parse dependencies
     let dependencies = parse_manifest_deps(toml.get("dependencies"), workspace_deps);
-    let build_dependencies =
-        parse_manifest_deps(toml.get("build-dependencies"), workspace_deps);
-    let dev_dependencies =
-        parse_manifest_deps(toml.get("dev-dependencies"), workspace_deps);
+    let build_dependencies = parse_manifest_deps(toml.get("build-dependencies"), workspace_deps);
+    let dev_dependencies = parse_manifest_deps(toml.get("dev-dependencies"), workspace_deps);
 
     // Also parse target-specific deps and merge into the main lists.
     let (mut all_deps, mut all_build_deps, mut all_dev_deps) =
@@ -862,8 +853,7 @@ fn resolve_index_deps(
         // Name-only matching returns the first of the two lockfile
         // entries for both, collapsing them to one version.
         let req = index_dep.version_requirement();
-        let resolved =
-            find_lock_dep_by_name_and_req(pkg_name, &req, lock_dep_refs, lock_packages);
+        let resolved = find_lock_dep_by_name_and_req(pkg_name, &req, lock_dep_refs, lock_packages);
         let Some(resolved) = resolved else {
             continue;
         };
@@ -1200,7 +1190,9 @@ dependencies = [
 
         let probe = |toml_str: &str| {
             parse_manifest_deps(
-                toml::from_str::<toml::Value>(toml_str).unwrap().get("dependencies"),
+                toml::from_str::<toml::Value>(toml_str)
+                    .unwrap()
+                    .get("dependencies"),
                 &ws_deps,
             )
             .pop()
@@ -1210,9 +1202,13 @@ dependencies = [
         // ws=false, member silent → false (the sigv4a case)
         assert!(!probe("[dependencies]\nws-off = { workspace = true }\n"));
         // ws=false, member=true → true (re-enable)
-        assert!(probe("[dependencies]\nws-off = { workspace = true, default-features = true }\n"));
+        assert!(probe(
+            "[dependencies]\nws-off = { workspace = true, default-features = true }\n"
+        ));
         // ws=true, member=false → true (member ignored per cargo)
-        assert!(probe("[dependencies]\nws-on = { workspace = true, default-features = false }\n"));
+        assert!(probe(
+            "[dependencies]\nws-on = { workspace = true, default-features = false }\n"
+        ));
     }
 
     /// Two renamed deps on the same package at different majors must each
@@ -1237,18 +1233,13 @@ dependencies = [
                 dependencies: vec![],
             },
         ];
-        let dep_refs = vec![
-            "http-body 0.4.6".to_string(),
-            "http-body 1.0.1".to_string(),
-        ];
+        let dep_refs = vec!["http-body 0.4.6".to_string(), "http-body 1.0.1".to_string()];
 
         let r04 = semver::VersionReq::parse("^0.4.5").unwrap();
         let r1 = semver::VersionReq::parse("^1").unwrap();
 
-        let got04 =
-            find_lock_dep_by_name_and_req("http-body", &r04, &dep_refs, &packages).unwrap();
-        let got1 =
-            find_lock_dep_by_name_and_req("http-body", &r1, &dep_refs, &packages).unwrap();
+        let got04 = find_lock_dep_by_name_and_req("http-body", &r04, &dep_refs, &packages).unwrap();
+        let got1 = find_lock_dep_by_name_and_req("http-body", &r1, &dep_refs, &packages).unwrap();
 
         assert_eq!(got04.version, "0.4.6");
         assert_eq!(got1.version, "1.0.1");
@@ -1335,16 +1326,16 @@ dependencies = [
         )
         .unwrap();
         let pkg = toml.get("package").unwrap();
-        let member = parse_member_manifest(
-            &toml,
-            pkg,
-            Path::new("/tmp"),
-            &HashMap::new(),
-            &ws_pkg,
-        )
-        .unwrap();
-        assert_eq!(member.edition, "2024", "edition.workspace=true must inherit");
-        assert_eq!(member.version, "7.7.7", "version.workspace=true must inherit");
+        let member =
+            parse_member_manifest(&toml, pkg, Path::new("/tmp"), &HashMap::new(), &ws_pkg).unwrap();
+        assert_eq!(
+            member.edition, "2024",
+            "edition.workspace=true must inherit"
+        );
+        assert_eq!(
+            member.version, "7.7.7",
+            "version.workspace=true must inherit"
+        );
 
         // Explicit edition wins over workspace
         let toml: toml::Value = toml::from_str(
@@ -1357,14 +1348,8 @@ dependencies = [
         )
         .unwrap();
         let pkg = toml.get("package").unwrap();
-        let member = parse_member_manifest(
-            &toml,
-            pkg,
-            Path::new("/tmp"),
-            &HashMap::new(),
-            &ws_pkg,
-        )
-        .unwrap();
+        let member =
+            parse_member_manifest(&toml, pkg, Path::new("/tmp"), &HashMap::new(), &ws_pkg).unwrap();
         assert_eq!(
             member.edition, "2018",
             "explicit edition overrides workspace"
@@ -1383,14 +1368,9 @@ dependencies = [
         )
         .unwrap();
         let pkg = toml.get("package").unwrap();
-        let member = parse_member_manifest(
-            &toml,
-            pkg,
-            Path::new("/tmp"),
-            &HashMap::new(),
-            &empty_ws,
-        )
-        .unwrap();
+        let member =
+            parse_member_manifest(&toml, pkg, Path::new("/tmp"), &HashMap::new(), &empty_ws)
+                .unwrap();
         assert_eq!(
             member.edition, "2021",
             "missing workspace.package.edition falls back to 2021"

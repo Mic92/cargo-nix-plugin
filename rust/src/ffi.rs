@@ -72,10 +72,14 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
                 })
                 .unwrap_or_else(|| dirs_home().join(".cargo"));
 
+            let crates_io_index =
+                crate::registry::resolve_crates_io_index(None, workspace_root, &cargo_home);
+
             crate::lockfile_resolve::resolve_from_lockfile(
                 workspace_root,
                 &cargo_lock_str,
                 &cargo_home,
+                &crates_io_index,
                 &input.target,
                 &input.root_features,
                 input.no_default_features,
