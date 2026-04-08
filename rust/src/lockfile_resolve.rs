@@ -120,10 +120,16 @@ pub fn resolve_from_lockfile(
     // ever need, so warm the cache concurrently before the serial
     // resolve loop. Cold-cache eval goes from O(n·RTT) serial
     // handshakes to ~O(n/workers·RTT) with connection keep-alive.
-    let prefetch_jobs: Vec<(String, String)> = lock_packages
+    let prefetch_jobs: Vec<registry::PrefetchJob> = lock_packages
         .iter()
         .filter(|p| !workspace_member_names.contains(&p.name))
-        .filter_map(|p| Some((source_to_index_url(p.source.as_deref())?, p.name.clone())))
+        .filter_map(|p| {
+            Some(registry::PrefetchJob {
+                url: source_to_index_url(p.source.as_deref())?,
+                name: p.name.clone(),
+                version: p.version.clone(),
+            })
+        })
         .collect();
     registry::prefetch_index(cargo_home, &prefetch_jobs)?;
 
@@ -188,25 +194,16 @@ pub fn resolve_from_lockfile(
             // with E0433 errors deep inside the build sandbox.
             let index_version = match index_url.as_deref() {
                 None => None, // local/git source — no index lookup needed
-                Some(url) => {
-                    let krate =
-                        registry::lookup_crate(cargo_home, url, &pkg.name).map_err(|e| {
+                Some(url) => Some(
+                    registry::lookup_version(cargo_home, url, &pkg.name, &pkg.version).map_err(
+                        |e| {
                             format!(
                                 "failed to look up {} {} in index '{}': {e}",
                                 pkg.name, pkg.version, url
                             )
-                        })?;
-                    Some(
-                        registry::find_version(&krate, &pkg.version)
-                            .ok_or_else(|| {
-                                format!(
-                                    "version {} of {} not found in index '{}'",
-                                    pkg.version, pkg.name, url
-                                )
-                            })?
-                            .clone(),
-                    )
-                }
+                        },
+                    )?,
+                ),
             };
 
             let (dependencies, build_dependencies, features, links) =

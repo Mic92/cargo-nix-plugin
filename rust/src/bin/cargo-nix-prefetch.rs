@@ -124,7 +124,7 @@ fn main() -> ExitCode {
     if check_only {
         let missing: Vec<_> = jobs
             .iter()
-            .filter(|(url, name)| !registry::is_cached(&cargo_home, url, name))
+            .filter(|j| !registry::is_cached(&cargo_home, &j.url, &j.name, &j.version))
             .collect();
         if missing.is_empty() {
             eprintln!("cargo-nix-prefetch: all {} crates cached", jobs.len());
@@ -135,8 +135,8 @@ fn main() -> ExitCode {
             missing.len(),
             jobs.len()
         );
-        for (_, name) in &missing {
-            eprintln!("  {name}");
+        for j in &missing {
+            eprintln!("  {} {}", j.name, j.version);
         }
         return ExitCode::FAILURE;
     }
@@ -157,7 +157,10 @@ fn main() -> ExitCode {
 
 /// Map every registry package in Cargo.lock to a `(index_url, name)`
 /// prefetch job. Non-registry sources (path, git) are skipped.
-fn collect_jobs(cargo_lock: &str, crates_io_url: &str) -> Result<Vec<(String, String)>, String> {
+fn collect_jobs(
+    cargo_lock: &str,
+    crates_io_url: &str,
+) -> Result<Vec<registry::PrefetchJob>, String> {
     #[derive(serde::Deserialize)]
     struct Lock {
         #[serde(default)]
@@ -166,6 +169,7 @@ fn collect_jobs(cargo_lock: &str, crates_io_url: &str) -> Result<Vec<(String, St
     #[derive(serde::Deserialize)]
     struct Pkg {
         name: String,
+        version: String,
         #[serde(default)]
         source: Option<String>,
     }
@@ -174,14 +178,17 @@ fn collect_jobs(cargo_lock: &str, crates_io_url: &str) -> Result<Vec<(String, St
         toml::from_str(cargo_lock).map_err(|e| format!("failed to parse Cargo.lock: {e}"))?;
 
     let mut jobs = Vec::new();
-    let mut seen = std::collections::HashSet::new();
     for pkg in lock.package {
         let Some(url) = registry::source_to_index_url(pkg.source.as_deref(), crates_io_url) else {
             continue; // path/git
         };
-        if seen.insert((url.clone(), pkg.name.clone())) {
-            jobs.push((url, pkg.name));
-        }
+        // No de-dup here: prefetch_index merges by (url, name) itself
+        // and needs every locked version to decide cache freshness.
+        jobs.push(registry::PrefetchJob {
+            url,
+            name: pkg.name,
+            version: pkg.version,
+        });
     }
     Ok(jobs)
 }

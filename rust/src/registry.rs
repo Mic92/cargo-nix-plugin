@@ -137,6 +137,41 @@ fn find_index_dirs(cargo_home: &Path, url: &str) -> Vec<std::path::PathBuf> {
 /// `url` is the index URL, e.g. `"sparse+https://index.crates.io/"`.
 /// Returns all versions of the crate. Use [`find_version`] to pick one.
 pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKrate, String> {
+    lookup_crate_inner(cargo_home, url, name, |_| true)
+}
+
+/// Look up a specific version of a crate.
+///
+/// Like [`lookup_crate`], but treats a cached entry that lacks `version`
+/// as a miss. Sparse-index entries are append-only — a cached file that
+/// predates a release is *stale*, not authoritative — so cargo's own
+/// `RemoteRegistry::load` re-fetches when the requested version isn't in
+/// the cached summaries. Mirroring that here keeps a `cargo update` that
+/// landed a newer version from hard-failing eval just because the user's
+/// `~/.cargo` index cache hadn't caught up.
+pub fn lookup_version(
+    cargo_home: &Path,
+    url: &str,
+    name: &str,
+    version: &str,
+) -> Result<IndexVersion, String> {
+    let krate = lookup_crate_inner(cargo_home, url, name, |k| {
+        find_version(k, version).is_some()
+    })?;
+    find_version(&krate, version).cloned().ok_or_else(|| {
+        format!("version {version} of {name} not found in index '{url}' (after re-fetch)")
+    })
+}
+
+/// Shared lookup driver. `fresh` decides whether a cached `IndexKrate`
+/// is good enough to return; if it isn't, the next layer is tried, with
+/// a remote fetch as the last resort.
+fn lookup_crate_inner(
+    cargo_home: &Path,
+    url: &str,
+    name: &str,
+    fresh: impl Fn(&IndexKrate) -> bool,
+) -> Result<IndexKrate, String> {
     let krate_name =
         KrateName::crates_io(name).map_err(|e| format!("invalid crate name '{name}': {e}"))?;
     let lock = FileLock::unlocked();
@@ -145,20 +180,22 @@ pub fn lookup_crate(cargo_home: &Path, url: &str, name: &str) -> Result<IndexKra
     // find_index_dirs scans by hostname prefix, which handles both
     // cargo's internal hash-suffixed dirs and user-provided dirs
     // (e.g. read-only nix store paths).
-    if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name) {
+    if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name).filter(&fresh) {
         return Ok(krate);
     }
 
     // Fall back to tame-index's own cache layout + remote fetch.
     let sparse_index = index_for_url(cargo_home, url)?;
     if let Ok(Some(krate)) = sparse_index.cached_krate(krate_name, &lock) {
-        return Ok(krate);
+        if fresh(&krate) {
+            return Ok(krate);
+        }
     }
 
-    // Cache miss → fetch. No cross-process lock needed: the write goes
-    // through `write_cache_atomic`, so the worst a concurrent fetcher
-    // sees is "still absent" and does its own fetch. The package lock
-    // is reserved for herd-collapse in the bulk prefetch path.
+    // Cache miss (or stale) → fetch. No cross-process lock needed: the
+    // write goes through `write_cache_atomic`, so the worst a concurrent
+    // fetcher sees is "still absent" and does its own fetch. The package
+    // lock is reserved for herd-collapse in the bulk prefetch path.
     fetch_one(shared_agent(), &sparse_index, url, name)?
         .ok_or_else(|| format!("crate '{name}' not found in remote index '{url}'"))
 }
@@ -410,6 +447,16 @@ fn do_fetch_one(
     }
 
     Ok(krate)
+}
+
+/// One unit of work for [`prefetch_index`]: fetch the index entry for
+/// `name` from `url`. `version` is what the lockfile pinned — used only
+/// to decide whether an existing cache entry is fresh enough to skip.
+#[derive(Debug, Clone)]
+pub struct PrefetchJob {
+    pub url: String,
+    pub name: String,
+    pub version: String,
 }
 
 /// Persist `krate` to tame-index's cache path via a same-directory
@@ -666,13 +713,27 @@ fn jitter_ms(max_ms: u64) -> u64 {
 /// with proper context), but a 100% failure rate almost always means
 /// the index is unreachable, and letting that degrade silently produces
 /// derivations whose hashes diverge from a connected build (#20).
-pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<(), String> {
+pub fn prefetch_index(cargo_home: &Path, jobs: &[PrefetchJob]) -> Result<(), String> {
     use std::sync::Mutex;
 
+    // Dedup on (url, name): two locked versions of one crate share an
+    // index file, so re-fetching it satisfies both. Keep one job per
+    // pair, but treat it as cached only if *every* requested version is
+    // present — a single stale entry forces the re-fetch.
+    let by_key = || {
+        let mut m: std::collections::BTreeMap<(&str, &str), Vec<&str>> = Default::default();
+        for j in jobs {
+            m.entry((j.url.as_str(), j.name.as_str()))
+                .or_default()
+                .push(j.version.as_str());
+        }
+        m
+    };
     let filter_pending = || -> Vec<(String, String)> {
-        jobs.iter()
-            .filter(|(url, name)| !is_cached(cargo_home, url, name))
-            .cloned()
+        by_key()
+            .into_iter()
+            .filter(|((url, name), vers)| !vers.iter().all(|v| is_cached(cargo_home, url, name, v)))
+            .map(|((url, name), _)| (url.to_owned(), name.to_owned()))
             .collect()
     };
 
@@ -755,17 +816,22 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[(String, String)]) -> Result<()
     Ok(())
 }
 
-/// Is this crate already in the local tame-index cache?
+/// Is this `(crate, version)` already in the local tame-index cache?
 ///
 /// Read-only: probes existing index dirs via [`cached_in_existing_dir`]
 /// (hostname-prefix scan), which covers both cargo-populated and
 /// plugin-populated layouts. Never creates directories, so `--check`
 /// stays side-effect-free and a read-only store-path `cargoHome` works.
-pub fn is_cached(cargo_home: &Path, url: &str, name: &str) -> bool {
+///
+/// Version-aware so a stale entry (file present but missing the version
+/// the lockfile pins) is reported as a miss — same staleness semantics
+/// as [`lookup_version`].
+pub fn is_cached(cargo_home: &Path, url: &str, name: &str, version: &str) -> bool {
     let Ok(krate_name) = KrateName::crates_io(name) else {
         return false;
     };
-    cached_in_existing_dir(cargo_home, url, krate_name).is_some()
+    cached_in_existing_dir(cargo_home, url, krate_name)
+        .is_some_and(|k| find_version(&k, version).is_some())
 }
 
 /// Probe for `name` in a pre-existing index dir under `cargo_home`
@@ -894,9 +960,18 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         // 0.0.0.0:1 refuses connections without leaving the sandbox.
+        let bad = "sparse+http://0.0.0.0:1/".to_string();
         let jobs = vec![
-            ("sparse+http://0.0.0.0:1/".to_string(), "serde".to_string()),
-            ("sparse+http://0.0.0.0:1/".to_string(), "http".to_string()),
+            PrefetchJob {
+                url: bad.clone(),
+                name: "serde".into(),
+                version: "1.0.228".into(),
+            },
+            PrefetchJob {
+                url: bad.clone(),
+                name: "http".into(),
+                version: "1.0.0".into(),
+            },
         ];
         let err = prefetch_index(&tmp, &jobs).expect_err("expected total failure");
         assert!(err.contains("all 2 registry index fetches failed"), "{err}");
@@ -943,6 +1018,53 @@ mod tests {
         assert!(!krate.versions.is_empty(), "serde should have versions");
         let v = find_version(&krate, "1.0.228");
         assert!(v.is_some(), "serde 1.0.228 should exist");
+    }
+
+    /// Regression: a cached index entry that predates the locked
+    /// release (e.g. `cargo update` ran but the user's `~/.cargo` index
+    /// cache is stale) must be treated as a miss and re-fetched, not
+    /// taken as authoritative.
+    ///
+    /// We seed a synthetic cache containing only `serde 0.1.0`, then
+    /// ask for `1.0.228` and verify both that `is_cached` says "no" and
+    /// that `lookup_version` reaches past the stale file and finds it.
+    ///
+    /// Requires network access — run with `cargo test -- --ignored`.
+    #[test]
+    #[ignore = "requires network access"]
+    fn lookup_version_refetches_stale_cache() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!(
+            "cargo-nix-plugin-test-stale-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+
+        // Seed via the real write path so the on-disk format is
+        // whatever tame-index expects, not a hand-rolled byte layout.
+        let url = CRATES_IO_SPARSE_URL;
+        let idx = index_for_url(&tmp, url).expect("create index");
+        let stale = IndexKrate::from_slice(
+            br#"{"name":"serde","vers":"0.1.0","deps":[],"features":{},"cksum":"0000000000000000000000000000000000000000000000000000000000000000","yanked":false}"#,
+        )
+        .expect("parse stale index entry");
+        write_cache_atomic(
+            &idx,
+            KrateName::crates_io("serde").unwrap(),
+            &stale,
+            "etag: stale",
+        )
+        .expect("seed cache");
+
+        // Stale entry satisfies the bare-name probe …
+        assert!(is_cached(&tmp, url, "serde", "0.1.0"));
+        // … but not the version we actually need.
+        assert!(!is_cached(&tmp, url, "serde", "1.0.228"));
+
+        let v = lookup_version(&tmp, url, "serde", "1.0.228").expect("re-fetch past stale cache");
+        assert_eq!(v.version.as_str(), "1.0.228");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
