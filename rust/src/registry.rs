@@ -96,38 +96,20 @@ pub fn normalize_index_url(url: &str) -> String {
     out
 }
 
-/// Find the on-disk index directory for a given registry URL.
+/// Compute the on-disk index directory for a given registry URL.
 ///
-/// Cargo stores index caches under `$CARGO_HOME/registry/index/<name>-<hash>/`.
-/// The hash depends on the cargo version (changed in 1.85.0). Rather than
-/// reproducing the hash algorithm (which requires running `cargo --version`),
-/// we scan the directory for a prefix match on the URL's hostname.
-///
-/// Returns *every* matching directory: a machine that has run both
-/// pre-1.85 and post-1.85 cargo will have two `index.crates.io-<hash>`
-/// siblings, and we can't know which one holds the entry without
-/// looking. Callers probe each in turn.
-fn find_index_dirs(cargo_home: &Path, url: &str) -> Vec<std::path::PathBuf> {
-    let Some(hostname) = host_from_url(url) else {
-        return Vec::new();
-    };
-    let index_dir = cargo_home.join("registry").join("index");
-    let Ok(entries) = std::fs::read_dir(&index_dir) else {
-        return Vec::new();
-    };
-
-    // Directory names look like "index.crates.io-1949cf8c6b5b557f".
-    // Match on `<host>-` (not bare `<host>`) so e.g. `crates.io` doesn't
-    // accidentally pick up `crates.iomirror-...`.
-    let prefix = format!("{hostname}-");
-    entries
-        .flatten()
-        .filter(|e| {
-            e.file_name().to_string_lossy().starts_with(&prefix)
-                && e.file_type().is_ok_and(|t| t.is_dir())
-        })
-        .map(|e| e.path())
-        .collect()
+/// Cargo stores index caches under
+/// `$CARGO_HOME/registry/index/<host>-<hash>/`. The hash scheme was
+/// stabilised in cargo 1.85; we compute that exact path via
+/// `tame_index::utils::url_to_local_dir` rather than scanning by host
+/// prefix. A prefix scan would conflate distinct registries that share
+/// a host (e.g. an Artifactory instance serving both a crates.io mirror
+/// and an internal registry under different paths), which is worse than
+/// missing a pre-1.85 cache we don't care about.
+fn find_index_dir(cargo_home: &Path, url: &str) -> Option<std::path::PathBuf> {
+    let dir = tame_index::utils::url_to_local_dir(url, true).ok()?;
+    let path = cargo_home.join("registry").join("index").join(dir.dir_name);
+    path.is_dir().then_some(path)
 }
 
 /// Look up a crate in the registry index cache, falling back to a remote
@@ -176,10 +158,9 @@ fn lookup_crate_inner(
         KrateName::crates_io(name).map_err(|e| format!("invalid crate name '{name}': {e}"))?;
     let lock = FileLock::unlocked();
 
-    // Probe for a cargo-created (or user-provided) cache dir first.
-    // find_index_dirs scans by hostname prefix, which handles both
-    // cargo's internal hash-suffixed dirs and user-provided dirs
-    // (e.g. read-only nix store paths).
+    // Probe for a pre-existing cache dir first — covers both
+    // cargo-populated `~/.cargo` and a read-only store-path cargoHome
+    // pre-seeded by `cargo-nix-prefetch`.
     if let Some(krate) = cached_in_existing_dir(cargo_home, url, krate_name).filter(&fresh) {
         return Ok(krate);
     }
@@ -204,9 +185,7 @@ fn lookup_crate_inner(
 /// e.g. `sparse+https://index.crates.io/` → `index.crates.io`,
 /// `sparse+http://mirror:8081/` → `mirror`.
 ///
-/// Stripping the port matters for [`find_index_dirs`]: cargo's on-disk
-/// directory name is `<host>-<hash>` *without* the port, so a mirror on
-/// a non-default port would otherwise never prefix-match.
+/// Only the host is needed for `.netrc` lookup.
 fn host_from_url(url: &str) -> Option<&str> {
     let url = url
         .strip_prefix("sparse+")
@@ -720,7 +699,7 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[PrefetchJob]) -> Result<(), Str
     // index file, so re-fetching it satisfies both. Keep one job per
     // pair, but treat it as cached only if *every* requested version is
     // present — a single stale entry forces the re-fetch.
-    let by_key = || {
+    let by_key = {
         let mut m: std::collections::BTreeMap<(&str, &str), Vec<&str>> = Default::default();
         for j in jobs {
             m.entry((j.url.as_str(), j.name.as_str()))
@@ -730,10 +709,10 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[PrefetchJob]) -> Result<(), Str
         m
     };
     let filter_pending = || -> Vec<(String, String)> {
-        by_key()
-            .into_iter()
+        by_key
+            .iter()
             .filter(|((url, name), vers)| !vers.iter().all(|v| is_cached(cargo_home, url, name, v)))
-            .map(|((url, name), _)| (url.to_owned(), name.to_owned()))
+            .map(|(&(url, name), _)| (url.to_owned(), name.to_owned()))
             .collect()
     };
 
@@ -834,31 +813,27 @@ pub fn is_cached(cargo_home: &Path, url: &str, name: &str, version: &str) -> boo
         .is_some_and(|k| find_version(&k, version).is_some())
 }
 
-/// Probe for `name` in a pre-existing index dir under `cargo_home`
-/// (cargo-populated or user-provided). Unlike [`index_for_url`] this
-/// never creates directories, so it is safe against a read-only
-/// `cargoHome` from the nix store.
+/// Probe for `name` in the pre-existing index dir for `url` under
+/// `cargo_home`. Unlike [`index_for_url`] this never creates
+/// directories, so it is safe against a read-only `cargoHome` from the
+/// nix store.
 fn cached_in_existing_dir(
     cargo_home: &Path,
     url: &str,
     krate_name: KrateName<'_>,
 ) -> Option<IndexKrate> {
-    for exact_path in find_index_dirs(cargo_home, url) {
-        let location = tame_index::index::IndexLocation {
-            url: tame_index::index::IndexUrl::from(url),
-            root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
-                exact_path.to_string_lossy().as_ref(),
-            )),
-            cargo_version: None,
-        };
-        if let Some(k) = SparseIndex::new(location)
-            .ok()
-            .and_then(|idx| idx.cached_krate(krate_name, &FileLock::unlocked()).ok()?)
-        {
-            return Some(k);
-        }
-    }
-    None
+    let exact_path = find_index_dir(cargo_home, url)?;
+    let location = tame_index::index::IndexLocation {
+        url: tame_index::index::IndexUrl::from(url),
+        root: tame_index::index::IndexPath::Exact(tame_index::PathBuf::from(
+            exact_path.to_string_lossy().as_ref(),
+        )),
+        cargo_version: None,
+    };
+    SparseIndex::new(location)
+        .ok()?
+        .cached_krate(krate_name, &FileLock::unlocked())
+        .ok()?
 }
 
 /// Find a specific version in an `IndexKrate`.
@@ -989,7 +964,6 @@ mod tests {
             host_from_url("sparse+https://artifactory.infra.ant.dev/artifactory/api/cargo/crates-internal/index/"),
             Some("artifactory.infra.ant.dev")
         );
-        // Port must be stripped to match cargo's on-disk dir name.
         assert_eq!(
             host_from_url("sparse+http://mirror.example:8081/index/"),
             Some("mirror.example")
