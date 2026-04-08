@@ -439,6 +439,16 @@ fn write_cache_atomic(
     // before persisting, so no `.tmp` debris on error.
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     krate.write_cache_entry(tmp.as_file_mut(), revision)?;
+    // NamedTempFile defaults to mode 0600; cargo's own writer leaves
+    // these umask-default. Match that so a shared CARGO_HOME stays
+    // readable across UIDs.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tmp
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o644));
+    }
     tmp.as_file().sync_data()?;
     tmp.persist(cache_path).map_err(|e| e.error)?;
     Ok(())
