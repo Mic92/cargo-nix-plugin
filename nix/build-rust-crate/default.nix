@@ -279,7 +279,6 @@ lib.makeOverridable
         # so only the target triple and linker need passing here.
         hostPlatform = {
           rustcTargetSpec = stdenv.hostPlatform.rust.rustcTargetSpec;
-          libExt = stdenv.hostPlatform.extensions.library;
           linkerPath =
             if stdenv.hostPlatform.linker == "lld" && rustc ? llvmPackages.lld then
               "${rustc.llvmPackages.lld}/bin/lld"

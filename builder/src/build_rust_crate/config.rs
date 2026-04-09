@@ -62,9 +62,8 @@ pub struct BuildConfig {
     /// Pre-computed metadata hash (deterministic, from Nix).
     pub metadata: String,
 
-    /// Per-dependency extern info computed at Nix eval time.
-    /// Each entry carries the extern name (with renames applied),
-    /// metadata hash, and whether it prefers .rlib or .so.
+    /// Per-dependency extern info (extern name with renames applied,
+    /// metadata hash) computed at Nix eval time.
     #[serde(default)]
     pub dep_externs: Vec<DepExtern>,
     /// Per-build-dependency extern info.
@@ -130,8 +129,6 @@ pub struct DepExtern {
 #[serde(rename_all = "camelCase")]
 pub struct PlatformInfo {
     pub rustc_target_spec: String,
-    #[serde(default)]
-    pub lib_ext: String,
     pub linker_path: String,
 }
 

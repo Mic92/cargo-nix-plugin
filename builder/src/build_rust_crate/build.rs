@@ -6,37 +6,34 @@ use super::configure::{BuildScriptOutputs, build_env, enter_crate_root};
 use super::rustc::RustcFlags;
 use super::util::{echo_colored, remove_object_files, run_cmd};
 
-/// Set CARGO_PKG_* env vars so rustc macros like env!("CARGO_PKG_VERSION") work.
-fn set_cargo_pkg_env(config: &BuildConfig) {
-    let env = build_env(config, "");
-    for (k, v) in &env {
+/// Shared preamble for the build and metadata phases: load build-script
+/// outputs, export CARGO_* / rustc-env, persist link flags, compute rustc
+/// flags. Caller must already be in the crate root.
+pub fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::Error>> {
+    let bso: BuildScriptOutputs = match fs::read_to_string("target/build-script-outputs.json") {
+        Ok(s) => serde_json::from_str(&s)?,
+        Err(_) => BuildScriptOutputs::default(),
+    };
+
+    for (k, v) in build_env(config, "") {
         if k.starts_with("CARGO_") {
             std::env::set_var(k, v);
         }
     }
+    // rustc-env from build script, verbatim: scripts that need absolute paths
+    // join OUT_DIR/CARGO_MANIFEST_DIR themselves.
+    for (k, v) in &bso.envs {
+        std::env::set_var(k, v);
+    }
+
+    persist_bso_link_flags(&bso, config)?;
+    Ok(RustcFlags::new(config, &bso))
 }
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     enter_crate_root(config)?;
 
-    let bso = if Path::new("target/build-script-outputs.json").exists() {
-        serde_json::from_str(&fs::read_to_string("target/build-script-outputs.json")?)?
-    } else {
-        BuildScriptOutputs::default()
-    };
-
-    set_cargo_pkg_env(config);
-
-    // Export rustc-env vars from build script verbatim. Build scripts that
-    // need an absolute path join OUT_DIR/CARGO_MANIFEST_DIR themselves.
-    for (k, v) in &bso.envs {
-        std::env::set_var(k, v);
-    }
-
-    // Persist build script link flags to target/link{,.final}
-    persist_bso_link_flags(&bso, config)?;
-
-    let flags = RustcFlags::new(config, &bso);
+    let flags = setup_build(config)?;
     let crate_name = config.lib_name_normalized();
     let metadata = &config.metadata;
 

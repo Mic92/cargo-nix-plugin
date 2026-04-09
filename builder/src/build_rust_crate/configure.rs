@@ -99,10 +99,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         let out_dir = format!("target/build/{}.out", config.crate_name);
         fs::create_dir_all(&build_dir)?;
         fs::create_dir_all(&out_dir)?;
+        let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
+        let env = build_env(config, &abs_out_dir);
 
-        let env = build_env(config, &out_dir);
-
-        // Compile build script
+        // Compile build script. CARGO_PKG_* / CARGO_MANIFEST_DIR are needed at
+        // *compile* time too: build.rs commonly does `env!("CARGO_PKG_NAME")`.
         let mut cmd = Command::new("rustc");
         cmd.envs(&env);
         cmd.arg("--crate-name")
@@ -143,8 +144,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         run_cmd(&mut cmd, config.verbose)?;
 
         // Run build script
-        let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
-        let env = build_env(config, &abs_out_dir);
         let mut cmd = Command::new(format!("{build_dir}/build_script_build"));
         cmd.env("RUST_BACKTRACE", "1");
         cmd.envs(&env);
@@ -173,7 +172,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         print!("{stdout}");
 
-        let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
         let bso = parse_build_script_output(&stdout, &abs_out_dir);
         fs::write(
             "target/build-script-outputs.json",
