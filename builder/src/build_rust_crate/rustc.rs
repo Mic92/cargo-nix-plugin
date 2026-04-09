@@ -5,13 +5,14 @@ use super::config::BuildConfig;
 use super::configure::BuildScriptOutputs;
 
 /// Find a library file in `dir` by its metadata hash suffix.
-/// Prefers .rlib when `prefer_rlib` is true, falls back to shared lib.
-pub fn find_by_metadata(
-    dir: &str,
-    metadata: &str,
-    prefer_rlib: bool,
-    lib_ext: &str,
-) -> Option<String> {
+///
+/// Always prefers `.rlib` over the platform shared-lib extension: for
+/// Rust-to-Rust linkage the rlib is what dependents want, and proc-macro
+/// crates produce only a `.so`/`.dylib`, so the fallback covers them. The
+/// eval-time `crateType` is unreliable in lockfile-resolve mode (sparse
+/// index has no `[lib]`), so a caller-supplied preference would be a guess
+/// anyway.
+fn find_by_metadata(dir: &str, metadata: &str, lib_ext: &str) -> Option<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return None;
     };
@@ -20,20 +21,50 @@ pub fn find_by_metadata(
     let mut so_match = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(&rlib_suffix) && prefer_rlib {
+        if name.ends_with(&rlib_suffix) {
             return Some(entry.path().to_string_lossy().to_string());
         }
         if name.ends_with(&so_suffix) {
             so_match = Some(entry.path().to_string_lossy().to_string());
         }
-        if name.ends_with(&rlib_suffix) {
-            // Non-preferred rlib is still a fallback
-            if so_match.is_none() {
-                so_match = Some(entry.path().to_string_lossy().to_string());
-            }
-        }
     }
     so_match
+}
+
+/// Recover the lib name from an artifact path like
+/// `target/deps/libdebug_unreachable-fb242b6c18.rlib`. The metadata hash
+/// uniquely identifies the dep, so the filename is the authoritative source
+/// for the `--extern` key when `[lib].name` differs from the package name
+/// (sparse index can't tell us; the dep's own build named the file).
+fn lib_name_from_path(path: &str, metadata: &str) -> Option<String> {
+    let file = std::path::Path::new(path).file_name()?.to_str()?;
+    let stem = file.strip_prefix("lib")?.rsplit_once('.')?.0;
+    stem.strip_suffix(&format!("-{metadata}")).map(String::from)
+}
+
+/// Compute `--extern NAME=PATH` pairs for a set of deps whose artifacts have
+/// been symlinked into `dir`. The NAME is taken from the artifact filename
+/// (build-time truth) unless the dep was explicitly aliased via
+/// `crateRenames`, in which case the alias wins.
+pub fn dep_extern_args(
+    deps: &[super::config::DepExtern],
+    dir: &str,
+    lib_ext: &str,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(deps.len() * 2);
+    for dep in deps {
+        let path = find_by_metadata(dir, &dep.metadata, lib_ext)
+            .unwrap_or_else(|| format!("{dir}/lib{}-{}.rlib", dep.extern_name, dep.metadata));
+        let name = if dep.is_rename {
+            dep.extern_name.clone()
+        } else {
+            lib_name_from_path(&path, &dep.metadata)
+                .unwrap_or_else(|| dep.extern_name.clone())
+        };
+        out.push("--extern".into());
+        out.push(format!("{name}={path}"));
+    }
+    out
 }
 
 /// Compute base rustc flags: opt level, codegen-units, remap, linker,
@@ -99,28 +130,14 @@ impl RustcFlags {
     pub fn new(config: &BuildConfig, bso: &BuildScriptOutputs) -> Self {
         let mut base = base_rustc_flags(config);
 
-        // Dependency --extern flags from Nix eval-time info.
-        for dep in &config.dep_externs {
-            let path = find_by_metadata(
-                "target/deps",
-                &dep.metadata,
-                dep.is_rlib,
-                &config.host_platform.lib_ext,
-            )
-            .unwrap_or_else(|| {
-                let ext = if dep.is_rlib {
-                    "rlib"
-                } else {
-                    &config.host_platform.lib_ext
-                };
-                format!(
-                    "target/deps/lib{}-{}.{ext}",
-                    dep.extern_name, dep.metadata
-                )
-            });
-            base.push("--extern".into());
-            base.push(format!("{}={path}", dep.extern_name));
-        }
+        // Dependency --extern flags. Paths and names are derived from the
+        // artifacts symlinked into target/deps (build-time truth), not the
+        // eval-time guesses.
+        base.extend(dep_extern_args(
+            &config.dep_externs,
+            "target/deps",
+            &config.host_platform.lib_ext,
+        ));
 
         // Feature --cfg flags
         for f in &config.crate_features {

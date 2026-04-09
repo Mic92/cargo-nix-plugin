@@ -125,27 +125,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             cmd.arg("--cfg").arg(format!("feature=\"{f}\""));
         }
         // Build dep --extern flags
-        for dep in &config.build_dep_externs {
-            let path = super::rustc::find_by_metadata(
-                "target/buildDeps",
-                &dep.metadata,
-                dep.is_rlib,
-                &config.host_platform.lib_ext,
-            )
-            .unwrap_or_else(|| {
-                let ext = if dep.is_rlib {
-                    "rlib"
-                } else {
-                    &config.host_platform.lib_ext
-                };
-                format!(
-                    "target/buildDeps/lib{}-{}.{ext}",
-                    dep.extern_name, dep.metadata
-                )
-            });
-            cmd.arg("--extern")
-                .arg(format!("{}={path}", dep.extern_name));
-        }
+        cmd.args(super::rustc::dep_extern_args(
+            &config.build_dep_externs,
+            "target/buildDeps",
+            &config.host_platform.lib_ext,
+        ));
         if let Ok(flags) = fs::read_to_string("target/link.build") {
             for f in flags.split_whitespace() {
                 cmd.arg(f);
@@ -499,8 +483,16 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     Ok(out)
 }
 
-/// Auto-detect edition and proc-macro from Cargo.toml when not provided
-/// via extraRustcOpts. Replaces the old read-crate-info binary.
+/// Auto-detect crate metadata from Cargo.toml when the resolver could not
+/// supply it at eval time. Replaces the old read-crate-info binary.
+///
+/// In lockfile-resolve mode the sparse index carries no `[lib]` table, so for
+/// registry crates `libPath` / `libName` / `crateType` / `procMacro` arrive as
+/// their derivation defaults. Those defaults are wrong for crates like fnv
+/// (`path = "lib.rs"`), new_debug_unreachable (`name = "debug_unreachable"`)
+/// or anything with `crate-type = ["cdylib","rlib"]`. We learn the truth here
+/// from the unpacked source and overwrite the config in place so every phase
+/// sees consistent values.
 pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     if !Path::new("Cargo.toml").exists() {
         return;
@@ -542,26 +534,69 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // Auto-detect proc-macro
-    let is_proc_macro = doc
-        .get("lib")
-        .and_then(|l| l.get("proc-macro").or_else(|| l.get("proc_macro")))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    // ---- [lib] table -----------------------------------------------------
+    let lib = doc.get("lib");
 
-    if is_proc_macro {
-        if let Some(pos) = config.crate_type.iter().position(|t| t == "lib") {
-            config.crate_type[pos] = "proc-macro".into();
-        }
-        if !config.extra_rustc_opts.iter().any(|o| o == "proc_macro") {
-            config
-                .extra_rustc_opts
-                .extend_from_slice(&["--extern".into(), "proc_macro".into()]);
+    // lib.path: fnv/fxhash/serde_derive_internals/document-features all use
+    // a non-default `path = "lib.rs"`. resolve_lib_path() only falls back to
+    // src/lib.rs, so without this the build phase silently emits no rlib and
+    // every dependent dies with "extern location for X does not exist".
+    if config.lib_path.is_empty() {
+        if let Some(p) = lib.and_then(|l| l.get("path")).and_then(|v| v.as_str()) {
+            config.lib_path = p.to_string();
         }
     }
 
-    // Populate crate_bin from [[bin]] entries for required-features filtering
-    if config.crate_bin.is_empty() {
+    // lib.name: new_debug_unreachable→debug_unreachable, rustls-webpki→webpki,
+    // utf-8→utf8. The drv defaults libName to crateName (hyphens kept), so we
+    // treat that as "unset" and consult Cargo.toml. The dependent recovers the
+    // real `--extern` key from the artifact filename (see dep_extern_args).
+    if config.lib_name.is_empty() || config.lib_name == config.crate_name {
+        config.lib_name = lib
+            .and_then(|l| l.get("name"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| config.crate_name.replace('-', "_"));
+    }
+
+    // lib.crate-type / proc-macro: only rewrite the eval-time default ["lib"];
+    // an explicit value from the resolver or a crateOverride wins.
+    if config.crate_type == ["lib"] {
+        let is_proc_macro = lib
+            .and_then(|l| l.get("proc-macro").or_else(|| l.get("proc_macro")))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_proc_macro {
+            // RustcFlags::new adds `--extern proc_macro` based on crate_type;
+            // no need to also push it into extra_rustc_opts.
+            config.crate_type = vec!["proc-macro".into()];
+        } else if let Some(types) = lib
+            .and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type")))
+            .and_then(|v| v.as_array())
+        {
+            let mut ts: Vec<String> = types
+                .iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect();
+            // Registry crates are only ever built here as dependencies, so the
+            // dependent needs an rlib regardless of what the manifest declares
+            // (cargo does the same implicit promotion). Without this a
+            // `crate-type = ["cdylib"]` crate would emit only a .so and the
+            // consumer's `--extern` would point at a non-rmeta artifact.
+            if !ts.iter().any(|t| t == "lib" || t == "rlib" || t == "proc-macro") {
+                ts.push("rlib".into());
+            }
+            if !ts.is_empty() {
+                config.crate_type = ts;
+            }
+        }
+    }
+
+    // Populate crate_bin from [[bin]] entries for required-features filtering.
+    // Only when the drv didn't set crateBin at all: an explicit `crateBin = []`
+    // (has_crate_bin = true) is how lib/default.nix suppresses bins on the
+    // lib-only dep variant, and that must not be undone here.
+    if !config.has_crate_bin && config.crate_bin.is_empty() {
         if let Some(bins) = doc.get("bin").and_then(|v| v.as_array()) {
             for bin in bins {
                 let name = bin.get("name").and_then(|v| v.as_str()).map(String::from);
