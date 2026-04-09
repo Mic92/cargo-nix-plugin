@@ -153,8 +153,7 @@ lib.makeOverridable
             mkExtern = dep: {
               externName = findRename dep;
               metadata = dep.metadata;
-              isProcMacro = lib.attrByPath [ "procMacro" ] false dep;
-              isRlib = lib.any (x: x == "lib" || x == "rlib") (dep.crateType or [ "lib" ]);
+              isRename = lib.hasAttr dep.crateName crateRenames;
             };
           in
           map mkExtern dependencies_;
@@ -164,8 +163,7 @@ lib.makeOverridable
             mkExtern = dep: {
               externName = normalizeName dep.libName;
               metadata = dep.metadata;
-              isProcMacro = lib.attrByPath [ "procMacro" ] false dep;
-              isRlib = lib.any (x: x == "lib" || x == "rlib") (dep.crateType or [ "lib" ]);
+              isRename = false;
             };
           in
           map mkExtern buildDependencies_;

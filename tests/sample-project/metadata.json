@@ -335,6 +335,54 @@
       "rust_version": "1.57"
     },
     {
+      "name": "fnv",
+      "version": "1.0.7",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
+      "license": "Apache-2.0 / MIT",
+      "license_file": null,
+      "description": "Fowler\u2013Noll\u2013Vo hash function",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "fnv",
+          "src_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/lib.rs",
+          "edition": "2015",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": []
+      },
+      "manifest_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/fnv-1.0.7/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Alex Crichton <alex@alexcrichton.com>"
+      ],
+      "categories": [],
+      "keywords": [],
+      "readme": "README.md",
+      "repository": "https://github.com/servo/rust-fnv",
+      "homepage": null,
+      "documentation": "https://doc.servo.org/fnv/",
+      "edition": "2015",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    },
+    {
       "name": "http",
       "version": "1.4.0",
       "id": "registry+https://github.com/rust-lang/crates.io-index#http@1.4.0",
@@ -753,6 +801,84 @@
       "rust_version": "1.61"
     },
     {
+      "name": "new_debug_unreachable",
+      "version": "1.0.6",
+      "id": "registry+https://github.com/rust-lang/crates.io-index#new_debug_unreachable@1.0.6",
+      "license": "MIT",
+      "license_file": null,
+      "description": "panic in debug, intrinsics::unreachable() in release (fork of debug_unreachable)",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "dependencies": [],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "debug_unreachable",
+          "src_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/new_debug_unreachable-1.0.6/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "simple",
+          "src_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/new_debug_unreachable-1.0.6/examples/simple.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        {
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "check",
+          "src_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/new_debug_unreachable-1.0.6/tests/check.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/new_debug_unreachable-1.0.6/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [
+        "Matt Brubeck <mbrubeck@limpet.net>",
+        "Jonathan Reem <jonathan.reem@gmail.com>"
+      ],
+      "categories": [
+        "rust-patterns",
+        "no-std"
+      ],
+      "keywords": [
+        "optimization",
+        "macro"
+      ],
+      "readme": "README.md",
+      "repository": "https://github.com/mbrubeck/rust-debug-unreachable",
+      "homepage": null,
+      "documentation": "https://docs.rs/new_debug_unreachable",
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    },
+    {
       "name": "proc-macro2",
       "version": "1.0.106",
       "id": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
@@ -1158,7 +1284,7 @@
     {
       "name": "sample-bin",
       "version": "0.1.0",
-      "id": "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-bin#0.1.0",
+      "id": "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin#0.1.0",
       "license": null,
       "license_file": null,
       "description": null,
@@ -1175,7 +1301,7 @@
           "features": [],
           "target": null,
           "registry": null,
-          "path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-lib"
+          "path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib"
         }
       ],
       "targets": [
@@ -1187,7 +1313,7 @@
             "bin"
           ],
           "name": "sample-bin",
-          "src_path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-bin/src/main.rs",
+          "src_path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin/src/main.rs",
           "edition": "2021",
           "doc": true,
           "doctest": false,
@@ -1195,7 +1321,7 @@
         }
       ],
       "features": {},
-      "manifest_path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-bin/Cargo.toml",
+      "manifest_path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin/Cargo.toml",
       "metadata": null,
       "publish": null,
       "authors": [],
@@ -1213,18 +1339,42 @@
     {
       "name": "sample-lib",
       "version": "0.1.0",
-      "id": "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0",
+      "id": "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0",
       "license": null,
       "license_file": null,
       "description": null,
       "source": null,
       "dependencies": [
         {
+          "name": "fnv",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1",
+          "kind": null,
+          "rename": null,
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
           "name": "http",
           "source": "registry+https://github.com/rust-lang/crates.io-index",
           "req": "^1",
           "kind": null,
           "rename": "my_http",
+          "optional": false,
+          "uses_default_features": true,
+          "features": [],
+          "target": null,
+          "registry": null
+        },
+        {
+          "name": "new_debug_unreachable",
+          "source": "registry+https://github.com/rust-lang/crates.io-index",
+          "req": "^1",
+          "kind": null,
+          "rename": null,
           "optional": false,
           "uses_default_features": true,
           "features": [],
@@ -1267,7 +1417,7 @@
             "lib"
           ],
           "name": "sample_lib",
-          "src_path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-lib/src/lib.rs",
+          "src_path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib/src/lib.rs",
           "edition": "2021",
           "doc": true,
           "doctest": true,
@@ -1281,7 +1431,7 @@
             "bin"
           ],
           "name": "sample-tool",
-          "src_path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-lib/src/bin/sample-tool.rs",
+          "src_path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib/src/bin/sample-tool.rs",
           "edition": "2021",
           "doc": true,
           "doctest": false,
@@ -1289,7 +1439,7 @@
         }
       ],
       "features": {},
-      "manifest_path": "/root/src/cargo-nix-plugin/tests/sample-project/sample-lib/Cargo.toml",
+      "manifest_path": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib/Cargo.toml",
       "metadata": null,
       "publish": null,
       "authors": [],
@@ -3240,17 +3390,26 @@
     }
   ],
   "workspace_members": [
-    "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-bin#0.1.0",
-    "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0"
+    "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin#0.1.0",
+    "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0"
   ],
   "workspace_default_members": [
-    "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-bin#0.1.0",
-    "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0"
+    "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin#0.1.0",
+    "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0"
   ],
   "resolve": {
     "nodes": [
       {
         "id": "registry+https://github.com/rust-lang/crates.io-index#bytes@1.11.1",
+        "dependencies": [],
+        "deps": [],
+        "features": [
+          "default",
+          "std"
+        ]
+      },
+      {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
         "dependencies": [],
         "deps": [],
         "features": [
@@ -3307,6 +3466,12 @@
         ]
       },
       {
+        "id": "registry+https://github.com/rust-lang/crates.io-index#new_debug_unreachable@1.0.6",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      },
+      {
         "id": "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.106",
         "dependencies": [
           "registry+https://github.com/rust-lang/crates.io-index#unicode-ident@1.0.24"
@@ -3349,14 +3514,14 @@
         ]
       },
       {
-        "id": "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-bin#0.1.0",
+        "id": "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-bin#0.1.0",
         "dependencies": [
-          "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0"
+          "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0"
         ],
         "deps": [
           {
             "name": "sample_lib",
-            "pkg": "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0",
+            "pkg": "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0",
             "dep_kinds": [
               {
                 "kind": null,
@@ -3368,16 +3533,38 @@
         "features": []
       },
       {
-        "id": "path+file:///root/src/cargo-nix-plugin/tests/sample-project/sample-lib#0.1.0",
+        "id": "path+file:///root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/sample-lib#0.1.0",
         "dependencies": [
+          "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
           "registry+https://github.com/rust-lang/crates.io-index#http@1.4.0",
+          "registry+https://github.com/rust-lang/crates.io-index#new_debug_unreachable@1.0.6",
           "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.228",
           "registry+https://github.com/rust-lang/crates.io-index#serde_json@1.0.149"
         ],
         "deps": [
           {
+            "name": "fnv",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#fnv@1.0.7",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
             "name": "my_http",
             "pkg": "registry+https://github.com/rust-lang/crates.io-index#http@1.4.0",
+            "dep_kinds": [
+              {
+                "kind": null,
+                "target": null
+              }
+            ]
+          },
+          {
+            "name": "debug_unreachable",
+            "pkg": "registry+https://github.com/rust-lang/crates.io-index#new_debug_unreachable@1.0.6",
             "dep_kinds": [
               {
                 "kind": null,
@@ -3636,9 +3823,9 @@
     ],
     "root": null
   },
-  "target_directory": "/root/src/cargo-nix-plugin/tests/sample-project/target",
-  "build_directory": "/root/src/cargo-nix-plugin/tests/sample-project/target",
+  "target_directory": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/target",
+  "build_directory": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project/target",
   "version": 1,
-  "workspace_root": "/root/src/cargo-nix-plugin/tests/sample-project",
+  "workspace_root": "/root/src/cargo-nix-plugin__worktrees/native-rust-builder/tests/sample-project",
   "metadata": null
 }

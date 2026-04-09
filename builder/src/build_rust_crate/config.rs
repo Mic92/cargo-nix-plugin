@@ -120,8 +120,8 @@ pub struct CrateBin {
 pub struct DepExtern {
     pub extern_name: String,
     pub metadata: String,
-    #[serde(default = "default_true")]
-    pub is_rlib: bool,
+    #[serde(default)]
+    pub is_rename: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
