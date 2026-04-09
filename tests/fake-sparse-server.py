@@ -34,6 +34,7 @@ import argparse
 import http.server
 import os
 import socketserver
+import ssl
 
 
 def main() -> None:
@@ -42,6 +43,12 @@ def main() -> None:
     parser.add_argument("access_log")
     parser.add_argument("docroot")
     parser.add_argument("--fail-mode", default=None)
+    parser.add_argument(
+        "--tls-cert",
+        default=None,
+        help="serve over HTTPS with this PEM cert (key in --tls-key)",
+    )
+    parser.add_argument("--tls-key", default=None)
     args = parser.parse_args()
 
     fail_kind: str | None = None
@@ -90,6 +97,10 @@ def main() -> None:
     socketserver.TCPServer.allow_reuse_address = True
 
     with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+        if args.tls_cert:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(args.tls_cert, args.tls_key)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         port = httpd.server_address[1]
         # Atomic write so the reader sees either nothing or the full port.
         fd = os.open(args.port_file, os.O_WRONLY | os.O_TRUNC)

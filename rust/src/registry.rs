@@ -233,13 +233,83 @@ fn netrc_credentials_for_url(url: &str) -> Option<(String, String)> {
 fn shared_agent() -> &'static ureq::Agent {
     static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
+        let mut cfg = ureq::Agent::config_builder()
             .max_idle_connections_per_host(PREFETCH_WORKERS)
             .timeout_global(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .build()
-            .into()
+            .http_status_as_error(false);
+
+        match custom_root_certs(|k| std::env::var_os(k)) {
+            Ok(Some(roots)) => {
+                cfg = cfg.tls_config(
+                    ureq::tls::TlsConfig::builder()
+                        .root_certs(ureq::tls::RootCerts::from(roots))
+                        .build(),
+                );
+            }
+            Ok(None) => {}
+            // Cargo treats an invalid CARGO_HTTP_CAINFO as a hard error. We
+            // surface it loudly but fall back to the bundled webpki roots
+            // rather than poisoning the OnceLock — the common case (public
+            // crates.io) still works, and the corporate-CA case will fail
+            // at TLS handshake time with a more specific error anyway.
+            Err(e) => eprintln!("warning: ignoring custom CA bundle: {e}"),
+        }
+
+        cfg.build().into()
     })
+}
+
+/// Load extra root CAs the same way cargo does: `CARGO_HTTP_CAINFO` (cargo's
+/// `http.cainfo` env mapping) takes precedence, then `SSL_CERT_FILE` (the
+/// generic OpenSSL/libcurl knob that nixpkgs' `cacert` setup-hook exports).
+///
+/// ureq's default `rustls` backend ships `webpki-roots` and ignores the system
+/// store entirely, so without this a corporate MITM proxy or a private
+/// registry signed by an internal CA is unreachable from inside the prefetch
+/// sandbox even when the surrounding nix build *has* threaded the cert bundle
+/// through.
+///
+/// Returns `Ok(None)` when neither variable is set; the caller keeps the
+/// compiled-in webpki roots in that case.
+fn custom_root_certs(
+    var_os: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Option<Vec<ureq::tls::Certificate<'static>>>, String> {
+    // CARGO_HTTP_CAINFO is explicit user intent — if it's set but
+    // unreadable, that's an error. SSL_CERT_FILE is ambient: nixpkgs'
+    // stdenv points it at the sentinel `/no-cert-file.crt` inside the
+    // build sandbox precisely to defeat openssl's default lookup, so a
+    // missing file there must quietly mean "no custom roots", not a
+    // warning on every evaluation.
+    let path = match var_os("CARGO_HTTP_CAINFO").filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => match var_os("SSL_CERT_FILE").filter(|p| !p.is_empty()) {
+            Some(p) if Path::new(&p).exists() => p,
+            _ => return Ok(None),
+        },
+    };
+
+    let pem = std::fs::read(&path)
+        .map_err(|e| format!("failed to read CA bundle {}: {e}", path.to_string_lossy()))?;
+
+    let certs: Vec<_> = ureq::tls::parse_pem(&pem)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(c)) => Some(Ok(c)),
+            Ok(_) => None,
+            Err(e) => Some(Err(format!(
+                "failed to parse CA bundle {}: {e}",
+                path.to_string_lossy()
+            ))),
+        })
+        .collect::<Result<_, _>>()?;
+
+    if certs.is_empty() {
+        return Err(format!(
+            "CA bundle {} contains no certificates",
+            path.to_string_lossy()
+        ));
+    }
+
+    Ok(Some(certs))
 }
 
 const PREFETCH_WORKERS: usize = 32;
@@ -860,6 +930,22 @@ mod tests {
                 std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
             )
         }))
+    }
+
+    /// The TLS path itself and the SSL_CERT_FILE sentinel handling are
+    /// covered end-to-end by `tests/mirror-test.nix`; this pins the one
+    /// thing that test can't see — that CARGO_HTTP_CAINFO takes precedence
+    /// over SSL_CERT_FILE and, being explicit user intent, errors rather
+    /// than silently falling through when unreadable.
+    #[test]
+    fn custom_root_certs_cainfo_precedence() {
+        let err = custom_root_certs(|k| match k {
+            "CARGO_HTTP_CAINFO" => Some("/nonexistent/cainfo.pem".into()),
+            "SSL_CERT_FILE" => Some("/no-cert-file.crt".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(err.contains("/nonexistent/cainfo.pem"), "{err}");
     }
 
     #[test]
