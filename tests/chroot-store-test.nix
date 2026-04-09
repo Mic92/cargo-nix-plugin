@@ -104,5 +104,40 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     }
     echo "PASS: src/bin/<name>/main.rs autodiscovered"
 
+    # Regression for the lib_path-shadowing bug: buildTests=true compiles the
+    # lib with --test (unit tests) and an integration test under tests/, both
+    # linked against the just-built rlib.
+    ${nix}/bin/nix build \
+      --store "$CHROOT" \
+      --substituters "" \
+      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --impure --no-link --print-out-paths \
+      --expr '
+        let
+          pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
+          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
+            rustc = builtins.storePath ${pkgs.rustc};
+            cargo = builtins.storePath ${pkgs.cargo};
+            mold = builtins.storePath ${pkgs.mold};
+            buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
+          };
+        in (import ${pluginSrc}/lib {
+          inherit pkgs;
+          src = ${sampleProject};
+          buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
+        }).workspaceMembers.nodeps-lib.build.override { buildTests = true; }
+      ' > tests-out
+    tests_out=$(cat tests-out)
+    ran=0
+    for t in "$CHROOT$tests_out"/tests/*; do
+      [[ -x "$t" ]] || continue
+      "$t" 2>&1 | grep -q 'test result: ok' || {
+        echo "FAIL: $t did not pass"; exit 1;
+      }
+      ran=$((ran+1))
+    done
+    [[ $ran -ge 2 ]] || { echo "FAIL: expected lib unit + integration test, ran $ran"; exit 1; }
+    echo "PASS: buildTests=true produces runnable lib + integration tests"
+
     echo "ALL CHROOT STORE TESTS PASSED" > $out
   ''
