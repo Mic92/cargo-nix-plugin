@@ -28,6 +28,9 @@ let
       # bash that arranges for the override; receives $WORKSPACE and
       # $INDEX_URL in scope.
       setup,
+      # extra argv for fake-sparse-server.py
+      serverArgs ? "",
+      scheme ? "http",
     }:
     pkgs.runCommand "cargo-nix-plugin-mirror-test-${name}"
       {
@@ -47,7 +50,7 @@ let
         PORT_FILE=$(mktemp)
         ACCESS_LOG=$(mktemp)
         python3 ${./fake-sparse-server.py} \
-          "$PORT_FILE" "$ACCESS_LOG" ${./fake-sparse-index} &
+          "$PORT_FILE" "$ACCESS_LOG" ${./fake-sparse-index} ${serverArgs} &
         SERVER_PID=$!
         trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
 
@@ -55,7 +58,7 @@ let
           kill -0 $SERVER_PID
         done
         PORT=$(<"$PORT_FILE")
-        INDEX_URL="sparse+http://127.0.0.1:$PORT/"
+        INDEX_URL="sparse+${scheme}://127.0.0.1:$PORT/"
         echo "mirror at $INDEX_URL"
 
         WORKSPACE=$(mktemp -d)
@@ -98,6 +101,19 @@ pkgs.linkFarmFromDrvs "cargo-nix-plugin-mirror-tests" [
     name = "env-var";
     setup = ''
       export CARGO_REGISTRIES_CRATES_IO_INDEX="$INDEX_URL"
+    '';
+  })
+  # HTTPS mirror signed by a private CA: exercises that the prefetch HTTP
+  # client honours SSL_CERT_FILE/CARGO_HTTP_CAINFO instead of trusting only
+  # the bundled webpki roots. Without that hook, rustls rejects the handshake
+  # and every fetch fails inside the sandbox.
+  (mkCase {
+    name = "https-custom-ca";
+    scheme = "https";
+    serverArgs = "--tls-cert ${./fake-sparse-tls.crt} --tls-key ${./fake-sparse-tls.key}";
+    setup = ''
+      export CARGO_REGISTRIES_CRATES_IO_INDEX="$INDEX_URL"
+      export SSL_CERT_FILE=${./fake-sparse-ca.crt}
     '';
   })
   (mkCase {
