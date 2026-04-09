@@ -12,23 +12,30 @@ use super::configure::BuildScriptOutputs;
 /// eval-time `crateType` is unreliable in lockfile-resolve mode (sparse
 /// index has no `[lib]`), so a caller-supplied preference would be a guess
 /// anyway.
-fn find_by_metadata(dir: &str, metadata: &str, lib_ext: &str) -> Option<String> {
+/// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`,
+/// then any dynamic lib (`.so`/`.dylib`): proc-macro deps are built for the
+/// build platform, so under cross-compile their extension may differ from
+/// `host_platform.lib_ext`.
+pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return None;
     };
-    let rlib_suffix = format!("-{metadata}.rlib");
-    let so_suffix = format!("-{metadata}{lib_ext}");
-    let mut so_match = None;
+    let stem = format!("-{metadata}.");
+    let mut dylib_match = None;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(&rlib_suffix) {
-            return Some(entry.path().to_string_lossy().to_string());
-        }
-        if name.ends_with(&so_suffix) {
-            so_match = Some(entry.path().to_string_lossy().to_string());
+        let Some(ext) = name.rsplit_once(&stem).map(|(_, e)| e) else {
+            continue;
+        };
+        match ext {
+            "rlib" => return Some(entry.path().to_string_lossy().to_string()),
+            "so" | "dylib" => {
+                dylib_match = Some(entry.path().to_string_lossy().to_string());
+            }
+            _ => {}
         }
     }
-    so_match
+    dylib_match
 }
 
 /// Recover the lib name from an artifact path like
@@ -46,14 +53,10 @@ fn lib_name_from_path(path: &str, metadata: &str) -> Option<String> {
 /// been symlinked into `dir`. The NAME is taken from the artifact filename
 /// (build-time truth) unless the dep was explicitly aliased via
 /// `crateRenames`, in which case the alias wins.
-pub fn dep_extern_args(
-    deps: &[super::config::DepExtern],
-    dir: &str,
-    lib_ext: &str,
-) -> Vec<String> {
+pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(deps.len() * 2);
     for dep in deps {
-        let path = find_by_metadata(dir, &dep.metadata, lib_ext)
+        let path = find_by_metadata(dir, &dep.metadata)
             .unwrap_or_else(|| format!("{dir}/lib{}-{}.rlib", dep.extern_name, dep.metadata));
         let name = if dep.is_rename {
             dep.extern_name.clone()
@@ -101,6 +104,11 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     }
 
     flags.extend_from_slice(&config.extra_rustc_opts);
+    // Runtime hook for nix-inc and preBuild overrides; the old shell builder
+    // appended $EXTRA_RUSTC_FLAGS verbatim to every rustc invocation.
+    if let Ok(v) = std::env::var("EXTRA_RUSTC_FLAGS") {
+        flags.extend(v.split_whitespace().map(String::from));
+    }
     flags.extend_from_slice(&[
         "-C".into(),
         format!("linker={}", config.host_platform.linker_path),
@@ -133,11 +141,7 @@ impl RustcFlags {
         // Dependency --extern flags. Paths and names are derived from the
         // artifacts symlinked into target/deps (build-time truth), not the
         // eval-time guesses.
-        base.extend(dep_extern_args(
-            &config.dep_externs,
-            "target/deps",
-            &config.host_platform.lib_ext,
-        ));
+        base.extend(dep_extern_args(&config.dep_externs, "target/deps"));
 
         // Feature --cfg flags
         for f in &config.crate_features {

@@ -133,7 +133,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         cmd.args(super::rustc::dep_extern_args(
             &config.build_dep_externs,
             "target/buildDeps",
-            &config.build_platform.lib_ext,
         ));
         if let Ok(flags) = fs::read_to_string("target/link.build") {
             for f in flags.split_whitespace() {
