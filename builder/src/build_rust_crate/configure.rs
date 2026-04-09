@@ -13,6 +13,8 @@ use super::util::{echo_colored, run_cmd};
 pub struct BuildScriptOutputs {
     pub rustc_flags: String,
     pub cfgs: Vec<String>,
+    #[serde(default)]
+    pub check_cfgs: Vec<String>,
     pub link_args: Vec<String>,
     pub link_args_bins: Vec<String>,
     pub link_args_lib: Vec<String>,
@@ -23,8 +25,11 @@ pub struct BuildScriptOutputs {
     pub build_out_dir: String,
 }
 
-pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    // Navigate to workspace member
+/// Change cwd into the crate's source root and patch `config` from the
+/// unpacked Cargo.toml. Runs at the top of every phase: each phase is a
+/// separate `build-rust-crate <phase>` process, so the configure phase's
+/// chdir/detect does not survive.
+pub fn enter_crate_root(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     match &config.workspace_member {
         Some(m) if m != "." && !m.is_empty() => {
             echo_colored(&format!("Changing directory to {m}"));
@@ -39,9 +44,12 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {}
     }
-
-    // Auto-detect edition and proc-macro from Cargo.toml
     detect_cargo_toml_info(config);
+    Ok(())
+}
+
+pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
+    enter_crate_root(config)?;
 
     for dir in &["target/deps", "target/lib", "target/build", "target/buildDeps"] {
         fs::create_dir_all(dir)?;
@@ -77,13 +85,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         link.into_iter().collect::<Vec<_>>().join(" "),
     )?;
 
-    // Build script
-    let build_script = if !config.build.is_empty() {
-        Some(config.build.clone())
-    } else if Path::new("build.rs").exists() {
-        Some("build.rs".into())
-    } else {
-        None
+    let build_script = match config.build.as_str() {
+        "false" => None,
+        "" if Path::new("build.rs").exists() => Some("build.rs".to_string()),
+        "" => None,
+        path => Some(path.to_string()),
     };
 
     if let Some(script) = build_script {
@@ -124,11 +130,10 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         for f in &config.crate_features {
             cmd.arg("--cfg").arg(format!("feature=\"{f}\""));
         }
-        // Build dep --extern flags
         cmd.args(super::rustc::dep_extern_args(
             &config.build_dep_externs,
             "target/buildDeps",
-            &config.host_platform.lib_ext,
+            &config.build_platform.lib_ext,
         ));
         if let Ok(flags) = fs::read_to_string("target/link.build") {
             for f in flags.split_whitespace() {
@@ -154,16 +159,20 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.verbose {
             super::util::echo_cmd(&cmd);
         }
-        let output = cmd.output()?;
-        if !output.status.success() {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            std::process::exit(output.status.code().unwrap_or(1));
+        // Stream stderr; only stdout carries `cargo:` directives.
+        cmd.stderr(std::process::Stdio::inherit());
+        cmd.stdout(std::process::Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let mut stdout = String::new();
+        std::io::Read::read_to_string(
+            &mut child.stdout.take().expect("piped stdout"),
+            &mut stdout,
+        )?;
+        let status = child.wait()?;
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
         print!("{stdout}");
-        if !output.stderr.is_empty() {
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-        }
 
         let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
         let bso = parse_build_script_output(&stdout, &abs_out_dir);
@@ -226,6 +235,14 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
             hp.pointer_width.to_string(),
         ),
         ("CARGO_CFG_TARGET_VENDOR".into(), hp.vendor.clone()),
+        (
+            "CARGO_CFG_TARGET_FEATURE".into(),
+            target_cfg_values(config, "target_feature").join(","),
+        ),
+        (
+            "CARGO_CFG_TARGET_HAS_ATOMIC".into(),
+            target_cfg_values(config, "target_has_atomic").join(","),
+        ),
         ("CARGO_MANIFEST_DIR".into(), cwd),
         ("CARGO_MANIFEST_LINKS".into(), config.crate_links.clone()),
         ("DEBUG".into(), (!config.release).to_string()),
@@ -261,17 +278,37 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
 }
 
 fn parse_version(v: &str) -> (String, String, String, String) {
-    let (ver, pre) = v
-        .split_once('-')
-        .map(|(a, b)| (a, b.into()))
-        .unwrap_or((v, String::new()));
-    let p: Vec<&str> = ver.split('.').collect();
+    let v = v.split_once('+').map_or(v, |(a, _)| a);
+    let (ver, pre) = v.split_once('-').unwrap_or((v, ""));
+    let mut p = ver.splitn(3, '.');
     (
-        p.first().unwrap_or(&"0").to_string(),
-        p.get(1).unwrap_or(&"0").to_string(),
-        p.get(2).unwrap_or(&"0").to_string(),
-        pre,
+        p.next().unwrap_or("0").into(),
+        p.next().unwrap_or("0").into(),
+        p.next().unwrap_or("0").into(),
+        pre.into(),
     )
+}
+
+/// All values of one `name="value"` cfg from `rustc --print cfg`, memoized.
+fn target_cfg_values(config: &BuildConfig, name: &str) -> Vec<String> {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<String> = OnceLock::new();
+    let out = CFG.get_or_init(|| {
+        Command::new("rustc")
+            .arg("--print=cfg")
+            .arg("--target")
+            .arg(&config.host_platform.rustc_target_spec)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    });
+    let prefix = format!("{name}=\"");
+    out.lines()
+        .filter_map(|l| l.strip_prefix(&prefix)?.strip_suffix('"'))
+        .map(String::from)
+        .collect()
 }
 
 fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs {
@@ -279,8 +316,9 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
         build_out_dir: out_dir.into(),
         ..Default::default()
     };
-    let mut rustc_flags = BTreeSet::new();
-    let mut link_search = BTreeSet::new();
+    // Linker flags are position-sensitive; preserve emission order.
+    let mut rustc_flags: Vec<String> = Vec::new();
+    let mut link_search: Vec<String> = Vec::new();
 
     for line in stdout.lines() {
         let d = line
@@ -289,7 +327,9 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
         let Some(d) = d else { continue };
 
         if let Some(v) = d.strip_prefix("rustc-flags=") {
-            rustc_flags.insert(v.to_string());
+            rustc_flags.push(v.to_string());
+        } else if let Some(v) = d.strip_prefix("rustc-check-cfg=") {
+            bso.check_cfgs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-cfg=") {
             bso.cfgs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-link-arg=") {
@@ -317,7 +357,9 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
                     .into_owned(),
                 _ => v.to_string(),
             };
-            link_search.insert(resolved);
+            if !link_search.contains(&resolved) {
+                link_search.push(resolved);
+            }
         } else if let Some(v) = d.strip_prefix("rustc-cdylib-link-arg=") {
             bso.cdylib_link_args
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
@@ -325,10 +367,15 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             if let Some((k, val)) = v.split_once('=') {
                 bso.envs.insert(k.into(), val.into());
             }
+        } else if let Some(msg) = d.strip_prefix("warning=") {
+            eprintln!("\x1b[0;1;33mwarning\x1b[0m: {msg}");
+        } else if let Some(msg) = d.strip_prefix("error=") {
+            eprintln!("\x1b[0;1;31merror\x1b[0m: {msg}");
+            std::process::exit(1);
         }
     }
-    bso.rustc_flags = rustc_flags.into_iter().collect::<Vec<_>>().join(" ");
-    bso.link_search = link_search.into_iter().collect();
+    bso.rustc_flags = rustc_flags.join(" ");
+    bso.link_search = link_search;
     bso
 }
 
@@ -336,11 +383,11 @@ fn write_dep_env_file(
     config: &BuildConfig,
     stdout: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let crate_upper = config
-        .crate_name
-        .replace("-sys", "")
-        .replace('-', "_")
-        .to_uppercase();
+    // Cargo only emits DEP_* when the crate declares `links`.
+    if config.crate_links.is_empty() {
+        return Ok(());
+    }
+    let links_upper = config.crate_links.replace('-', "_").to_uppercase();
     let ver_safe = config.crate_version.replace(['.', '+', '-'], "_");
     let mut lines = Vec::new();
 
@@ -349,7 +396,7 @@ fn write_dep_env_file(
         if let Some(rest) = line.strip_prefix("cargo::metadata=") {
             if let Some((k, v)) = rest.split_once('=') {
                 lines.push(format!(
-                    "export DEP_{crate_upper}_{}=\"{v}\"",
+                    "export DEP_{links_upper}_{}=\"{v}\"",
                     k.replace('-', "_").to_uppercase()
                 ));
             }
@@ -367,9 +414,9 @@ fn write_dep_env_file(
         }
         if let Some((k, v)) = d.split_once('=') {
             let key = k.replace('-', "_").to_uppercase();
-            lines.push(format!("export DEP_{crate_upper}_{key}=\"{v}\""));
+            lines.push(format!("export DEP_{links_upper}_{key}=\"{v}\""));
             lines.push(format!(
-                "export DEP_{crate_upper}_{ver_safe}_{key}=\"{v}\""
+                "export DEP_{links_upper}_{ver_safe}_{key}=\"{v}\""
             ));
         }
     }
@@ -506,7 +553,9 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     };
 
     // Auto-detect edition
-    if !config.extra_rustc_opts.iter().any(|o| o == "--edition") {
+    let has_edition =
+        |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
+    if !has_edition(&config.extra_rustc_opts) {
         let edition = doc.get("package").and_then(|p| p.get("edition")).and_then(|v| {
             v.as_str()
                 .map(String::from)
@@ -522,15 +571,28 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // Auto-detect build script path from Cargo.toml if not set in drv
     if config.build.is_empty() {
-        if let Some(build_path) = doc.get("package")
-            .and_then(|p| p.get("build"))
+        match doc.get("package").and_then(|p| p.get("build")) {
+            Some(v) if v.as_bool() == Some(false) => config.build = "false".into(),
+            Some(v) => {
+                if let Some(p) = v.as_str() {
+                    if Path::new(p).exists() {
+                        config.build = p.to_string();
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    // Fallback for path/git deps; registry crates get this from the index.
+    if config.crate_links.is_empty() {
+        if let Some(l) = doc
+            .get("package")
+            .and_then(|p| p.get("links"))
             .and_then(|v| v.as_str())
         {
-            if Path::new(build_path).exists() {
-                config.build = build_path.to_string();
-            }
+            config.crate_links = l.to_string();
         }
     }
 
@@ -642,4 +704,41 @@ fn find_workspace_name(cargo_toml: &Path) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_components_strip_build_metadata() {
+        assert_eq!(
+            parse_version("1.2.3"),
+            ("1".into(), "2".into(), "3".into(), "".into())
+        );
+        assert_eq!(
+            parse_version("1.2.3-alpha.1+git.abc"),
+            ("1".into(), "2".into(), "3".into(), "alpha.1".into())
+        );
+        assert_eq!(
+            parse_version("0.39.1+e3ba2a3"),
+            ("0".into(), "39".into(), "1".into(), "".into())
+        );
+    }
+
+    #[test]
+    fn build_script_output_preserves_flag_order_and_handles_check_cfg() {
+        let stdout = "\
+cargo:rustc-flags=-l foo\n\
+cargo:rustc-flags=-L /a\n\
+cargo:rustc-flags=-l bar\n\
+cargo::rustc-check-cfg=cfg(has_foo)\n\
+cargo:rustc-link-search=native=/out\n\
+cargo:rustc-link-search=native=/out\n\
+cargo:warning=heads up\n";
+        let bso = parse_build_script_output(stdout, "/out");
+        assert_eq!(bso.rustc_flags, "-l foo -L /a -l bar");
+        assert_eq!(bso.check_cfgs, vec!["cfg(has_foo)"]);
+        assert_eq!(bso.link_search, vec!["native=/out"]); // de-duped, order kept
+    }
 }

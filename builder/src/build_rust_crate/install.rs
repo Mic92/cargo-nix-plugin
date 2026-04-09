@@ -3,8 +3,11 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
 use super::config::BuildConfig;
+use super::configure::enter_crate_root;
 
-pub fn run(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
+    enter_crate_root(config)?;
+
     let metadata = &config.metadata;
     let out = config.out_path();
 
@@ -14,6 +17,7 @@ pub fn run(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     let lib_out = config.lib_path_output().unwrap_or(out);
     fs::create_dir_all(out)?;
+    fs::create_dir_all(lib_out)?;
 
     // Copy env
     copy_if_nonempty("target/env", &format!("{lib_out}/env"))?;

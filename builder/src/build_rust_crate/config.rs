@@ -18,7 +18,9 @@ pub struct BuildConfig {
     pub lib_path: String,
     #[serde(default)]
     pub build: String,
-    #[serde(default)]
+    // Nix attr is literally `workspace_member` (legacy nixpkgs spelling),
+    // not the camelCase the blanket rename would expect.
+    #[serde(default, rename = "workspace_member")]
     pub workspace_member: Option<String>,
     #[serde(default)]
     pub crate_bin: Vec<CrateBin>,

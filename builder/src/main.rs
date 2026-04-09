@@ -30,7 +30,7 @@ fn main() {
     let result = match args[1].as_str() {
         "configure" => build_rust_crate::configure::run(&mut config),
         "build" => build_rust_crate::build::run(&mut config),
-        "install" => build_rust_crate::install::run(&config),
+        "install" => build_rust_crate::install::run(&mut config),
         other => {
             eprintln!("error: unknown subcommand: {other}");
             process::exit(1);

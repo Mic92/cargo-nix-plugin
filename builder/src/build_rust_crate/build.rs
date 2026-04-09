@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use super::config::BuildConfig;
-use super::configure::{BuildScriptOutputs, build_env, detect_cargo_toml_info};
+use super::configure::{BuildScriptOutputs, build_env, enter_crate_root};
 use super::rustc::RustcFlags;
 use super::util::{echo_colored, remove_object_files, run_cmd};
 
@@ -17,7 +17,7 @@ fn set_cargo_pkg_env(config: &BuildConfig) {
 }
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    detect_cargo_toml_info(config);
+    enter_crate_root(config)?;
 
     let bso = if Path::new("target/build-script-outputs.json").exists() {
         serde_json::from_str(&fs::read_to_string("target/build-script-outputs.json")?)?
