@@ -4,18 +4,12 @@ use std::process::Command;
 use super::config::BuildConfig;
 use super::configure::BuildScriptOutputs;
 
-/// Find a library file in `dir` by its metadata hash suffix.
-///
-/// Always prefers `.rlib` over the platform shared-lib extension: for
-/// Rust-to-Rust linkage the rlib is what dependents want, and proc-macro
-/// crates produce only a `.so`/`.dylib`, so the fallback covers them. The
-/// eval-time `crateType` is unreliable in lockfile-resolve mode (sparse
-/// index has no `[lib]`), so a caller-supplied preference would be a guess
-/// anyway.
-/// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`,
-/// then any dynamic lib (`.so`/`.dylib`): proc-macro deps are built for the
-/// build platform, so under cross-compile their extension may differ from
-/// `host_platform.lib_ext`.
+/// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`
+/// (Rust-to-Rust linkage), falls back to any `.so`/`.dylib` (proc-macro
+/// deps are built for the build platform, so under cross-compile their
+/// extension may differ from the host's). The eval-time `crateType` is
+/// unreliable in lockfile-resolve mode, so a caller-supplied preference
+/// would be a guess anyway.
 pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return None;
@@ -228,19 +222,12 @@ impl RustcFlags {
             cmd.arg("--test");
         }
 
-        for a in &self.base {
-            cmd.arg(a);
-        }
-        for a in &self.link {
-            cmd.arg(a);
-        }
-        for a in &self.out_dir {
-            cmd.arg(a);
-        }
-        for a in extra_flags {
-            cmd.arg(a);
-        }
-        cmd.arg("--color").arg("auto");
+        cmd.args(&self.base)
+            .args(&self.link)
+            .args(&self.out_dir)
+            .args(extra_flags)
+            .arg("--color")
+            .arg("auto");
         cmd
     }
 }

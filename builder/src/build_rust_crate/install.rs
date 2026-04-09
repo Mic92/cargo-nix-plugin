@@ -63,7 +63,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let dst = format!("{}/tests", config.out_path());
     fs::create_dir_all(&dst)?;
-    let lib_ext = &config.host_platform.lib_ext;
 
     for dir in ["target/bin", "target/lib"] {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -71,13 +70,13 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
         };
         for entry in entries.flatten() {
             let p = entry.path();
-            let name = p.file_name().unwrap().to_string_lossy().to_string();
-            if !p.is_file() || !is_executable(&p) {
-                continue;
-            }
-            if dir == "target/lib"
-                && (name.ends_with(".rlib") || name.ends_with(lib_ext) || name.ends_with(".d"))
-            {
+            let name = p.file_name().unwrap().to_string_lossy();
+            // Skip non-test artifacts that share target/lib.
+            let is_lib = matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("rlib" | "so" | "dylib" | "d")
+            );
+            if !p.is_file() || !is_executable(&p) || (dir == "target/lib" && is_lib) {
                 continue;
             }
             fs::copy(&p, format!("{dst}/{name}"))?;
