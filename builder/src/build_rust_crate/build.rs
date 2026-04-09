@@ -62,10 +62,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             config.verbose,
         )?;
 
-        lib_extern.extend_from_slice(&[
-            "--extern".into(),
-            format!("{crate_name}=target/lib/lib{crate_name}-{metadata}.rlib"),
-        ]);
+        // Own bins/tests link against the lib we just built. Look it up by
+        // metadata so proc-macro / dylib-only crates (no .rlib) still work.
+        let lib_path = super::rustc::find_by_metadata("target/lib", metadata)
+            .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
+        lib_extern.extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_path}")]);
 
         // Proc-macro marker for downstream crates
         if config.crate_type.iter().any(|t| t == "proc-macro") {
@@ -258,6 +259,9 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
                 if path.extension().map(|e| e == "rs").unwrap_or(false) {
                     let name = path.file_stem().unwrap().to_string_lossy().to_string();
                     bins.push((name, path.to_string_lossy().into_owned()));
+                } else if path.is_dir() && path.join("main.rs").exists() {
+                    let name = path.file_name().unwrap().to_string_lossy().to_string();
+                    bins.push((name, path.join("main.rs").to_string_lossy().into_owned()));
                 }
             }
         }

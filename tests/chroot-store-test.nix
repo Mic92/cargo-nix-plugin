@@ -97,5 +97,12 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     }
     echo "PASS: binary in chroot store runs correctly"
 
+    multifile=$(find "$CHROOT/nix/store" -name multifile -type f -executable | head -1)
+    [[ -n "$multifile" && "$($multifile)" == "multifile ok" ]] || {
+      echo "FAIL: src/bin/<name>/main.rs autodiscovery did not produce a working bin"
+      exit 1
+    }
+    echo "PASS: src/bin/<name>/main.rs autodiscovered"
+
     echo "ALL CHROOT STORE TESTS PASSED" > $out
   ''
