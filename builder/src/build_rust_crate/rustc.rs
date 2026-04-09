@@ -176,12 +176,7 @@ impl RustcFlags {
             base,
             meta,
             link,
-            bso_lib: bso
-                .link_args
-                .iter()
-                .chain(&bso.link_args_lib)
-                .cloned()
-                .collect(),
+            bso_lib: bso.link_args.clone(),
             bso_bins: bso
                 .link_args
                 .iter()

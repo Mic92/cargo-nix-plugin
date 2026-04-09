@@ -17,7 +17,6 @@ pub struct BuildScriptOutputs {
     pub check_cfgs: Vec<String>,
     pub link_args: Vec<String>,
     pub link_args_bins: Vec<String>,
-    pub link_args_lib: Vec<String>,
     pub link_libs: Vec<String>,
     pub link_search: Vec<String>,
     pub cdylib_link_args: Vec<String>,
@@ -145,6 +144,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         // Run build script
         let mut cmd = Command::new(format!("{build_dir}/build_script_build"));
+        cmd.env_remove("RUSTFLAGS");
         cmd.env("RUST_BACKTRACE", "1");
         cmd.envs(&env);
         for f in &config.crate_features {
@@ -190,7 +190,7 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         .to_string_lossy()
         .into_owned();
 
-    BTreeMap::from([
+    let mut env = BTreeMap::from([
         ("CARGO_PKG_NAME".into(), config.crate_name.clone()),
         ("CARGO_PKG_VERSION".into(), config.crate_version.clone()),
         (
@@ -220,8 +220,9 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         ("CARGO_PKG_VERSION_MINOR".into(), minor),
         ("CARGO_PKG_VERSION_PATCH".into(), patch),
         ("CARGO_PKG_VERSION_PRE".into(), pre),
+        ("CARGO_MANIFEST_PATH".into(), format!("{cwd}/Cargo.toml")),
         ("CARGO_MANIFEST_DIR".into(), cwd),
-        ("CARGO_MANIFEST_LINKS".into(), config.crate_links.clone()),
+        ("CARGO".into(), "cargo".into()),
         ("DEBUG".into(), (!config.release).to_string()),
         (
             "OPT_LEVEL".into(),
@@ -252,10 +253,19 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
             "CARGO_CRATE_NAME".into(),
             config.lib_name.replace('-', "_"),
         ),
-    ])
-    .into_iter()
-    .chain(target_cfg_env(config))
-    .collect()
+        ("CARGO_CFG_FEATURE".into(), config.crate_features.join(",")),
+    ]);
+    if !config.crate_links.is_empty() {
+        env.insert("CARGO_MANIFEST_LINKS".into(), config.crate_links.clone());
+    }
+    env.extend(target_cfg_env(config));
+    // rustc reports debug_assertions unconditionally; cargo overrides it from
+    // the profile (custom_build.rs:368).
+    if config.release {
+        env.remove("CARGO_CFG_DEBUG_ASSERTIONS");
+    }
+    env.remove("CARGO_CFG_PROC_MACRO");
+    env
 }
 
 fn parse_version(v: &str) -> (String, String, String, String) {
@@ -327,10 +337,15 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
     let mut link_search: Vec<String> = Vec::new();
 
     for line in stdout.lines() {
-        let d = line
-            .strip_prefix("cargo::")
-            .or_else(|| line.strip_prefix("cargo:"));
-        let Some(d) = d else { continue };
+        let line = line.trim();
+        let (new_syntax, d) = match line.strip_prefix("cargo::") {
+            Some(d) => (true, d),
+            None => match line.strip_prefix("cargo:") {
+                Some(d) => (false, d),
+                None => continue,
+            },
+        };
+        let d = d.trim_end();
 
         if let Some(v) = d.strip_prefix("rustc-flags=") {
             rustc_flags.push(v.to_string());
@@ -343,9 +358,6 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-link-arg-bins=") {
             bso.link_args_bins
-                .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
-        } else if let Some(v) = d.strip_prefix("rustc-link-arg-lib=") {
-            bso.link_args_lib
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-link-lib=") {
             bso.link_libs.push(v.into());
@@ -366,7 +378,10 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             if !link_search.contains(&resolved) {
                 link_search.push(resolved);
             }
-        } else if let Some(v) = d.strip_prefix("rustc-cdylib-link-arg=") {
+        } else if let Some(v) = d
+            .strip_prefix("rustc-cdylib-link-arg=")
+            .or_else(|| d.strip_prefix("rustc-link-arg-cdylib="))
+        {
             bso.cdylib_link_args
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-env=") {
@@ -375,7 +390,9 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             }
         } else if let Some(msg) = d.strip_prefix("warning=") {
             eprintln!("\x1b[0;1;33mwarning\x1b[0m: {msg}");
-        } else if let Some(msg) = d.strip_prefix("error=") {
+        } else if let (true, Some(msg)) = (new_syntax, d.strip_prefix("error=")) {
+            // Old-syntax `cargo:error=` is metadata, not fatal (cargo only
+            // recognises `cargo::error=`).
             eprintln!("\x1b[0;1;31merror\x1b[0m: {msg}");
             std::process::exit(1);
         }
@@ -398,20 +415,19 @@ fn write_dep_env_file(
     let mut lines = Vec::new();
 
     for line in stdout.lines() {
-        // Handle cargo::metadata= (new-style)
-        if let Some(rest) = line.strip_prefix("cargo::metadata=") {
-            if let Some((k, v)) = rest.split_once('=') {
-                lines.push(format!(
-                    "export DEP_{links_upper}_{}=\"{v}\"",
-                    k.replace('-', "_").to_uppercase()
-                ));
+        let line = line.trim();
+        // New-syntax: only `cargo::metadata=KEY=VALUE` is metadata; any other
+        // `cargo::` directive is a (possibly unknown) instruction, not data.
+        let d = if let Some(rest) = line.strip_prefix("cargo::") {
+            match rest.strip_prefix("metadata=") {
+                Some(kv) => kv,
+                None => continue,
             }
+        } else if let Some(rest) = line.strip_prefix("cargo:") {
+            rest
+        } else {
             continue;
-        }
-        let d = line
-            .strip_prefix("cargo::")
-            .or_else(|| line.strip_prefix("cargo:"));
-        let Some(d) = d else { continue };
+        };
         if d.starts_with("rustc-")
             || d.starts_with("warning=")
             || d.starts_with("rerun-if-")
@@ -665,10 +681,11 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
                 .filter_map(|t| t.as_str().map(String::from))
                 .collect();
             // Registry crates are only ever built here as dependencies, so the
-            // dependent needs an rlib regardless of what the manifest declares
-            // (cargo does the same implicit promotion). Without this a
-            // `crate-type = ["cdylib"]` crate would emit only a .so and the
-            // consumer's `--extern` would point at a non-rmeta artifact.
+            // dependent needs an rlib regardless of what the manifest declares.
+            // Cargo does *not* do this (it omits --extern for non-linkable
+            // crate-types and lets the dependent fail to resolve); we promote
+            // because in lockfile mode we cannot tell at eval time which deps
+            // are actually linkable.
             if !ts.iter().any(|t| t == "lib" || t == "rlib" || t == "proc-macro") {
                 ts.push("rlib".into());
             }
