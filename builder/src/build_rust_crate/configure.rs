@@ -279,15 +279,20 @@ fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
     use std::sync::OnceLock;
     static CFG: OnceLock<String> = OnceLock::new();
     let out = CFG.get_or_init(|| {
-        Command::new("rustc")
+        let o = Command::new("rustc")
             .arg("--print=cfg")
             .arg("--target")
             .arg(&config.host_platform.rustc_target_spec)
             .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default()
+            .expect("failed to spawn `rustc --print=cfg`");
+        if !o.status.success() {
+            panic!(
+                "`rustc --print=cfg --target {}` failed: {}",
+                config.host_platform.rustc_target_spec,
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
+        String::from_utf8_lossy(&o.stdout).into_owned()
     });
     let mut cfg: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for line in out.lines() {

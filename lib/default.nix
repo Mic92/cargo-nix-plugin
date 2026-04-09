@@ -157,8 +157,11 @@ let
   resolvedTarget =
     (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
 
-  # Rust binary that replaces bash configure/build/install phases.
-  buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
+  # Rust binary that replaces bash configure/build/install phases. It runs on
+  # the build machine for both host- and build-platform crate derivations, so
+  # build→build is the only universally correct slice; passing it explicitly
+  # below means callPackage splicing will not rewrite it for us.
+  buildRustCrateBin = pkgs.pkgsBuildBuild.callPackage ../nix/build-rust-crate-bin.nix { };
 
   defaultBuildRustCrateForPkgs =
     cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit buildRustCrateBin; };
@@ -412,8 +415,14 @@ let
         in
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
-      # Clippy buildRustCrate: use clippy-driver as the compiler
-      clippyBuildRustCrate = args: (normalBuildRustCrate args).override { rust = clippyRustcWrapper; };
+      # Clippy buildRustCrate: use clippy-driver as the compiler. The default
+      # cap-lints=allow neutralises every lint (including -D warnings from
+      # clippyArgs); workspace members get the cargo behaviour of no cap.
+      clippyBuildRustCrate = args:
+        (normalBuildRustCrate args).override {
+          rust = clippyRustcWrapper;
+          capLints = "warn";
+        };
 
       workspaceMemberIds = lib.attrValues resolved.workspaceMembers;
 

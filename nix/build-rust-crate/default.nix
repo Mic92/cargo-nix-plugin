@@ -97,6 +97,7 @@ lib.makeOverridable
         "readme"
         "repository"
         "rust-version"
+        "plugin"
       ];
       extraDerivationAttrs = removeAttrs crate processedAttrs;
 
@@ -117,7 +118,7 @@ lib.makeOverridable
       capLints_ = capLints;
       buildTests_ = buildTests;
 
-      crateBin' = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
+      crateBin' = crate.crateBin or [ ];
       hasCrateBin' = crate ? crateBin;
 
     in
@@ -169,23 +170,26 @@ lib.makeOverridable
           (
             let
               normalizeName = lib.replaceStrings [ "-" ] [ "_" ];
+              # Returns the alias if a rename actually applies to this dep,
+              # null otherwise. `hasAttr` alone over-triggers when only one
+              # of two versions is renamed; the un-renamed sibling must keep
+              # isRename=false so dep_extern_args can recover the real
+              # `--extern` key from the artifact filename.
               findRename = dep:
-                if lib.hasAttr dep.crateName crateRenames then
-                  let
-                    choices = crateRenames.${dep.crateName};
-                    findMatch = cs:
-                      lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) {
-                        rename = normalizeName dep.libName;
-                      } cs;
-                  in
-                  normalizeName (if builtins.isList choices then (findMatch choices).rename else choices)
-                else
-                  normalizeName dep.libName;
-              mkExtern = dep: {
-                externName = findRename dep;
-                metadata = dep.metadata;
-                isRename = lib.hasAttr dep.crateName crateRenames;
-              };
+                let choices = crateRenames.${dep.crateName} or null;
+                in
+                if choices == null then null
+                else if builtins.isList choices then
+                  let m = lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) null choices;
+                  in if m == null then null else normalizeName m.rename
+                else normalizeName choices;
+              mkExtern = dep:
+                let r = findRename dep;
+                in {
+                  externName = if r != null then r else normalizeName dep.libName;
+                  metadata = dep.metadata;
+                  isRename = r != null;
+                };
             in
             {
               depExterns = map mkExtern dependencies_;
@@ -287,14 +291,7 @@ lib.makeOverridable
             else
               "cc";
         };
-        buildPlatform = {
-          rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
-          linkerPath =
-            if stdenv.hasCC then
-              "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc"
-            else
-              "cc";
-        };
+        buildPlatform.rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
 
         configurePhase = ''
           runHook preConfigure

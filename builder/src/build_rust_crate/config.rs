@@ -129,6 +129,7 @@ pub struct DepExtern {
 #[serde(rename_all = "camelCase")]
 pub struct PlatformInfo {
     pub rustc_target_spec: String,
+    #[serde(default)]
     pub linker_path: String,
 }
 
@@ -137,21 +138,37 @@ impl BuildConfig {
         let content = std::fs::read_to_string(path)?;
         let config: Self = serde_json::from_str(&content)?;
 
-        // Export ALL_CAPS string attrs as env vars — with __structuredAttrs
+        // Export ALL_CAPS scalar attrs as env vars — with __structuredAttrs
         // these end up in JSON but not the process environment, but crate
-        // overrides setting e.g. `OPENSSL_DIR = …;` expect them there.
-        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(obj) = raw.as_object() {
-                for (k, v) in obj {
-                    if let Some(s) = v.as_str() {
-                        if !k.is_empty()
-                            && k.chars()
-                                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-                        {
-                            std::env::set_var(k, s);
-                        }
-                    }
+        // overrides setting e.g. `OPENSSL_NO_VENDOR = 1;` expect them there.
+        // Coerce bools/ints/lists like stdenv would for non-structured attrs.
+        if let Some(obj) = serde_json::from_str::<serde_json::Value>(&content)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.as_object())
+        {
+            for (k, v) in obj {
+                if k.is_empty()
+                    || !k.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                {
+                    continue;
                 }
+                let s = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Bool(b) => if *b { "1".into() } else { String::new() },
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Array(a) => a
+                        .iter()
+                        .filter_map(|e| match e {
+                            serde_json::Value::String(s) => Some(s.clone()),
+                            serde_json::Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    _ => continue,
+                };
+                std::env::set_var(k, s);
             }
         }
 

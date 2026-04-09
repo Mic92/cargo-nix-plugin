@@ -40,8 +40,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut lib_extern: Vec<String> = Vec::new();
 
     // Build lib
-    if let Some(lib_path) = resolve_lib_path(config) {
-        echo_colored(&format!("Building {lib_path} ({})", config.lib_name));
+    if let Some(lib_src) = resolve_lib_path(config) {
+        echo_colored(&format!("Building {lib_src} ({})", config.lib_name));
         let crate_types: Vec<&str> = config.crate_type.iter().map(|s| s.as_str()).collect();
         let mut extra = flags.meta.clone();
         extra.extend_from_slice(&flags.bso_lib);
@@ -50,15 +50,15 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         run_cmd(
-            &mut flags.cmd(&crate_name, &lib_path, "target/lib", &crate_types, &extra, false),
+            &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, false),
             config.verbose,
         )?;
 
         // Own bins/tests link against the lib we just built. Look it up by
         // metadata so proc-macro / dylib-only crates (no .rlib) still work.
-        let lib_path = super::rustc::find_by_metadata("target/lib", metadata)
+        let lib_artifact = super::rustc::find_by_metadata("target/lib", metadata)
             .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
-        lib_extern.extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_path}")]);
+        lib_extern.extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_artifact}")]);
 
         // Proc-macro marker for downstream crates
         if config.crate_type.iter().any(|t| t == "proc-macro") {
@@ -68,7 +68,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
             run_cmd(
-                &mut flags.cmd(&crate_name, &lib_path, "target/lib", &crate_types, &extra, true),
+                &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true),
                 config.verbose,
             )?;
         }
@@ -76,10 +76,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build binaries
     for (name, path) in resolve_bins(config) {
-        build_bin(config, &flags, &lib_extern, &name, &path, false)?;
-        if config.build_tests {
-            build_bin(config, &flags, &lib_extern, &name, &path, true)?;
-        }
+        build_bin(config, &flags, &lib_extern, &name, &path, config.build_tests)?;
     }
 
     // Build integration tests from tests/
@@ -182,7 +179,7 @@ fn build_bin(
     )?;
 
     // Rename binary if dash vs underscore mismatch
-    if !test && crate_name_ != name {
+    if crate_name_ != name {
         let wasm = format!("target/bin/{crate_name_}.wasm");
         let bin = format!("target/bin/{crate_name_}");
         if Path::new(&wasm).exists() {
