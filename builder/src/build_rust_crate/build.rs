@@ -27,15 +27,10 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     set_cargo_pkg_env(config);
 
-    // Export rustc-env vars from build script, resolving relative paths
-    let cwd = std::env::current_dir()?;
+    // Export rustc-env vars from build script verbatim. Build scripts that
+    // need an absolute path join OUT_DIR/CARGO_MANIFEST_DIR themselves.
     for (k, v) in &bso.envs {
-        let val = if Path::new(v).is_relative() && Path::new(v).exists() {
-            cwd.join(v).to_string_lossy().to_string()
-        } else {
-            v.clone()
-        };
-        std::env::set_var(k, &val);
+        std::env::set_var(k, v);
     }
 
     // Persist build script link flags to target/link{,.final}

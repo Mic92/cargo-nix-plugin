@@ -186,7 +186,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String> {
-    let hp = &config.host_platform;
     let (major, minor, patch, pre) = parse_version(&config.crate_version);
     let cwd = std::env::current_dir()
         .unwrap()
@@ -223,25 +222,6 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         ("CARGO_PKG_VERSION_MINOR".into(), minor),
         ("CARGO_PKG_VERSION_PATCH".into(), patch),
         ("CARGO_PKG_VERSION_PRE".into(), pre),
-        ("CARGO_CFG_TARGET_ARCH".into(), hp.arch.clone()),
-        ("CARGO_CFG_TARGET_OS".into(), hp.os.clone()),
-        ("CARGO_CFG_TARGET_FAMILY".into(), "unix".into()),
-        ("CARGO_CFG_UNIX".into(), "1".into()),
-        ("CARGO_CFG_TARGET_ENV".into(), hp.abi.clone()),
-        ("CARGO_CFG_TARGET_ENDIAN".into(), hp.endian.clone()),
-        (
-            "CARGO_CFG_TARGET_POINTER_WIDTH".into(),
-            hp.pointer_width.to_string(),
-        ),
-        ("CARGO_CFG_TARGET_VENDOR".into(), hp.vendor.clone()),
-        (
-            "CARGO_CFG_TARGET_FEATURE".into(),
-            target_cfg_values(config, "target_feature").join(","),
-        ),
-        (
-            "CARGO_CFG_TARGET_HAS_ATOMIC".into(),
-            target_cfg_values(config, "target_has_atomic").join(","),
-        ),
         ("CARGO_MANIFEST_DIR".into(), cwd),
         ("CARGO_MANIFEST_LINKS".into(), config.crate_links.clone()),
         ("DEBUG".into(), (!config.release).to_string()),
@@ -249,7 +229,7 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
             "OPT_LEVEL".into(),
             if config.release { "3" } else { "0" }.into(),
         ),
-        ("TARGET".into(), hp.rustc_target_spec.clone()),
+        ("TARGET".into(), config.host_platform.rustc_target_spec.clone()),
         (
             "HOST".into(),
             config.build_platform.rustc_target_spec.clone(),
@@ -265,15 +245,19 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         ),
         ("RUSTC".into(), "rustc".into()),
         ("RUSTDOC".into(), "rustdoc".into()),
-        (
-            "CARGO_ENCODED_RUSTFLAGS".into(),
-            super::rustc::encode_rustflags(config),
-        ),
+        // Cargo always sets this (empty when no RUSTFLAGS). We deliberately
+        // do NOT forward the builder's own opt-level/--edition/linker flags
+        // here: those are per-crate, and build.rs compile-probes (anyhow,
+        // proc-macro2, eyre, …) re-invoke rustc with this variable verbatim.
+        ("CARGO_ENCODED_RUSTFLAGS".into(), String::new()),
         (
             "CARGO_CRATE_NAME".into(),
             config.lib_name.replace('-', "_"),
         ),
     ])
+    .into_iter()
+    .chain(target_cfg_env(config))
+    .collect()
 }
 
 fn parse_version(v: &str) -> (String, String, String, String) {
@@ -288,8 +272,12 @@ fn parse_version(v: &str) -> (String, String, String, String) {
     )
 }
 
-/// All values of one `name="value"` cfg from `rustc --print cfg`, memoized.
-fn target_cfg_values(config: &BuildConfig, name: &str) -> Vec<String> {
+/// `CARGO_CFG_*` env derived from `rustc --print cfg --target <host>`,
+/// matching cargo: multi-valued keys (target_feature, target_has_atomic, …)
+/// are comma-joined; bare keys (unix, windows, …) get an empty string. This
+/// avoids second-guessing target_env/target_family from Nix's `parsed.abi`
+/// (which yields "unknown" on Darwin/wasm where rustc reports "").
+fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
     use std::sync::OnceLock;
     static CFG: OnceLock<String> = OnceLock::new();
     let out = CFG.get_or_init(|| {
@@ -303,10 +291,26 @@ fn target_cfg_values(config: &BuildConfig, name: &str) -> Vec<String> {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
             .unwrap_or_default()
     });
-    let prefix = format!("{name}=\"");
-    out.lines()
-        .filter_map(|l| l.strip_prefix(&prefix)?.strip_suffix('"'))
-        .map(String::from)
+    let mut cfg: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for line in out.lines() {
+        match line.split_once('=') {
+            Some((k, v)) => cfg
+                .entry(k.into())
+                .or_default()
+                .push(v.trim_matches('"')),
+            None => {
+                cfg.entry(line.into()).or_default();
+            }
+        }
+    }
+    cfg.into_iter()
+        .map(|(k, vs)| {
+            let key = format!(
+                "CARGO_CFG_{}",
+                k.to_uppercase().replace(['-', '.'], "_")
+            );
+            (key, vs.join(","))
+        })
         .collect()
 }
 
@@ -551,27 +555,53 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         return;
     };
 
+    let pkg = doc.get("package");
+    let pkg_str = |key: &str| pkg.and_then(|p| p.get(key)).and_then(|v| v.as_str());
+
     // Auto-detect edition
     let has_edition =
         |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
-    if !has_edition(&config.extra_rustc_opts) {
-        let edition = doc.get("package").and_then(|p| p.get("edition")).and_then(|v| {
-            v.as_str()
-                .map(String::from)
-                .or_else(|| v.as_integer().map(|i| i.to_string()))
-        });
-        if let Some(ed) = edition {
+    if let Some(ed) = pkg
+        .and_then(|p| p.get("edition"))
+        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_integer().map(|i| i.to_string())))
+    {
+        if !has_edition(&config.extra_rustc_opts) {
             config
                 .extra_rustc_opts
                 .extend_from_slice(&["--edition".into(), ed.clone()]);
+        }
+        if !has_edition(&config.extra_rustc_opts_for_build_rs) {
             config
                 .extra_rustc_opts_for_build_rs
                 .extend_from_slice(&["--edition".into(), ed]);
         }
     }
 
+    // CARGO_PKG_* recovery for lockfile-resolve mode, where the resolver
+    // emits empty strings for everything but name/version.
+    let fill = |dst: &mut String, key: &str| {
+        if dst.is_empty() {
+            if let Some(v) = pkg_str(key) {
+                *dst = v.to_string();
+            }
+        }
+    };
+    fill(&mut config.crate_description, "description");
+    fill(&mut config.crate_homepage, "homepage");
+    fill(&mut config.crate_license, "license");
+    fill(&mut config.crate_license_file, "license-file");
+    fill(&mut config.crate_readme, "readme");
+    fill(&mut config.crate_repository, "repository");
+    fill(&mut config.crate_rust_version, "rust-version");
+    if config.crate_authors.is_empty() {
+        if let Some(a) = pkg.and_then(|p| p.get("authors")).and_then(|v| v.as_array()) {
+            config.crate_authors =
+                a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        }
+    }
+
     if config.build.is_empty() {
-        match doc.get("package").and_then(|p| p.get("build")) {
+        match pkg.and_then(|p| p.get("build")) {
             Some(v) if v.as_bool() == Some(false) => config.build = "false".into(),
             Some(v) => {
                 if let Some(p) = v.as_str() {
@@ -585,15 +615,7 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     }
 
     // Fallback for path/git deps; registry crates get this from the index.
-    if config.crate_links.is_empty() {
-        if let Some(l) = doc
-            .get("package")
-            .and_then(|p| p.get("links"))
-            .and_then(|v| v.as_str())
-        {
-            config.crate_links = l.to_string();
-        }
-    }
+    fill(&mut config.crate_links, "links");
 
     // ---- [lib] table -----------------------------------------------------
     let lib = doc.get("lib");
