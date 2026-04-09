@@ -117,11 +117,6 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     flags
 }
 
-/// Encode flags for CARGO_ENCODED_RUSTFLAGS (unit separator delimited).
-pub fn encode_rustflags(config: &BuildConfig) -> String {
-    base_rustc_flags(config).join("\x1f")
-}
-
 /// Pre-computed rustc flags shared across lib/bin/test builds.
 pub struct RustcFlags {
     pub base: Vec<String>,

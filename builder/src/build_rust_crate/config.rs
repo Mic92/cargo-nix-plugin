@@ -129,13 +129,8 @@ pub struct DepExtern {
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformInfo {
-    pub arch: String,
-    pub os: String,
-    pub vendor: String,
-    pub abi: String,
-    pub endian: String,
-    pub pointer_width: u32,
     pub rustc_target_spec: String,
+    #[serde(default)]
     pub lib_ext: String,
     pub linker_path: String,
 }
@@ -146,8 +141,8 @@ impl BuildConfig {
         let config: Self = serde_json::from_str(&content)?;
 
         // Export ALL_CAPS string attrs as env vars — with __structuredAttrs
-        // these end up in JSON but not the process environment. Crate
-        // overrides like `CARGO_ENCODED_RUSTFLAGS = ""` need this.
+        // these end up in JSON but not the process environment, but crate
+        // overrides setting e.g. `OPENSSL_DIR = …;` expect them there.
         if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(obj) = raw.as_object() {
                 for (k, v) in obj {

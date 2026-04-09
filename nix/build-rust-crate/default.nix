@@ -162,39 +162,39 @@ lib.makeOverridable
           ++ (crate.buildInputs or [ ])
           ++ buildInputs_;
 
-        # Per-dependency extern info computed at Nix eval time.
-        depExterns =
-          let
-            normalizeName = lib.replaceStrings [ "-" ] [ "_" ];
-            findRename = dep:
-              if lib.hasAttr dep.crateName crateRenames then
-                let
-                  choices = crateRenames.${dep.crateName};
-                  findMatch = cs:
-                    lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) {
-                      rename = normalizeName dep.libName;
-                    } cs;
-                in
-                normalizeName (if builtins.isList choices then (findMatch choices).rename else choices)
-              else
-                normalizeName dep.libName;
-            mkExtern = dep: {
-              externName = findRename dep;
-              metadata = dep.metadata;
-              isRename = lib.hasAttr dep.crateName crateRenames;
-            };
-          in
-          map mkExtern dependencies_;
-        buildDepExterns =
-          let
-            normalizeName = lib.replaceStrings [ "-" ] [ "_" ];
-            mkExtern = dep: {
-              externName = normalizeName dep.libName;
-              metadata = dep.metadata;
-              isRename = false;
-            };
-          in
-          map mkExtern buildDependencies_;
+        # Per-dependency extern info computed at Nix eval time. The same
+        # rename logic applies to build-deps; the resolver folds both
+        # [dependencies] and [build-dependencies] renames into crateRenames.
+        inherit
+          (
+            let
+              normalizeName = lib.replaceStrings [ "-" ] [ "_" ];
+              findRename = dep:
+                if lib.hasAttr dep.crateName crateRenames then
+                  let
+                    choices = crateRenames.${dep.crateName};
+                    findMatch = cs:
+                      lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) {
+                        rename = normalizeName dep.libName;
+                      } cs;
+                  in
+                  normalizeName (if builtins.isList choices then (findMatch choices).rename else choices)
+                else
+                  normalizeName dep.libName;
+              mkExtern = dep: {
+                externName = findRename dep;
+                metadata = dep.metadata;
+                isRename = lib.hasAttr dep.crateName crateRenames;
+              };
+            in
+            {
+              depExterns = map mkExtern dependencies_;
+              buildDepExterns = map mkExtern buildDependencies_;
+            }
+          )
+          depExterns
+          buildDepExterns
+          ;
 
         completeDeps =
           let
@@ -275,13 +275,9 @@ lib.makeOverridable
 
         rustcPath = "${rust}";
 
+        # CARGO_CFG_TARGET_* are derived at build time from `rustc --print cfg`,
+        # so only the target triple and linker need passing here.
         hostPlatform = {
-          arch = stdenv.hostPlatform.rust.platform.arch;
-          os = stdenv.hostPlatform.rust.platform.os;
-          vendor = stdenv.hostPlatform.parsed.vendor.name;
-          abi = stdenv.hostPlatform.parsed.abi.name;
-          endian = if stdenv.hostPlatform.parsed.cpu.significantByte.name == "littleEndian" then "little" else "big";
-          pointerWidth = with stdenv.hostPlatform; if isILP32 then 32 else parsed.cpu.bits;
           rustcTargetSpec = stdenv.hostPlatform.rust.rustcTargetSpec;
           libExt = stdenv.hostPlatform.extensions.library;
           linkerPath =
@@ -293,14 +289,7 @@ lib.makeOverridable
               "cc";
         };
         buildPlatform = {
-          arch = stdenv.buildPlatform.rust.platform.arch;
-          os = stdenv.buildPlatform.rust.platform.os;
-          vendor = stdenv.buildPlatform.parsed.vendor.name;
-          abi = stdenv.buildPlatform.parsed.abi.name;
-          endian = if stdenv.buildPlatform.parsed.cpu.significantByte.name == "littleEndian" then "little" else "big";
-          pointerWidth = with stdenv.buildPlatform; if isILP32 then 32 else parsed.cpu.bits;
           rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
-          libExt = stdenv.buildPlatform.extensions.library;
           linkerPath =
             if stdenv.hasCC then
               "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc"
