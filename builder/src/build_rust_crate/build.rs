@@ -125,7 +125,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Append build-script link search/lib flags to target/link and
 /// target/link.final, mirroring what the bash setup_link_paths did.
-pub fn persist_bso_link_flags(
+fn persist_bso_link_flags(
     bso: &BuildScriptOutputs,
     config: &BuildConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
