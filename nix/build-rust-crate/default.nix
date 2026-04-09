@@ -58,6 +58,9 @@ lib.makeOverridable
       crate = crate_ // (lib.attrByPath [ crate_.crateName ] (attr: { }) crateOverrides crate_);
       dependencies_ = dependencies;
       buildDependencies_ = buildDependencies;
+      # Every input-`crate` key we re-derive below. Anything not listed
+      # leaks through extraDerivationAttrs and //-overrides the computed
+      # value, which the builder reads from NIX_ATTRS_JSON_FILE.
       processedAttrs = [
         "src"
         "nativeBuildInputs"
@@ -78,8 +81,35 @@ lib.makeOverridable
         "codegenUnits"
         "capLints"
         "links"
+        "extraRustcOpts"
+        "extraRustcOptsForBuildRs"
+        "extraLinkFlags"
+        "release"
+        "verbose"
+        "procMacro"
+        "type"
+        "sha256"
+        "workspace_member"
+        "description"
+        "homepage"
+        "license"
+        "license-file"
+        "readme"
+        "repository"
+        "rust-version"
       ];
       extraDerivationAttrs = removeAttrs crate processedAttrs;
+
+      # lib.unique is O(n²); lib.uniqueStrings drops store-path context.
+      # genericClosure dedups by key while preserving context.
+      uniquePaths =
+        l:
+        map (e: e.key) (
+          builtins.genericClosure {
+            startSet = map (key: { inherit key; }) l;
+            operator = _: [ ];
+          }
+        );
       nativeBuildInputs_ = nativeBuildInputs;
       buildInputs_ = buildInputs;
       extraRustcOpts_ = extraRustcOpts;
@@ -170,16 +200,16 @@ lib.makeOverridable
           let
             deps = map lib.getLib dependencies_;
           in
-          map toString (lib.unique (deps ++ lib.concatMap (dep: dep.completeDeps or [ ]) deps));
+          uniquePaths (map toString deps ++ lib.concatMap (dep: dep.completeDeps or [ ]) deps);
 
         completeBuildDeps =
           let
             bdeps = map lib.getLib buildDependencies_;
           in
-          map toString (lib.unique (
-            bdeps
+          uniquePaths (
+            map toString bdeps
             ++ lib.concatMap (dep: (dep.completeBuildDeps or [ ]) ++ (dep.completeDeps or [ ])) bdeps
-          ));
+          );
 
         crateFeatures = lib.optionals (crate ? features) (
           builtins.filter (f: !(lib.hasInfix "/" f || lib.hasPrefix "dep:" f)) (crate.features ++ features)

@@ -168,6 +168,9 @@ impl RustcFlags {
         for cfg in &bso.cfgs {
             link.extend_from_slice(&["--cfg".into(), cfg.clone()]);
         }
+        for cc in &bso.check_cfgs {
+            link.extend_from_slice(&["--check-cfg".into(), cc.clone()]);
+        }
 
         let out_dir = if !bso.build_out_dir.is_empty() {
             std::env::set_var("OUT_DIR", &bso.build_out_dir);
