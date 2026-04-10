@@ -147,6 +147,10 @@
         // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
           (perVersionPackages linuxPkgs)
           // {
+            # Exercises cargo-nix-prefetch (the standalone binary), not the
+            # nix plugin .so, so it isn't per-nix-version.
+            cargo-compat-test = linuxPkgs.callPackage ./tests/cargo-compat-test.nix { };
+
             # Optional: helper for generating metadata JSON explicitly.
             # Not needed when using the automatic subprocess mode (just pass src).
             # Useful for offline/pure evaluation workflows.

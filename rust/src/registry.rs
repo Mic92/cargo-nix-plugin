@@ -393,7 +393,7 @@ fn fetch_one(
 ///
 /// Returns `FetchError::Retryable` for failures the retry loop should
 /// re-attempt (5xx, 429, IO/timeout/TLS, corrupted body that
-/// `parse_remote_response` rejects), and `FetchError::Permanent` for
+/// `IndexKrate::from_slice` rejects), and `FetchError::Permanent` for
 /// failures that won't change on a re-fetch (404, 4xx other than 429,
 /// invalid crate name, request-build errors).
 fn do_fetch_one(
@@ -404,10 +404,9 @@ fn do_fetch_one(
 ) -> Result<Option<IndexKrate>, FetchError> {
     let krate_name = KrateName::crates_io(name)
         .map_err(|e| FetchError::Permanent(format!("invalid crate name '{name}': {e}")))?;
-    let lock = FileLock::unlocked();
 
     let req = sparse_index
-        .make_remote_request(krate_name, None, &lock)
+        .make_remote_request(krate_name, None, &FileLock::unlocked())
         .map_err(|e| FetchError::Permanent(format!("failed to build request for '{name}': {e}")))?;
     let (parts, _) = req.into_parts();
     let uri = parts.uri.to_string();
@@ -448,54 +447,37 @@ fn do_fetch_one(
             delay: None,
         })?;
 
-    let mut http_resp = http::Response::builder().status(status.as_u16());
-    for (key, value) in response.headers().iter() {
-        http_resp = http_resp.header(key.as_str(), value.as_bytes());
-    }
-    let http_resp = http_resp
-        .body(body)
-        .map_err(|e| FetchError::Permanent(format!("failed to build http response: {e}")))?;
-
     // A parse failure here is the asn1-rs case from #349206 — a
     // CDN/proxy returned a truncated or otherwise malformed body. Almost
     // always transient, so retry.
-    //
-    // We deliberately pass `write_cache_entry = false` and persist the
-    // entry ourselves below: tame-index's own writer does
-    // `File::create(path)` then streams into it, which a concurrent
-    // reader (another nix-eval-jobs worker, or `cargo` itself) can
-    // observe half-written. Doing the write to a sibling tempfile and
-    // renaming makes the on-disk state always either "absent" or
-    // "complete".
-    let krate = sparse_index
-        .parse_remote_response(krate_name, http_resp, false, &lock)
-        .map_err(|e| FetchError::Retryable {
-            msg: format!("failed to parse response for '{name}' from '{url}': {e}"),
-            delay: None,
-        })?;
+    let krate = IndexKrate::from_slice(&body).map_err(|e| FetchError::Retryable {
+        msg: format!("failed to parse response for '{name}' from '{url}': {e}"),
+        delay: None,
+    })?;
 
-    if let Some(ref krate) = krate {
-        let revision = response
-            .headers()
-            .get("etag")
-            .and_then(|v| v.to_str().ok())
-            .map(|etag| format!("etag: {etag}"))
-            .or_else(|| {
-                response
-                    .headers()
-                    .get("last-modified")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|lm| format!("last-modified: {lm}"))
-            })
-            .unwrap_or_else(|| "Unknown".to_owned());
-        // As with tame-index's own write path, a cache write failure is
-        // unfortunate but not fatal: we already have the parsed krate.
-        if let Err(e) = write_cache_atomic(sparse_index, krate_name, krate, &revision) {
-            eprintln!("cargo-nix: warning: failed to cache index entry for '{name}': {e}");
-        }
+    let revision = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|etag| format!("etag: {etag}"))
+        .or_else(|| {
+            response
+                .headers()
+                .get("last-modified")
+                .and_then(|v| v.to_str().ok())
+                .map(|lm| format!("last-modified: {lm}"))
+        })
+        .unwrap_or_else(|| "Unknown".to_owned());
+    // Persist via our own writer (raw bytes + atomic rename), not
+    // `parse_remote_response(…, write_cache_entry = true, …)` — see
+    // [`write_cache_atomic`] / [`write_cache_bytes`] for why both matter.
+    // A write failure is unfortunate but not fatal: we already have the
+    // parsed krate.
+    if let Err(e) = write_cache_atomic(sparse_index, krate_name, &body, &revision) {
+        eprintln!("cargo-nix: warning: failed to cache index entry for '{name}': {e}");
     }
 
-    Ok(krate)
+    Ok(Some(krate))
 }
 
 /// One unit of work for [`prefetch_index`]: fetch the index entry for
@@ -508,18 +490,20 @@ pub struct PrefetchJob {
     pub version: String,
 }
 
-/// Persist `krate` to tame-index's cache path via a same-directory
-/// tempfile + `rename`, so concurrent readers never observe a torn entry.
+/// Persist a sparse-index response body to tame-index's cache path via a
+/// same-directory tempfile + `rename`, so concurrent readers (other
+/// nix-eval-jobs workers, `cargo` itself) never observe a torn entry.
+/// tame-index's own writer is `File::create` + stream, which they can.
 ///
-/// This is the second half of the cross-process safety story: the
-/// `.package-cache` flock around [`prefetch_index`] serializes the bulk
-/// warm-up, and atomic rename keeps individual writes safe even when the
-/// flock is unavailable (NFS, read-only fallback) or when this is reached
-/// via [`lookup_crate`]'s single-crate fallback.
+/// Second half of the cross-process safety story: the `.package-cache`
+/// flock around [`prefetch_index`] serializes the bulk warm-up; atomic
+/// rename keeps individual writes safe when the flock is unavailable
+/// (NFS, read-only fallback) or when reached via [`lookup_crate`]'s
+/// single-crate fallback.
 fn write_cache_atomic(
     sparse_index: &SparseIndex,
     name: KrateName<'_>,
-    krate: &IndexKrate,
+    body: &[u8],
     revision: &str,
 ) -> Result<(), std::io::Error> {
     let cache_path = sparse_index.cache().cache_path(name);
@@ -533,7 +517,7 @@ fn write_cache_atomic(
     // filesystem. NamedTempFile cleans itself up on drop if we bail out
     // before persisting, so no `.tmp` debris on error.
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    krate.write_cache_entry(tmp.as_file_mut(), revision)?;
+    write_cache_bytes(tmp.as_file_mut(), body, revision)?;
     // NamedTempFile defaults to mode 0600; cargo's own writer leaves
     // these umask-default. Match that so a shared CARGO_HOME stays
     // readable across UIDs.
@@ -547,6 +531,50 @@ fn write_cache_atomic(
     tmp.as_file().sync_data()?;
     tmp.persist(cache_path).map_err(|e| e.error)?;
     Ok(())
+}
+
+/// Serialize a sparse-index response body into cargo's `.cache` v3 format
+/// (`cargo::sources::registry::index::SummariesCache`): cache version
+/// byte, LE index-format u32, NUL-terminated revision, then `(semver NUL
+/// json NUL)*`.
+///
+/// We write each version's *raw upstream JSON line* (as cargo does), not a
+/// re-serialized [`IndexVersion`] (as `IndexKrate::write_cache_entry`
+/// does). [`tame_index::IndexDependency`] doesn't model `registry`, so a
+/// serde round-trip drops the cross-registry pointer that tells cargo
+/// "this dep is on crates.io, not this alt-registry". Our resolver takes
+/// sources from Cargo.lock and doesn't care, but a later `cargo build` on
+/// the same `CARGO_HOME` does — and online won't recover (etag matches →
+/// 304). Lines that don't parse are skipped; the body as a whole was
+/// already validated by `IndexKrate::from_slice` before we get here.
+fn write_cache_bytes<W: std::io::Write>(
+    writer: &mut W,
+    body: &[u8],
+    revision: &str,
+) -> Result<(), std::io::Error> {
+    use std::io::Write;
+    use tame_index::index::cache::{CURRENT_CACHE_VERSION, INDEX_V_MAX};
+
+    let mut w = std::io::BufWriter::new(writer);
+    w.write_all(&[CURRENT_CACHE_VERSION])?;
+    w.write_all(&INDEX_V_MAX.to_le_bytes())?;
+    w.write_all(revision.as_bytes())?;
+    w.write_all(&[0])?;
+
+    for line in body.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(iv) = serde_json::from_slice::<IndexVersion>(line) else {
+            continue;
+        };
+        write!(w, "{}", iv.version)?;
+        w.write_all(&[0])?;
+        w.write_all(line)?;
+        w.write_all(&[0])?;
+    }
+
+    w.flush()
 }
 
 /// Take cargo's global `.package-cache` advisory lock exclusively for the
@@ -1101,17 +1129,13 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
 
         // Seed via the real write path so the on-disk format is
-        // whatever tame-index expects, not a hand-rolled byte layout.
+        // whatever cargo/tame-index expects, not a hand-rolled byte layout.
         let url = CRATES_IO_SPARSE_URL;
         let idx = index_for_url(&tmp, url).expect("create index");
-        let stale = IndexKrate::from_slice(
-            br#"{"name":"serde","vers":"0.1.0","deps":[],"features":{},"cksum":"0000000000000000000000000000000000000000000000000000000000000000","yanked":false}"#,
-        )
-        .expect("parse stale index entry");
         write_cache_atomic(
             &idx,
             KrateName::crates_io("serde").unwrap(),
-            &stale,
+            br#"{"name":"serde","vers":"0.1.0","deps":[],"features":{},"cksum":"0000000000000000000000000000000000000000000000000000000000000000","yanked":false}"#,
             "etag: stale",
         )
         .expect("seed cache");
