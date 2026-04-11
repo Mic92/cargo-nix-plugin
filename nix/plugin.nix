@@ -13,6 +13,10 @@
 
 assert enableSanitizers -> llvmPackages != null;
 assert enableSanitizers -> stdenv.cc.isClang;
+# The minimal UBSan runtime is statically pulled in via GNU-ld
+# --whole-archive from compiler-rt's lib/linux/; no darwin equivalent is
+# wired up.
+assert enableSanitizers -> stdenv.hostPlatform.isLinux;
 
 let
   rustLib = rustPlatform.buildRustPackage {
@@ -44,7 +48,9 @@ stdenv.mkDerivation {
     "-DRUST_LIB_DIR=${rustLib}/lib"
   ] ++ lib.optionals enableSanitizers [
     "-DENABLE_SANITIZERS=ON"
-    "-DSANITIZER_RT_DIR=${llvmPackages.compiler-rt}/lib/linux"
+    # compiler-rt names the archive after the clang arch token
+    # (x86_64, aarch64, …), which matches `parsed.cpu.name`.
+    "-DSANITIZER_RT_LIB=${llvmPackages.compiler-rt}/lib/linux/libclang_rt.ubsan_minimal-${stdenv.hostPlatform.parsed.cpu.name}.a"
   ];
 
   # Don't strip sanitizer-instrumented binaries — removes UBSan metadata.
