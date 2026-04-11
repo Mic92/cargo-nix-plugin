@@ -119,6 +119,14 @@ cargoNix = cargo-nix-plugin.lib {
 The same shape works wrapped in a fixed-output derivation if you want the
 cache pinned by hash rather than checked in.
 
+### Debug logging
+
+The resolver stays quiet on the happy path so eval output isn't drowned in
+progress noise. Set `CARGO_NIX_DEBUG=1` to surface the informational logs
+(mirror selection, index prefetch timings, per-crate retry attempts) on
+stderr. Warnings about misconfiguration and hard errors are always printed
+regardless of this flag.
+
 ## Example
 
 The plugin must be loaded by the same Nix version it was compiled against

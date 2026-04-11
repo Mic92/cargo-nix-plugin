@@ -12,6 +12,24 @@ use tame_index::index::{FileLock, SparseIndex};
 use tame_index::utils::flock::LockOptions;
 use tame_index::{IndexKrate, IndexVersion, KrateName};
 
+/// `CARGO_NIX_DEBUG` set? Cached so hot paths pay an atomic load, not an
+/// env lookup. `pub(crate)` only because [`debug_log!`] expands to a
+/// `$crate::registry::` path so it keeps compiling if reused elsewhere.
+pub(crate) fn debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CARGO_NIX_DEBUG").is_some())
+}
+
+/// `eprintln!` gated on `CARGO_NIX_DEBUG`. Informational only — warnings
+/// and errors stay on plain `eprintln!`.
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if $crate::registry::debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 /// Canonical upstream crates.io sparse index URL.
 pub const CRATES_IO_SPARSE_URL: &str = "sparse+https://index.crates.io/";
 
@@ -48,7 +66,7 @@ pub fn resolve_crates_io_index(
     }
     match discover_crates_io_replacement(workspace_root, cargo_home, &env) {
         SourceReplacement::Registry(url) => {
-            eprintln!("cargo-nix: using crates.io replacement from .cargo/config.toml: {url}");
+            debug_log!("cargo-nix: using crates.io replacement from .cargo/config.toml: {url}");
             normalize_index_url(&url)
         }
         SourceReplacement::Unsupported { kind } => {
@@ -739,7 +757,7 @@ fn retry_with_backoff<T>(
                     break;
                 }
 
-                eprintln!(
+                debug_log!(
                     "cargo-nix: retrying '{name}' (attempt {}/{}) after {}ms: {}",
                     attempt + 2,
                     MAX_ATTEMPTS,
@@ -873,7 +891,7 @@ pub fn prefetch_index(cargo_home: &Path, jobs: &[PrefetchJob]) -> Result<(), Str
     });
 
     let ok = ok_count.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!(
+    debug_log!(
         "cargo-nix: prefetched {ok}/{total} index entries in {:.2}s",
         start.elapsed().as_secs_f64()
     );
