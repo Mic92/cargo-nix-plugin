@@ -45,9 +45,15 @@ if(ENABLE_SANITIZERS)
     -fsanitize=undefined -fno-sanitize=function,vptr
     -fsanitize-minimal-runtime -fno-sanitize-recover=all
     -fno-omit-frame-pointer -g)
+  if(NOT SANITIZER_RT_LIB)
+    # An empty value here is silently accepted by ld between
+    # --whole-archive/--no-whole-archive, leaving __ubsan_* unresolved
+    # until dlopen. Fail at configure time instead.
+    message(FATAL_ERROR "ENABLE_SANITIZERS requires -DSANITIZER_RT_LIB=<path to libclang_rt.ubsan_minimal-<arch>.a>")
+  endif()
   target_link_options(cargo_nix_plugin PRIVATE
     "LINKER:--whole-archive"
-    "${SANITIZER_RT_DIR}/libclang_rt.ubsan_minimal-x86_64.a"
+    "${SANITIZER_RT_LIB}"
     "LINKER:--no-whole-archive")
 endif()
 

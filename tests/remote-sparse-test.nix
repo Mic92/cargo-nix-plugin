@@ -64,10 +64,10 @@ pkgs.runCommand "cargo-nix-plugin-remote-sparse-test"
     # Evaluate: the plugin should hit the local server for every crate
     # (empty CARGO_HOME → no local cache) and return real dependencies.
     nix-instantiate --eval --strict --json --read-write-mode \
-      --option plugin-files ${plugin}/lib/nix/plugins/libcargo_nix_plugin.so \
+      --option plugin-files ${plugin}/lib/nix/plugins \
       --expr "
         let
-          pkgs = import ${pkgs.path} { system = \"x86_64-linux\"; };
+          pkgs = import ${pkgs.path} { system = \"${pkgs.stdenv.hostPlatform.system}\"; };
           cargoNix = import ${pluginSrc}/lib {
             inherit pkgs;
             manifestPath = \"$WORKSPACE/Cargo.toml\";

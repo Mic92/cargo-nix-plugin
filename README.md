@@ -18,8 +18,9 @@ primop.
 Add the plugin to your Nix configuration:
 
 ```nix
-# nix.conf or via --option
-plugin-files = /path/to/libcargo_nix_plugin.so
+# nix.conf or via --option — point at the directory so the right
+# extension (.so/.dylib) is picked up automatically
+plugin-files = /path/to/cargo-nix-plugin/lib/nix/plugins
 ```
 
 Or use the flake output:
@@ -119,6 +120,14 @@ cargoNix = cargo-nix-plugin.lib {
 The same shape works wrapped in a fixed-output derivation if you want the
 cache pinned by hash rather than checked in.
 
+### Debug logging
+
+The resolver stays quiet on the happy path so eval output isn't drowned in
+progress noise. Set `CARGO_NIX_DEBUG=1` to surface the informational logs
+(mirror selection, index prefetch timings, per-crate retry attempts) on
+stderr. Warnings about misconfiguration and hard errors are always printed
+regardless of this flag.
+
 ## Example
 
 The plugin must be loaded by the same Nix version it was compiled against
@@ -130,7 +139,7 @@ PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
 NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
 
 $NIX/bin/nix-instantiate --eval \
-  --option plugin-files "$PLUGIN/lib/nix/plugins/libcargo_nix_plugin.so" \
+  --option plugin-files "$PLUGIN/lib/nix/plugins" \
   -E '(import ./lib { pkgs = import <nixpkgs> {}; src = ./.; }).workspaceMembers'
 ```
 
@@ -138,7 +147,7 @@ Or permanently in `nix.conf` / `~/.config/nix/nix.conf` (only if your system
 Nix matches the plugin's build version):
 
 ```ini
-plugin-files = /path/to/libcargo_nix_plugin.so
+plugin-files = /path/to/cargo-nix-plugin/lib/nix/plugins
 ```
 
 ### flake.nix
@@ -259,11 +268,11 @@ compiles too — `extraCfgs` only affects dependency resolution.
   PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
 
   $NIX/bin/nix build .#myPackage \
-    --option plugin-files "$PLUGIN/lib/nix/plugins/libcargo_nix_plugin.so"
+    --option plugin-files "$PLUGIN/lib/nix/plugins"
   ```
 
-- **Platforms**: `x86_64-linux`, `aarch64-linux`, `aarch64-darwin`, and
-  `x86_64-darwin`. Cross-compilation to other target platforms is supported.
+- **Platforms**: `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
+  Cross-compilation to other target platforms is supported.
 
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`

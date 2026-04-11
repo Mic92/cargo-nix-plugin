@@ -67,7 +67,7 @@ pkgs.runCommand "cargo-nix-plugin-offline-build-test"
 
     cargoNixExpr='
       let
-        pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
+        pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
       in import ${pluginSrc}/lib {
         inherit pkgs;
         src = ${sampleProject};
@@ -77,7 +77,7 @@ pkgs.runCommand "cargo-nix-plugin-offline-build-test"
 
     # --- Eval test: offline resolution produces workspace members ---
     result=$(nix-instantiate --eval --strict --read-write-mode \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "builtins.attrNames ($cargoNixExpr).workspaceMembers")
     echo "Workspace members: $result"
     [[ "$result" == *"sample-bin"* ]] || { echo "FAIL: missing sample-bin"; exit 1; }
@@ -86,7 +86,7 @@ pkgs.runCommand "cargo-nix-plugin-offline-build-test"
 
     # --- Build test: compile and run the binary ---
     drv=$(nix-instantiate --show-trace \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "($cargoNixExpr).workspaceMembers.sample-bin.build")
 
     built=$(nix-store --realize "$drv" | grep -v -- '-lib$' | head -1)

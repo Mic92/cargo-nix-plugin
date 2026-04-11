@@ -62,7 +62,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     ${nix}/bin/nix build \
       --store "$CHROOT" \
       --substituters "" \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --impure --no-link \
       --expr '
         let

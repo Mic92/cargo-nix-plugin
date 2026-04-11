@@ -18,7 +18,7 @@ pkgs.runCommand "cargo-nix-plugin-eval-test"
     mkdir -p $NIX_STORE_DIR $NIX_STATE_DIR $NIX_LOG_DIR
 
     result=$(nix-instantiate --eval --strict --read-write-mode \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr '
       let
         metadata = builtins.readFile "${testFixtures}/metadata.json";
