@@ -12,14 +12,10 @@
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        "x86_64-darwin"
       ];
 
       forAllSystems =
         f: nixpkgs.lib.genAttrs supportedSystems (system: f (import nixpkgs { inherit system; }));
-
-      linuxSystem = "x86_64-linux";
-      linuxPkgs = import nixpkgs { system = linuxSystem; };
 
       # Nix versions to build the plugin against and test with.
       # Each entry maps a suffix to { components, binary } attribute paths
@@ -99,6 +95,10 @@
             sampleProject = ./tests/sample-project;
           };
 
+        }
+        # `nix build --store local?root=…` needs the bind-mount-based
+        # chroot store, which only exists on Linux.
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
           chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
             inherit plugin nix;
             pluginSrc = ./.;
@@ -117,9 +117,13 @@
           components = pkgs.nixVersions.${cfg.components};
           nix = pkgs.nixVersions.${cfg.binary};
           plugin = mkPlugin pkgs components;
-          pluginSanitized = mkPluginSanitized pkgs components;
           tests = mkTests pkgs plugin nix;
-          sanitizedTests = mkTests pkgs pluginSanitized nix;
+          # The UBSan build statically links compiler-rt's minimal
+          # runtime via GNU-ld --whole-archive from lib/linux/; no
+          # darwin equivalent is wired up, so keep it Linux-only.
+          sanitizedTests = nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+            mkTests pkgs (mkPluginSanitized pkgs components) nix
+          );
         in
         acc
         // { "cargo-nix-plugin-nix_${ver}" = plugin; }
@@ -127,7 +131,7 @@
         // nixpkgs.lib.mapAttrs' (
           name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
         ) sanitizedTests
-      ) {} (builtins.attrNames nixVersions);
+      ) { } (builtins.attrNames nixVersions);
 
       # The default nix version used for the top-level plugin package.
       defaultNixComponents = "nixComponents_2_32";
@@ -143,26 +147,22 @@
           cargo-nix-plugin = defaultPlugin;
           read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
           cargo-nix-prefetch = pkgs.callPackage ./nix/cargo-nix-prefetch.nix { };
-        }
-        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) (
-          (perVersionPackages linuxPkgs)
-          // {
-            # Exercises cargo-nix-prefetch (the standalone binary), not the
-            # nix plugin .so, so it isn't per-nix-version.
-            cargo-compat-test = linuxPkgs.callPackage ./tests/cargo-compat-test.nix { };
 
-            # Optional: helper for generating metadata JSON explicitly.
-            # Not needed when using the automatic subprocess mode (just pass src).
-            # Useful for offline/pure evaluation workflows.
-            generate-metadata = linuxPkgs.writeShellApplication {
-              name = "generate-metadata";
-              runtimeInputs = [ linuxPkgs.cargo ];
-              text = ''
-                exec cargo metadata --format-version 1 --locked "$@"
-              '';
-            };
-          }
-        )
+          # Optional: helper for generating metadata JSON explicitly.
+          # Not needed when using the automatic subprocess mode (just pass src).
+          # Useful for offline/pure evaluation workflows.
+          generate-metadata = pkgs.writeShellApplication {
+            name = "generate-metadata";
+            runtimeInputs = [ pkgs.cargo ];
+            text = ''
+              exec cargo metadata --format-version 1 --locked "$@"
+            '';
+          };
+          # Exercises cargo-nix-prefetch (the standalone binary), not the
+          # nix plugin, so it isn't per-nix-version.
+          cargo-compat-test = pkgs.callPackage ./tests/cargo-compat-test.nix { };
+        }
+        // perVersionPackages pkgs
       );
 
       devShells = forAllSystems (pkgs: {
@@ -182,28 +182,34 @@
           type = "app";
           program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch}/bin/cargo-nix-prefetch";
         };
-      } // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == linuxSystem) {
         generate-metadata = {
           type = "app";
-          program = "${self.packages.${linuxSystem}.generate-metadata}/bin/generate-metadata";
+          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.generate-metadata}/bin/generate-metadata";
         };
       });
 
-      # Checks run against every nix version in the matrix.
-      checks.${linuxSystem} = builtins.foldl' (
-        acc: ver:
-        let
-          cfg = nixVersions.${ver};
-          components = linuxPkgs.nixVersions.${cfg.components};
-          nix = linuxPkgs.nixVersions.${cfg.binary};
-          plugin = mkPlugin linuxPkgs components;
-          tests = mkTests linuxPkgs plugin nix;
-        in
-        acc
-        // nixpkgs.lib.mapAttrs' (
-          name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv
-        ) tests
-      ) {} (builtins.attrNames nixVersions);
+      # Checks run against every nix version in the matrix, on every
+      # supported system. Linux gets the UBSan variants on top via
+      # perVersionPackages; recursive-nix tests are gated by
+      # requiredSystemFeatures so a darwin builder without that feature
+      # simply won't be assigned them.
+      checks = forAllSystems (
+        pkgs:
+        builtins.foldl' (
+          acc: ver:
+          let
+            cfg = nixVersions.${ver};
+            components = pkgs.nixVersions.${cfg.components};
+            nix = pkgs.nixVersions.${cfg.binary};
+            plugin = mkPlugin pkgs components;
+            tests = mkTests pkgs plugin nix;
+          in
+          acc
+          // nixpkgs.lib.mapAttrs' (
+            name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv
+          ) tests
+        ) { } (builtins.attrNames nixVersions)
+      );
 
       lib = import ./lib;
     };
