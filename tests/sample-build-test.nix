@@ -23,7 +23,7 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
 
     cargoNixExpr='
       let
-        pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
+        pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
       in import ${pluginSrc}/lib {
         inherit pkgs;
         metadata = builtins.readFile "${sampleProject}/metadata.json";
@@ -34,7 +34,7 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
 
     # --- Build test: compile and run the binary workspace member ---
     drv=$(nix-instantiate \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "($cargoNixExpr).workspaceMembers.sample-bin.build")
 
     # --realize may print multiple outputs (out + lib); take the first.
@@ -54,10 +54,10 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
     # When built as the root crate, the bin is present; when pulled in as
     # a dependency of sample-bin (cratesLibOnly), the bin is suppressed.
     lib_root_drv=$(nix-instantiate \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "($cargoNixExpr).workspaceMembers.sample-lib.build")
     lib_dep_drv=$(nix-instantiate \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "let c = ($cargoNixExpr); in builtins.getAttr c.resolved.workspaceMembers.sample-lib c.builtCrates.cratesLibOnly")
 
     [[ "$lib_root_drv" != "$lib_dep_drv" ]] || {
@@ -81,7 +81,7 @@ pkgs.runCommand "cargo-nix-plugin-sample-build-test"
 
     # --- Clippy test: lint all workspace members with clippy-driver ---
     clippy_drv=$(nix-instantiate \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
       --expr "($cargoNixExpr).clippy.allWorkspaceMembers")
 
     nix-store --realize "$clippy_drv" > /dev/null

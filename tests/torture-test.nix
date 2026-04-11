@@ -21,13 +21,13 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
 
     nix_eval() {
       nix-instantiate --eval --strict --read-write-mode \
-        --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
+        --option plugin-files "${plugin}/lib/nix/plugins" \
         --expr "$1"
     }
 
     wrapper_expr='
       let
-        pkgs = import ${pkgs.path} { system = "x86_64-linux"; };
+        pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
       in import ${pluginSrc}/lib {
         inherit pkgs;
         metadata = builtins.readFile "${testFixtures}/metadata.json";
@@ -50,7 +50,15 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
     # Test: build dependencies are built for build platform under cross-compilation
     result=$(nix_eval '
       let
-        pkgs = import ${pkgs.path} { localSystem = "x86_64-linux"; crossSystem = "aarch64-linux"; };
+        pkgs = import ${pkgs.path} {
+          localSystem = "${pkgs.stdenv.hostPlatform.system}";
+          crossSystem = "${
+            # Any host triple distinct from the build platform suffices to
+            # exercise the build/host split; flip the Linux arch so the
+            # check is meaningful on both x86_64 and aarch64 builders.
+            if pkgs.stdenv.hostPlatform.isAarch64 then "x86_64-linux" else "aarch64-linux"
+          }";
+        };
         cargoNix = import ${pluginSrc}/lib {
           inherit pkgs;
           metadata = builtins.readFile "${testFixtures}/metadata.json";
@@ -60,7 +68,7 @@ pkgs.runCommand "cargo-nix-plugin-torture-test"
         crates = cargoNix.builtCrates.crates;
         rav1e = if crates ? rav1e then crates.rav1e else crates.${"rav1e 0.7.1"};
         buildDepSystems = map (dep: dep.stdenv.hostPlatform.system) rav1e.buildDependencies;
-      in builtins.all (s: s == "x86_64-linux") buildDepSystems
+      in builtins.all (s: s == "${pkgs.stdenv.hostPlatform.system}") buildDepSystems
     ')
     [[ "$result" == "true" ]] || { echo "FAIL: build deps should target build platform: $result"; exit 1; }
 
