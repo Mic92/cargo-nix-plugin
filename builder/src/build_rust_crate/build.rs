@@ -6,10 +6,9 @@ use super::configure::{BuildScriptOutputs, build_env, enter_crate_root};
 use super::rustc::RustcFlags;
 use super::util::{echo_colored, remove_object_files, run_cmd};
 
-/// Shared preamble for the build and metadata phases: load build-script
-/// outputs, export CARGO_* / rustc-env, persist link flags, compute rustc
-/// flags. Caller must already be in the crate root.
-pub fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::Error>> {
+/// Load build-script outputs, export CARGO_* / rustc-env, persist link flags,
+/// compute rustc flags. Caller must already be in the crate root.
+fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::Error>> {
     let bso: BuildScriptOutputs = match fs::read_to_string("target/build-script-outputs.json") {
         Ok(s) => serde_json::from_str(&s)?,
         Err(_) => BuildScriptOutputs::default(),
@@ -59,29 +58,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         let lib_artifact = super::rustc::find_by_metadata("target/lib", metadata)
             .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
         lib_extern.extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_artifact}")]);
-
-        // Proc-macro marker for downstream crates
-        if config.crate_type.iter().any(|t| t == "proc-macro") {
-            fs::write("target/lib/proc-macro.marker", b"")?;
-        }
-
-        // Pipelining: emit .rmeta and signal the scheduler mid-build.
-        // NIX_INC_RMETA_DIR is set by nix-inc's executor; absent in normal
-        // nix builds so this block is a no-op.
-        if let Ok(rmeta_dir) = std::env::var("NIX_INC_RMETA_DIR") {
-            fs::create_dir_all(&rmeta_dir)?;
-            // Emit metadata to the rmeta dir. With incremental compilation,
-            // the frontend work from the full build above is cached, so this
-            // is fast (~50ms for most crates).
-            let mut meta_cmd = flags.cmd(
-                &crate_name, &lib_src, &rmeta_dir, &crate_types, &extra, false,
-            );
-            meta_cmd.arg("--emit=metadata");
-            run_cmd(&mut meta_cmd, config.verbose)?;
-
-            // Signal via fd 3 (inherited from the worker's saved stdout).
-            signal_meta_ready(&rmeta_dir);
-        }
 
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
@@ -209,24 +185,7 @@ fn build_bin(
     Ok(())
 }
 
-/// Write `__META_READY__ <dir>` to fd 3 (the worker's signal channel).
-/// fd 3 is set up by nix-inc's persistent bash worker; if it doesn't
-/// exist (normal nix build), the write silently fails.
-fn signal_meta_ready(rmeta_dir: &str) {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::io::FromRawFd;
-        // SAFETY: fd 3 is inherited from the worker parent process.
-        // We must not close it (other signals may follow), so we
-        // forget the File after writing.
-        let mut f = unsafe { std::fs::File::from_raw_fd(3) };
-        let _ = writeln!(f, "__META_READY__ {rmeta_dir}");
-        std::mem::forget(f);
-    }
-}
-
-pub fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
+fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
     if !config.lib_path.is_empty() && Path::new(&config.lib_path).exists() {
         Some(config.lib_path.clone())
     } else if Path::new("src/lib.rs").exists() {

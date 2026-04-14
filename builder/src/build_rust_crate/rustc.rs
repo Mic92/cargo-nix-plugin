@@ -98,8 +98,8 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     }
 
     flags.extend_from_slice(&config.extra_rustc_opts);
-    // Runtime hook for nix-inc and preBuild overrides; the old shell builder
-    // appended $EXTRA_RUSTC_FLAGS verbatim to every rustc invocation.
+    // Runtime hook for preBuild overrides and external schedulers; the old
+    // shell builder appended $EXTRA_RUSTC_FLAGS verbatim to every rustc call.
     if let Ok(v) = std::env::var("EXTRA_RUSTC_FLAGS") {
         flags.extend(v.split_whitespace().map(String::from));
     }

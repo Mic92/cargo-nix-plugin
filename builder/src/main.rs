@@ -31,10 +31,6 @@ fn main() {
         "configure" => build_rust_crate::configure::run(&mut config),
         "build" => build_rust_crate::build::run(&mut config),
         "install" => build_rust_crate::install::run(&mut config),
-        "metadata" => {
-            let rmeta_dir = args.get(2).map(|s| s.as_str()).unwrap_or("target/rmeta");
-            build_rust_crate::metadata::run(&mut config, rmeta_dir)
-        }
         other => {
             eprintln!("error: unknown subcommand: {other}");
             process::exit(1);
