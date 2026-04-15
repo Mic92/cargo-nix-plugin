@@ -332,6 +332,7 @@ pub fn resolve_from_lockfile(
         .map(|p| short_id.get(&p.name, &p.version));
 
     Ok(WorkspaceResult {
+        api_level: crate::resolve::API_LEVEL,
         root,
         workspace_root: workspace_root.to_string_lossy().to_string(),
         workspace_members,

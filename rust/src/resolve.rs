@@ -9,10 +9,21 @@ use std::path::Path;
 use crate::cfg_eval::{matches_target, TargetDescription};
 use crate::lockfile::{parse_lockfile, LockfileHashes};
 
+/// API level of the resolver output / `lib/default.nix` contract.
+///
+/// Bump when the shape of [`WorkspaceResult`] (or how `lib/default.nix`
+/// must interpret it) changes incompatibly. The Nix wrapper asserts
+/// `resolved.apiLevel == apiLevel`, so consumers that statically link an
+/// older resolver into nix but evaluate a newer `lib/` get a clear error
+/// instead of a confusing attribute-missing failure deep in buildRustCrate.
+pub const API_LEVEL: u32 = 1;
+
 /// The result of resolving a cargo workspace.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceResult {
+    /// See [`API_LEVEL`].
+    pub api_level: u32,
     /// packageId of the root crate, or null for pure workspaces
     pub root: Option<String>,
     /// Absolute path to the workspace root directory
@@ -318,6 +329,7 @@ pub fn resolve_workspace(
     }
 
     Ok(WorkspaceResult {
+        api_level: API_LEVEL,
         root,
         workspace_root: metadata.workspace_root.to_string(),
         workspace_members,

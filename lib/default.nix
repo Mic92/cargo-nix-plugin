@@ -92,6 +92,12 @@
 }:
 
 let
+  # Contract version between this Nix wrapper and the Rust resolver
+  # output it consumes (`builtins.resolveCargoWorkspace` /
+  # `WorkspaceResult`). Must match `API_LEVEL` in rust/src/resolve.rs.
+  # Bump both together when the result shape changes incompatibly.
+  apiLevel = 1;
+
   # Build the target description from stdenv if not provided
   defaultTarget = makeDefaultTarget stdenv.hostPlatform;
 
@@ -173,7 +179,7 @@ let
       defaultBuildRustCrateForPkgs;
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
-  resolved = builtins.resolveCargoWorkspace (
+  rawResolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
       inherit rootFeatures noDefaultFeatures;
@@ -190,6 +196,28 @@ let
         // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
   );
+
+  # Guard against skew between this checkout's lib/ and the resolver
+  # statically linked into the running nix. `or 0` covers nix binaries
+  # predating the field. Gating `resolved` itself (rather than checking
+  # at the leaves) makes the message surface ahead of attribute-missing
+  # failures deep in buildRustCrate.
+  #
+  # Warn-only for now: no incompatible change has shipped yet, so skew
+  # is benign. Promote to `throw` on the first real bump.
+  resolvedApiLevel = rawResolved.apiLevel or 0;
+  resolved =
+    if resolvedApiLevel == apiLevel then
+      rawResolved
+    else
+      lib.warn ''
+        cargo-nix-plugin: API level mismatch.
+          nix builtin resolver = ${toString resolvedApiLevel}
+          lib/default.nix      = ${toString apiLevel}
+        Your nix was built against a different cargo-nix-plugin revision
+        than the lib/ you are evaluating. Rebuild/reload the plugin
+        against this checkout.
+      '' rawResolved;
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl
@@ -496,4 +524,5 @@ in
   # Expose internals for debugging
   inherit resolved;
   inherit builtCrates;
+  inherit apiLevel;
 }
