@@ -20,6 +20,13 @@ pub struct DepFeatureInfo {
     pub package_id: String,
     pub uses_default_features: bool,
     pub features: Vec<String>,
+    /// Per-edge optionality. NOT the same as `optional_deps.contains(name)`:
+    /// a crate can have `foo` optional in `[dependencies]` and required in
+    /// `[dev-dependencies]` (serde does this constantly). Cargo's
+    /// `FeatureResolver::activate_pkg` checks `dep.is_optional()` per edge,
+    /// so the dev-dep edge fires unconditionally. The name-set is still
+    /// what feature *rules* (`dep:foo`, `foo/feat`) key on.
+    pub optional: bool,
 }
 
 /// Resolve features for all packages in the graph.
@@ -88,10 +95,11 @@ pub fn resolve_features(
         // Propagate to dependencies.
         let current_features = resolved.get(&pkg_id).cloned().unwrap_or_default();
         for dep in &pkg.dependencies {
-            // Skip optional deps nothing activated.
-            if pkg.optional_deps.contains(&dep.name)
-                && !active_optional.contains(&(pkg_id.clone(), dep.name.clone()))
-            {
+            // Skip THIS edge if it's optional and nothing activated the
+            // name. Per-edge, not per-name: a non-optional dev/build edge
+            // with the same name must still propagate (cargo activate_pkg
+            // checks dep.is_optional() on each Dependency, not a set).
+            if dep.optional && !active_optional.contains(&(pkg_id.clone(), dep.name.clone())) {
                 continue;
             }
 
@@ -240,6 +248,7 @@ mod tests {
                     package_id: pkg_id.to_string(),
                     uses_default_features: *default_feats,
                     features: feats.iter().map(|s| s.to_string()).collect(),
+                    optional: optional.contains(name),
                 })
                 .collect(),
             optional_deps: optional.iter().map(|s| s.to_string()).collect(),
@@ -471,6 +480,58 @@ mod tests {
         );
         // opt-pkg should not even be in the graph.
         assert!(!result_raw.features.contains_key("opt-pkg"));
+    }
+
+    /// Same dep name, two edges: optional in `[dependencies]`, required
+    /// in `[dev-dependencies]`. The required edge must propagate even
+    /// though the optional one is inactive. Regression: gating on the
+    /// name-set `optional_deps` skipped BOTH edges.
+    ///
+    /// Ground truth: tests/fixtures/feature-dev-shadows-optional —
+    /// `cargo metadata` resolves leaf to ["d","default","extra"].
+    #[test]
+    fn required_edge_not_shadowed_by_optional_same_name() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "root".to_string(),
+            PackageFeatureInfo {
+                features: [("with-leaf".to_string(), vec!["dep:leaf".to_string()])]
+                    .into_iter()
+                    .collect(),
+                dependencies: vec![
+                    DepFeatureInfo {
+                        name: "leaf".into(),
+                        package_id: "leaf".into(),
+                        uses_default_features: false,
+                        features: vec![],
+                        optional: true,
+                    },
+                    DepFeatureInfo {
+                        name: "leaf".into(),
+                        package_id: "leaf".into(),
+                        uses_default_features: true,
+                        features: vec!["extra".into()],
+                        optional: false,
+                    },
+                ],
+                optional_deps: ["leaf".to_string()].into_iter().collect(),
+            },
+        );
+        packages.insert(
+            "leaf".to_string(),
+            make_package(&[("default", &["d"]), ("d", &[]), ("extra", &[])], &[], &[]),
+        );
+
+        let result = resolve_features(&packages, &[("root".into(), vec!["default".into()])]);
+        let leaf = result.features.get("leaf").expect("leaf reached via dev-dep");
+        for f in ["default", "d", "extra"] {
+            assert!(leaf.contains(f), "leaf missing {f}: {leaf:?}");
+        }
+        // with-leaf was NOT enabled, so the optional normal-dep edge stays
+        // inactive — the build-time filter must still drop it.
+        assert!(!result
+            .active_optional_deps
+            .contains(&("root".into(), "leaf".into())));
     }
 
     /// Regression: rustls `[dependencies.webpki] package = "rustls-webpki"`.

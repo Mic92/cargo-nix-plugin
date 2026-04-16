@@ -408,6 +408,7 @@ pub fn resolve_from_lockfile(
                 package_id: d.package_id.clone(),
                 uses_default_features: d.uses_default_features,
                 features: d.features.clone(),
+                optional: d.optional,
             })
             .collect();
 
@@ -447,6 +448,15 @@ pub fn resolve_from_lockfile(
     // their activating feature (dep:X or legacy implicit) is enabled.
     // The lockfile includes all possible deps for version pinning, but
     // buildRustCrate expects only active deps.
+    //
+    // KNOWN LIMITATION: cargo's resolver=2 also splits feature sets by
+    // host/target (build-deps vs normal deps get independent feature
+    // resolution and the crate is built twice). We unify them — same as
+    // `cargo metadata`'s `.resolve` output, and the conservative
+    // superset, so builds succeed; the cost is occasional over-enabling
+    // of features in the build-dep instance. Fixing this requires
+    // duplicating package nodes by FeaturesFor, which buildRustCrate
+    // can't express today.
     for (pkg_id, info) in crates.iter_mut() {
         let keep = |dep: &DepInfo| {
             !dep.optional
@@ -1978,6 +1988,46 @@ version = "0.1.0"
         // Not promoted to workspace members — they're deps, not roots.
         assert!(!result.workspace_members.contains_key("devdep"));
         assert!(!result.workspace_members.contains_key("inner"));
+    }
+
+    /// `leaf` is optional in [dependencies] AND required in
+    /// [dev-dependencies]. The dev-dep edge must reach leaf with its own
+    /// features even though the optional normal-dep edge is inactive.
+    /// Ground truth: `cargo metadata` on this fixture resolves leaf to
+    /// ["d","default","extra"] (see fixture Cargo.toml comment).
+    #[test]
+    fn feature_dev_dep_shadows_optional_normal_dep() {
+        let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/feature-dev-shadows-optional");
+        let cargo_lock = std::fs::read_to_string(ws.join("Cargo.lock")).unwrap();
+        let result = resolve_from_lockfile(
+            &ws,
+            &cargo_lock,
+            &ws,
+            "sparse+https://index.crates.io/",
+            &linux_target(),
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let leaf = &result.crates["leaf"];
+        let mut got = leaf.resolved_default_features.clone();
+        got.sort();
+        assert_eq!(got, vec!["d", "default", "extra"], "leaf features");
+
+        // The optional normal-dep edge stays inactive (with-leaf not set):
+        // root.dependencies must NOT contain leaf, but dev_dependencies must.
+        let root = &result.crates["root"];
+        assert!(
+            root.dependencies.iter().all(|d| d.name != "leaf"),
+            "optional normal-dep edge leaked into dependencies"
+        );
+        assert!(
+            root.dev_dependencies.iter().any(|d| d.name == "leaf"),
+            "dev-dep edge dropped"
+        );
     }
 
     /// A path dep pointing OUTSIDE the workspace src must fail loudly at
