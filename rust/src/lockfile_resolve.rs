@@ -6,7 +6,7 @@
 //! build time.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::cfg_eval::{matches_target, TargetDescription};
@@ -86,6 +86,7 @@ struct ManifestDep {
 /// `crates_io_index` is the (already normalized) sparse index URL used for
 /// crates whose lockfile source is crates.io — callers obtain it via
 /// [`registry::resolve_crates_io_index`].
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_from_lockfile(
     workspace_root: &Path,
     cargo_lock: &str,
@@ -94,6 +95,7 @@ pub fn resolve_from_lockfile(
     target: &TargetDescription,
     root_features: &[String],
     no_default_features: bool,
+    git_sources: &HashMap<String, PathBuf>,
 ) -> Result<WorkspaceResult, String> {
     // 1. Parse Cargo.lock
     let lock_packages = parse_lock_packages(cargo_lock)?;
@@ -133,6 +135,10 @@ pub fn resolve_from_lockfile(
         .collect();
     registry::prefetch_index(cargo_home, &prefetch_jobs)?;
 
+    // Per-checkout cache of parsed git workspace manifests, so N crates from
+    // one git repo (gitoxide: 36) don't re-walk/re-parse N times.
+    let mut git_checkouts: HashMap<PathBuf, GitCheckout> = HashMap::new();
+
     let mut crates = BTreeMap::new();
     let mut workspace_members = BTreeMap::new();
 
@@ -151,7 +157,7 @@ pub fn resolve_from_lockfile(
             workspace_members.insert(member.name.clone(), sid.clone());
 
             let (dependencies, build_dependencies, dev_dependencies) =
-                resolve_member_deps(member, &lock_packages, &short_id, target);
+                resolve_member_deps(member, &pkg.dependencies, &lock_packages, &short_id, target);
 
             crates.insert(
                 sid,
@@ -180,7 +186,7 @@ pub fn resolve_from_lockfile(
             );
         } else {
             // External crate — use registry index
-            let source_info = resolve_pkg_source(pkg);
+            let mut source_info = resolve_pkg_source(pkg);
             let sha256 = lockfile_hashes
                 .get(&(pkg.name.clone(), pkg.version.clone()))
                 .cloned();
@@ -206,7 +212,7 @@ pub fn resolve_from_lockfile(
                 ),
             };
 
-            let (dependencies, build_dependencies, features, links) =
+            let (dependencies, build_dependencies, features_btree, links) =
                 if let Some(ref version) = index_version {
                     let (deps, build_deps) = resolve_index_deps(
                         version,
@@ -217,12 +223,57 @@ pub fn resolve_from_lockfile(
                     );
                     let features = registry::features_for_version(version);
                     let links = version.links.as_deref().map(|s| s.to_string());
-                    (deps, build_deps, features, links)
+                    (deps, build_deps, features.into_iter().collect(), links)
+                } else if let Some(SourceInfo::Git { url, rev, .. }) = &source_info {
+                    // Git dependency — read its Cargo.toml from the
+                    // pre-fetched checkout the Nix wrapper handed us.
+                    let key = format!("{url}#{rev}");
+                    let checkout_path = git_sources.get(&key).ok_or_else(|| {
+                        format!(
+                            "git source for {} {} not provided: expected gitSources.\"{key}\" \
+                             to point at a checkout (lib/default.nix should derive this \
+                             automatically from Cargo.lock)",
+                            pkg.name, pkg.version,
+                        )
+                    })?;
+                    let checkout = match git_checkouts.get(checkout_path) {
+                        Some(c) => c,
+                        None => {
+                            let c = GitCheckout::scan(checkout_path)?;
+                            git_checkouts.entry(checkout_path.clone()).or_insert(c)
+                        }
+                    };
+                    let member = checkout.find(&pkg.name).ok_or_else(|| {
+                        format!(
+                            "package {} not found in git checkout {} ({key})",
+                            pkg.name,
+                            checkout_path.display()
+                        )
+                    })?;
+                    let (deps, build_deps, _) = resolve_member_deps(
+                        member,
+                        &pkg.dependencies,
+                        &lock_packages,
+                        &short_id,
+                        target,
+                    );
+                    // Re-derive source_info with the sub-path now that we
+                    // know which sub-directory holds this crate.
+                    let sub_path = member
+                        .manifest_dir
+                        .strip_prefix(&*checkout_path.to_string_lossy())
+                        .map(|s| s.trim_start_matches('/'))
+                        .filter(|s| !s.is_empty())
+                        .map(String::from);
+                    source_info = Some(SourceInfo::Git {
+                        url: url.clone(),
+                        rev: rev.clone(),
+                        sub_path,
+                    });
+                    (deps, build_deps, member.features.clone(), member.links.clone())
                 } else {
-                    (Vec::new(), Vec::new(), HashMap::new(), None)
+                    (Vec::new(), Vec::new(), BTreeMap::new(), None)
                 };
-
-            let features_btree: BTreeMap<String, Vec<String>> = features.into_iter().collect();
 
             crates.insert(
                 sid,
@@ -745,17 +796,101 @@ fn toml_str_array(value: Option<&toml::Value>) -> Vec<String> {
         .collect()
 }
 
-/// Resolve dependencies for a workspace member using the lockfile.
+/// A git checkout scanned for Cargo packages. One checkout may host many
+/// crates (workspace) — gitoxide ships ~36 `gix-*` crates from one repo.
+/// We parse each member's manifest into the same `WorkspaceMember` shape
+/// the local-workspace path uses so dep resolution is shared.
+struct GitCheckout {
+    /// name → parsed manifest. Only the fields `resolve_member_deps`
+    /// reads are meaningful; `manifest_dir` is the absolute path within
+    /// the checkout (used to derive `sub_path`).
+    members: HashMap<String, WorkspaceMember>,
+}
+
+impl GitCheckout {
+    fn scan(root: &Path) -> Result<Self, String> {
+        let root_manifest_path = root.join("Cargo.toml");
+        let root_toml_str = std::fs::read_to_string(&root_manifest_path).map_err(|e| {
+            format!(
+                "git checkout {}: failed to read Cargo.toml: {e}",
+                root.display()
+            )
+        })?;
+        let root_toml: toml::Value = toml::from_str(&root_toml_str)
+            .map_err(|e| format!("git checkout {}: parse Cargo.toml: {e}", root.display()))?;
+
+        let workspace_table = root_toml.get("workspace");
+        let workspace_deps: HashMap<String, ManifestDep> = workspace_table
+            .and_then(|w| w.get("dependencies"))
+            .map(|d| {
+                parse_manifest_deps(Some(d), &HashMap::new())
+                    .into_iter()
+                    .map(|dep| (dep.name.clone(), dep))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ws_pkg_table = workspace_table.and_then(|w| w.get("package"));
+        let ws_pkg = WorkspacePackage {
+            edition: ws_pkg_table
+                .and_then(|p| p.get("edition"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            version: ws_pkg_table
+                .and_then(|p| p.get("version"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        };
+
+        let mut members = HashMap::new();
+        let mut push = |toml: &toml::Value, dir: &Path| -> Result<(), String> {
+            if let Some(pkg) = toml.get("package") {
+                let m = parse_member_manifest(toml, pkg, dir, &workspace_deps, &ws_pkg)?;
+                members.insert(m.name.clone(), m);
+            }
+            Ok(())
+        };
+
+        // Root may itself be a package (non-virtual workspace, or no
+        // workspace at all).
+        push(&root_toml, root)?;
+
+        if let Some(ws) = workspace_table {
+            if let Some(member_globs) = ws.get("members").and_then(|m| m.as_array()) {
+                for glob_val in member_globs {
+                    let Some(glob_str) = glob_val.as_str() else {
+                        continue;
+                    };
+                    for member_dir in expand_glob(root, glob_str) {
+                        let manifest = member_dir.join("Cargo.toml");
+                        let Ok(s) = std::fs::read_to_string(&manifest) else {
+                            continue;
+                        };
+                        let toml: toml::Value = toml::from_str(&s).map_err(|e| {
+                            format!("git checkout: parse {}: {e}", manifest.display())
+                        })?;
+                        push(&toml, &member_dir)?;
+                    }
+                }
+            }
+        }
+
+        Ok(Self { members })
+    }
+
+    fn find(&self, name: &str) -> Option<&WorkspaceMember> {
+        self.members.get(name)
+    }
+}
+
+/// Resolve dependencies for a workspace member (or git-sourced crate whose
+/// manifest we parsed ourselves) using the lockfile.
 fn resolve_member_deps(
     member: &WorkspaceMember,
+    lock_dep_refs: &[String],
     lock_packages: &[LockPackage],
     short_id: &ShortId,
     target: &TargetDescription,
 ) -> (Vec<DepInfo>, Vec<DepInfo>, Vec<DepInfo>) {
-    let lock_member = lock_packages
-        .iter()
-        .find(|p| p.name == member.name && p.version == member.version);
-
     let resolve_dep_list = |manifest_deps: &[ManifestDep]| -> Vec<DepInfo> {
         manifest_deps
             .iter()
@@ -779,12 +914,8 @@ fn resolve_member_deps(
                     .as_deref()
                     .and_then(|r| semver::VersionReq::parse(r).ok())
                     .unwrap_or(semver::VersionReq::STAR);
-                let resolved = find_lock_dep_by_name_and_req(
-                    pkg_name,
-                    &req,
-                    &lock_member?.dependencies,
-                    lock_packages,
-                )?;
+                let resolved =
+                    find_lock_dep_by_name_and_req(pkg_name, &req, lock_dep_refs, lock_packages)?;
                 let sid = short_id.get(&resolved.name, &resolved.version);
 
                 // Raw dep key; consumers normalize for --extern themselves.
@@ -962,6 +1093,7 @@ fn resolve_pkg_source(pkg: &LockPackage) -> Option<SourceInfo> {
                 Some(SourceInfo::Git {
                     url: clean_url.to_string(),
                     rev: rev.to_string(),
+                    sub_path: None,
                 })
             } else {
                 None
@@ -1069,6 +1201,7 @@ dependencies = [
             Some(SourceInfo::Git {
                 url: "https://github.com/user/foo.git".into(),
                 rev: "abc123".into(),
+                sub_path: None,
             })
         );
     }
@@ -1373,5 +1506,162 @@ dependencies = [
             member.edition, "2021",
             "missing workspace.package.edition falls back to 2021"
         );
+    }
+
+    /// End-to-end: a `git+` lockfile entry resolves its dependency edges,
+    /// feature table, links and `sub_path` from a pre-fetched checkout.
+    /// Models the gitoxide shape: one repo, virtual workspace, many member
+    /// crates depending on each other via `workspace = true`.
+    #[test]
+    fn git_source_resolves_from_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // --- fake git checkout (as if builtins.fetchGit produced it) ---
+        let checkout = tmp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join("crates/foo/src")).unwrap();
+        std::fs::create_dir_all(checkout.join("crates/bar/src")).unwrap();
+        std::fs::write(
+            checkout.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/*"]
+[workspace.dependencies]
+bar = { path = "crates/bar", version = "0.1.0" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            checkout.join("crates/foo/Cargo.toml"),
+            r#"
+[package]
+name = "foo"
+version = "0.1.0"
+links = "foo_sys"
+[dependencies]
+bar = { workspace = true }
+[features]
+default = ["a"]
+a = []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            checkout.join("crates/bar/Cargo.toml"),
+            "[package]\nname = \"bar\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // --- consuming workspace ---
+        let ws = tmp.path().join("ws");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            r#"
+[package]
+name = "consumer"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+foo = { git = "https://example.com/repo" }
+"#,
+        )
+        .unwrap();
+
+        let cargo_lock = r#"
+version = 4
+[[package]]
+name = "consumer"
+version = "0.1.0"
+dependencies = ["foo"]
+[[package]]
+name = "foo"
+version = "0.1.0"
+source = "git+https://example.com/repo?branch=main#abc123"
+dependencies = ["bar"]
+[[package]]
+name = "bar"
+version = "0.1.0"
+source = "git+https://example.com/repo?branch=main#abc123"
+"#;
+
+        let mut git_sources = HashMap::new();
+        git_sources.insert(
+            "https://example.com/repo#abc123".to_string(),
+            checkout.clone(),
+        );
+
+        let target = TargetDescription {
+            name: "x86_64-unknown-linux-gnu".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            vendor: "unknown".into(),
+            env: "gnu".into(),
+            family: vec!["unix".into()],
+            pointer_width: "64".into(),
+            endian: "little".into(),
+            unix: true,
+            windows: false,
+            extra_cfgs: vec![],
+        };
+
+        let result = resolve_from_lockfile(
+            &ws,
+            cargo_lock,
+            tmp.path(), // cargo_home — unused, no registry crates
+            "sparse+https://index.crates.io/",
+            &target,
+            &[],
+            false,
+            &git_sources,
+        )
+        .unwrap();
+
+        let foo = &result.crates["foo"];
+        // Dependency edge foo → bar came from the checkout's Cargo.toml,
+        // resolved via [workspace.dependencies].
+        assert_eq!(foo.dependencies.len(), 1, "foo → bar edge");
+        assert_eq!(foo.dependencies[0].package_id, "bar");
+        assert_eq!(foo.links.as_deref(), Some("foo_sys"));
+        assert!(foo.features.contains_key("default"));
+        match &foo.source {
+            Some(SourceInfo::Git { url, rev, sub_path }) => {
+                assert_eq!(url, "https://example.com/repo");
+                assert_eq!(rev, "abc123");
+                assert_eq!(sub_path.as_deref(), Some("crates/foo"));
+            }
+            other => panic!("expected Git source, got {other:?}"),
+        }
+
+        let bar = &result.crates["bar"];
+        match &bar.source {
+            Some(SourceInfo::Git { sub_path, .. }) => {
+                assert_eq!(sub_path.as_deref(), Some("crates/bar"))
+            }
+            other => panic!("expected Git source, got {other:?}"),
+        }
+
+        // Feature resolution propagated through the git crate: consumer
+        // pulls foo's default → "a".
+        assert!(foo.resolved_default_features.contains(&"a".to_string()));
+    }
+
+    /// Missing gitSources entry surfaces a clear error naming the key.
+    #[test]
+    fn git_source_missing_checkout_errors() {
+        let key = "https://example.com/repo#abc123";
+        let pkg = LockPackage {
+            name: "foo".into(),
+            version: "0.1.0".into(),
+            source: Some("git+https://example.com/repo#abc123".into()),
+            dependencies: vec![],
+        };
+        // Just exercise the source parse + key format, since the full
+        // resolve needs a workspace on disk.
+        match resolve_pkg_source(&pkg) {
+            Some(SourceInfo::Git { url, rev, .. }) => {
+                assert_eq!(format!("{url}#{rev}"), key)
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

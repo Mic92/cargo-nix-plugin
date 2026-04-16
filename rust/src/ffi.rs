@@ -31,6 +31,11 @@ struct PluginInput {
     /// Defaults to $CARGO_HOME or ~/.cargo.
     #[serde(default)]
     cargo_home: Option<String>,
+    /// Pre-fetched git checkouts, keyed by `"${url}#${rev}"` (url stripped of
+    /// `git+` prefix and `?query`). Supplied by `lib/default.nix` so the
+    /// resolver can read each git crate's Cargo.toml without doing IO itself.
+    #[serde(default)]
+    git_sources: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 /// Validate input and resolve the workspace using the appropriate mode.
@@ -83,6 +88,7 @@ fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::Workspace
                 &input.target,
                 &input.root_features,
                 input.no_default_features,
+                &input.git_sources,
             )
         }
     }
@@ -187,6 +193,7 @@ mod tests {
             root_features: vec![],
             no_default_features: false,
             cargo_home: None,
+            git_sources: Default::default(),
         };
 
         let result = validate_and_resolve(&input).expect("lockfile resolution failed");

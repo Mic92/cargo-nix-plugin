@@ -96,7 +96,7 @@ let
   # output it consumes (`builtins.resolveCargoWorkspace` /
   # `WorkspaceResult`). Must match `API_LEVEL` in rust/src/resolve.rs.
   # Bump both together when the result shape changes incompatibly.
-  apiLevel = 1;
+  apiLevel = 2;
 
   # Build the target description from stdenv if not provided
   defaultTarget = makeDefaultTarget stdenv.hostPlatform;
@@ -163,6 +163,56 @@ let
   resolvedTarget =
     (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
 
+  # --- git source prefetch ---
+  # The resolver needs to read each git crate's Cargo.toml to learn its
+  # dependency edges / feature table / sub-directory, but it runs at eval
+  # time and can't fetch. So pre-fetch every distinct `git+URL#REV` from
+  # Cargo.lock here and hand the store paths in. Keyed by `"${url}#${rev}"`
+  # with `git+` and `?query` stripped — matches what resolve_pkg_source()
+  # extracts on the Rust side.
+  lockfileText =
+    if cargoLock != null then
+      cargoLock
+    else if manifestPath != null then
+      builtins.readFile (builtins.dirOf manifestPath + "/Cargo.lock")
+    else if src != null then
+      builtins.readFile (src + "/Cargo.lock")
+    else
+      "";
+  # Cheap regex scan — the full TOML parse happens on the Rust side; here
+  # we only need the set of (url, rev) pairs to fetch. Cargo.lock always
+  # pins a `#rev` for git deps; error out clearly if one is missing.
+  gitSourceLines = lib.unique (
+    builtins.filter (s: s != null) (
+      map (builtins.match ''source = "git\+([^"]+)"'') (
+        lib.splitString "\n" lockfileText
+      )
+    )
+  );
+  gitSources = lib.listToAttrs (
+    map (
+      m:
+      let
+        raw = builtins.elemAt m 0;
+        # Split off `#rev` first, then drop any `?branch=…` from the URL.
+        hashSplit = builtins.match "(.*)#([^#]+)" raw;
+        url = builtins.head (lib.splitString "?" (builtins.elemAt hashSplit 0));
+        rev = builtins.elemAt hashSplit 1;
+      in
+      if hashSplit == null then
+        throw "cargo-nix-plugin: git source '${raw}' in Cargo.lock has no #rev"
+      else
+        {
+          name = "${url}#${rev}";
+          value = builtins.fetchGit {
+            inherit url rev;
+            # The locked rev may not be reachable from the default ref.
+            allRefs = true;
+          };
+        }
+    ) gitSourceLines
+  );
+
   # Rust binary that replaces bash configure/build/install phases. It runs on
   # the build machine for both host- and build-platform crate derivations, so
   # build→build is the only universally correct slice; passing it explicitly
@@ -195,6 +245,7 @@ let
         }
         // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
+    // lib.optionalAttrs (gitSourceLines != [ ]) { inherit gitSources; }
   );
 
   # Guard against skew between this checkout's lib/ and the resolver
@@ -259,10 +310,12 @@ let
         sha256 = crateInfo.sha256;
       }
     else if sourceType == "git" then
-      builtins.fetchGit {
+      # Reuse the prefetched checkout (same fetchGit args → same store path).
+      gitSources."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
         url = crateInfo.source.url;
         rev = crateInfo.source.rev;
-      }
+        allRefs = true;
+      })
     else
       src;
 
@@ -367,6 +420,12 @@ let
       # buildRustCrate auto-detects from src/main.rs and src/bin/*.
       // lib.optionalAttrs (libOnly || (crateInfo ? crateBin && crateInfo.crateBin != [ ])) {
         crateBin = if libOnly then [ ] else crateInfo.crateBin;
+      }
+      // lib.optionalAttrs ((crateInfo.source.type or "") == "git") {
+        # The git checkout may be a workspace; tell build-rust-crate which
+        # subdir holds this crate. When the resolver couldn't determine it
+        # (older resolver / metadata mode) fall back to its auto-scan.
+        workspace_member = crateInfo.source.subPath or null;
       }
       // lib.optionalAttrs ((crateInfo.edition or "") != "") {
         edition = crateInfo.edition;

@@ -16,7 +16,7 @@ use crate::lockfile::{parse_lockfile, LockfileHashes};
 /// `resolved.apiLevel == apiLevel`, so consumers that statically link an
 /// older resolver into nix but evaluate a newer `lib/` get a clear error
 /// instead of a confusing attribute-missing failure deep in buildRustCrate.
-pub const API_LEVEL: u32 = 1;
+pub const API_LEVEL: u32 = 2;
 
 /// The result of resolving a cargo workspace.
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +104,12 @@ pub enum SourceInfo {
     Git {
         url: String,
         rev: String,
+        /// Sub-directory within the git checkout that contains this crate's
+        /// `Cargo.toml`. `None` when the crate lives at the checkout root or
+        /// when the resolver couldn't determine it (cargo-metadata mode
+        /// leaves this unset; build-rust-crate falls back to scanning).
+        #[serde(rename = "subPath", skip_serializing_if = "Option::is_none")]
+        sub_path: Option<String>,
     },
 }
 
@@ -354,6 +360,10 @@ fn resolve_source(
                     Some(SourceInfo::Git {
                         url: clean_url.to_string(),
                         rev: rev.to_string(),
+                        // cargo-metadata gives us the manifest_path in the
+                        // *cargo* checkout, not a Nix store path; let
+                        // build-rust-crate scan for it instead.
+                        sub_path: None,
                     })
                 } else {
                     None
