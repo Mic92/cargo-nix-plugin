@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::config::BuildConfig;
+use super::config::{BuildConfig, CrateMetadata};
 use super::configure::{BuildScriptOutputs, build_env, detect_cargo_toml_info};
 use super::rustc::RustcFlags;
 use super::util::{echo_colored, remove_object_files, run_cmd, set_var};
@@ -35,6 +35,16 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     detect_cargo_toml_info(config);
+
+    // Publish crate-metadata.json before rustc starts so a pipelining
+    // scheduler that dispatches dependents on our rmeta (mid-build) can
+    // construct `--extern` args. `install` overwrites with the scanned
+    // `target/lib` artifact set. Under plain nix-build the early write is
+    // unobservable (dependents only start after install).
+    if !config.build_tests {
+        let lib_out = config.lib_path_output().unwrap_or_else(|| config.out_path());
+        CrateMetadata::provisional(config).write(lib_out)?;
+    }
 
     let flags = setup_build(config)?;
     let crate_name = config.lib_name_normalized();
