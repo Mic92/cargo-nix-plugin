@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use crate::cfg_eval::{matches_target, TargetDescription};
-use crate::lockfile::{parse_lockfile, LockfileHashes};
+use crate::lockfile::parse_lockfile;
 
 /// API level of the resolver output / `lib/default.nix` contract.
 ///
@@ -214,11 +214,10 @@ pub fn resolve_workspace(
             .map(|n| n.features.iter().map(|f| f.to_string()).collect())
             .unwrap_or_default();
 
-        // Determine source
-        let source = resolve_source(pkg, &lockfile_hashes, is_workspace_member);
-
-        // Get sha256
-        let sha256 = get_sha256(pkg, &lockfile_hashes);
+        let source = resolve_source(pkg);
+        let sha256 = lockfile_hashes
+            .get(&(pkg.name.to_string(), pkg.version.to_string()))
+            .cloned();
 
         // Resolve dependencies by joining package deps with node deps
         let (dependencies, build_dependencies, dev_dependencies) = resolve_dependencies(
@@ -343,11 +342,7 @@ pub fn resolve_workspace(
     })
 }
 
-fn resolve_source(
-    pkg: &Package,
-    _lockfile_hashes: &LockfileHashes,
-    is_workspace_member: bool,
-) -> Option<SourceInfo> {
+fn resolve_source(pkg: &Package) -> Option<SourceInfo> {
     match pkg.source.as_ref() {
         Some(source) if source.is_crates_io() => Some(SourceInfo::CratesIo),
         Some(source) => {
@@ -382,29 +377,14 @@ fn resolve_source(
             }
         }
         None => {
-            if is_workspace_member {
-                // Extract relative path from manifest
-                let manifest = pkg.manifest_path.as_std_path();
-                let pkg_dir = manifest.parent().unwrap_or(Path::new("."));
-                Some(SourceInfo::Local {
-                    path: pkg_dir.to_string_lossy().to_string(),
-                })
-            } else {
-                // Local path dependency (non-workspace)
-                let manifest = pkg.manifest_path.as_std_path();
-                let pkg_dir = manifest.parent().unwrap_or(Path::new("."));
-                Some(SourceInfo::Local {
-                    path: pkg_dir.to_string_lossy().to_string(),
-                })
-            }
+            // Workspace member or local path dependency.
+            let manifest = pkg.manifest_path.as_std_path();
+            let pkg_dir = manifest.parent().unwrap_or(Path::new("."));
+            Some(SourceInfo::Local {
+                path: pkg_dir.to_string_lossy().to_string(),
+            })
         }
     }
-}
-
-fn get_sha256(pkg: &Package, lockfile_hashes: &LockfileHashes) -> Option<String> {
-    lockfile_hashes
-        .get(&(pkg.name.to_string(), pkg.version.to_string()))
-        .cloned()
 }
 
 /// Expand resolved features through the feature map to find all activated
@@ -461,9 +441,7 @@ fn activated_optional_deps(
 
         // Follow feature rules
         if let Some(rules) = feature_map.get(&feat) {
-            for rule in rules {
-                queue.push(rule.clone());
-            }
+            queue.extend(rules.iter().cloned());
         }
     }
 
@@ -960,10 +938,7 @@ mod tests {
         let pkg = package_with_source(Some(
             "registry+https://github.com/rust-lang/crates.io-index",
         ));
-        assert_eq!(
-            resolve_source(&pkg, &LockfileHashes::default(), false),
-            Some(SourceInfo::CratesIo)
-        );
+        assert_eq!(resolve_source(&pkg), Some(SourceInfo::CratesIo));
     }
 
     #[test]
@@ -971,7 +946,7 @@ mod tests {
         let index = "sparse+https://example.com/api/cargo/private/index/";
         let pkg = package_with_source(Some(index));
         assert_eq!(
-            resolve_source(&pkg, &LockfileHashes::default(), false),
+            resolve_source(&pkg),
             Some(SourceInfo::Registry {
                 index: index.into()
             })
@@ -984,7 +959,7 @@ mod tests {
         let index = "registry+https://example.com/cargo-index.git";
         let pkg = package_with_source(Some(index));
         assert_eq!(
-            resolve_source(&pkg, &LockfileHashes::default(), false),
+            resolve_source(&pkg),
             Some(SourceInfo::Registry {
                 index: index.into()
             })
