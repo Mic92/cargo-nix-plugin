@@ -84,19 +84,19 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         .to_string_lossy()
         .into_owned();
         test_env.push(("CARGO_TARGET_TMPDIR".into(), tmp));
-        if !bins.is_empty() {
-            fs::create_dir_all("target/bin")?;
-            let bin_dir = fs::canonicalize("target/bin")?;
-            for (name, _) in &bins {
-                test_env.push((
-                    format!("CARGO_BIN_EXE_{name}"),
-                    bin_dir.join(name).to_string_lossy().into_owned(),
-                ));
-            }
+        // Point at the *installed* location: install_tests() copies every
+        // executable from target/bin into $out/tests/, and the sandbox
+        // target/bin path is gone by the time the test binary runs.
+        let out = config.out_path();
+        for (name, _) in &bins {
+            test_env.push((format!("CARGO_BIN_EXE_{name}"), format!("{out}/tests/{name}")));
         }
     }
 
-    // Build binaries
+    // Build binaries. Even under buildTests these are built as the *real*
+    // executables (not `--test` unit-test harnesses) so that
+    // CARGO_BIN_EXE_<name> has something to point at; cargo's default test
+    // set likewise excludes per-bin unit tests.
     for (name, path) in &bins {
         build_bin(
             config,
@@ -105,7 +105,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             name,
             path,
             BinKind::Bin,
-            config.build_tests,
+            false,
             &test_env,
         )?;
     }

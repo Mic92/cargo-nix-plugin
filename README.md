@@ -248,8 +248,10 @@ compilation.
 
 ## Tests
 
-`buildTests = true` compiles unit tests, `[[bin]]` tests and integration
-tests under `tests/` into `$out/tests/` (one executable per target).
+`buildTests = true` compiles lib unit tests and integration tests under
+`tests/` into `$out/tests/` (one executable per target), alongside the
+crate's real `[[bin]]` executables so `env!("CARGO_BIN_EXE_<name>")`
+resolves to a store path.
 `[dev-dependencies]` are pulled in automatically; the regular `.build`
 derivation is unchanged.
 
@@ -261,6 +263,7 @@ let
   };
 in
 pkgs.runCommand "my-crate-tests" { } ''
+  export CARGO_TARGET_TMPDIR="$(mktemp -d)"
   for t in ${testsDrv}/tests/*; do
     echo "--- $(basename "$t")"
     "$t"
@@ -305,8 +308,13 @@ pkgs.runCommand "my-crate-tests" {
 ''
 ```
 
-Known limitations: doctests are not built, and tests under `examples/` /
-`benches/` are not discovered.
+`CARGO_TARGET_TMPDIR` is baked in at compile time pointing at the build
+sandbox (so `env!()` compiles), but that path does not exist at runtime —
+tests that actually write there must have it overridden by the wrapper as
+shown above.
+
+Known limitations: doctests are not built, per-`[[bin]]` unit tests are not
+compiled, and tests under `examples/` / `benches/` are not discovered.
 
 ## How It Works
 
