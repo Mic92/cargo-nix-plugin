@@ -95,6 +95,11 @@
             sampleProject = ./tests/sample-project;
           };
 
+          git-source-test = pkgs.callPackage ./tests/git-source-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+          };
+
         }
         # `nix build --store local?root=…` needs the bind-mount-based
         # chroot store, which only exists on Linux.

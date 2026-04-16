@@ -89,6 +89,12 @@
   # Optional: path to CARGO_HOME for registry index lookup in lockfile
   # resolve mode. Defaults to $CARGO_HOME or ~/.cargo.
   cargoHome ? null,
+  # Optional: pre-fetched git checkouts for `git+` deps, keyed by
+  # `"${url}#${rev}"` (url without `git+`/`?query`). Auto-derived from
+  # Cargo.lock via builtins.fetchGit when null. Override to supply a
+  # checkout fetchGit can't reach (private repo, vendored fixture) or to
+  # set `submodules = true` per-source.
+  gitSources ? null,
 }:
 
 let
@@ -189,7 +195,7 @@ let
       )
     )
   );
-  gitSources = lib.listToAttrs (
+  autoGitSources = lib.listToAttrs (
     map (
       m:
       let
@@ -212,6 +218,7 @@ let
         }
     ) gitSourceLines
   );
+  gitSources' = if gitSources != null then gitSources else autoGitSources;
 
   # Rust binary that replaces bash configure/build/install phases. It runs on
   # the build machine for both host- and build-platform crate derivations, so
@@ -245,7 +252,7 @@ let
         }
         // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
-    // lib.optionalAttrs (gitSourceLines != [ ]) { inherit gitSources; }
+    // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
   );
 
   # Guard against skew between this checkout's lib/ and the resolver
@@ -311,7 +318,7 @@ let
       }
     else if sourceType == "git" then
       # Reuse the prefetched checkout (same fetchGit args → same store path).
-      gitSources."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
+      gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
         url = crateInfo.source.url;
         rev = crateInfo.source.rev;
         allRefs = true;

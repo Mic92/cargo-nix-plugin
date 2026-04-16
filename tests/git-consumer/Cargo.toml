@@ -1,0 +1,7 @@
+[package]
+name = "git-consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+foo = { git = "file:///fake-git-repo", rev = "0000000000000000000000000000000000000000" }

@@ -1,0 +1,20 @@
+# Hand-written: pins two crates from one git workspace at a fixed rev.
+# The rev is a placeholder — git-source-test.nix supplies the checkout
+# directly via `gitSources`, bypassing builtins.fetchGit.
+version = 4
+
+[[package]]
+name = "git-consumer"
+version = "0.1.0"
+dependencies = ["foo"]
+
+[[package]]
+name = "foo"
+version = "0.1.0"
+source = "git+file:///fake-git-repo?rev=0000000000000000000000000000000000000000#0000000000000000000000000000000000000000"
+dependencies = ["bar"]
+
+[[package]]
+name = "bar"
+version = "0.1.0"
+source = "git+file:///fake-git-repo?rev=0000000000000000000000000000000000000000#0000000000000000000000000000000000000000"
