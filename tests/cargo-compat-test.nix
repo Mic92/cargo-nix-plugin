@@ -78,6 +78,7 @@ pkgs.runCommand "cargo-nix-plugin-cargo-compat-test"
     nativeBuildInputs = [
       pkgs.python3
       pkgs.cargo
+      pkgs.rustc
       cargoNixPrefetch
     ];
   }
@@ -157,5 +158,15 @@ pkgs.runCommand "cargo-nix-plugin-cargo-compat-test"
       exit 1
     fi
 
-    echo "PASS: plugin-written index cache is cargo-compatible" > "$out"
+    # `cargo build` walks the same resolver as metadata but additionally
+    # reads the cached entry's `cksum` to verify the .crate tarball, so a
+    # round-trip that mangled that field (or feature/yanked flags the
+    # resolver doesn't touch but build does) would slip past metadata.
+    echo "--- cargo build --locked --offline against plugin-written cache ---"
+    if ! ( cd "$WORKSPACE" && cargo build --locked --offline ); then
+      echo "FAIL: cargo build rejects plugin-written index cache"
+      exit 1
+    fi
+
+    echo "PASS: plugin-written index cache is cargo-compatible (metadata + build)" > "$out"
   ''
