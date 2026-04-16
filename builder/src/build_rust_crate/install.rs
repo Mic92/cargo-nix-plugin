@@ -157,7 +157,7 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
             // Skip non-test artifacts that share target/lib.
             let is_lib = matches!(
                 p.extension().and_then(|e| e.to_str()),
-                Some("rlib" | "so" | "dylib" | "d")
+                Some("rlib" | "so" | "dylib" | "a" | "d")
             );
             if !p.is_file() || !is_executable(&p) || (dir == "target/lib" && is_lib) {
                 continue;

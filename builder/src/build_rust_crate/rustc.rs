@@ -53,14 +53,31 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
                 dep.lib_out
             )
         });
-        // Prefer rlib for Rust-to-Rust linkage; otherwise the first
-        // artifact (proc-macro/dylib). Empty when the dep is bin-only or
-        // staticlib-only — nothing to `--extern`.
+        // Cargo only emits `--extern` when the dep target `is_linkable()`
+        // (lib | rlib | dylib | proc-macro — see
+        // cargo/core/compiler/crate_type.rs). cdylib/staticlib produce
+        // .so/.a artifacts that carry no Rust metadata, so pointing
+        // `--extern` at them yields E0786 instead of the expected
+        // "unresolved module" — and the dep was never meant to be
+        // `use`d from Rust anyway.
+        let linkable = m.proc_macro
+            || m.crate_types
+                .iter()
+                .any(|t| matches!(t.as_str(), "lib" | "rlib" | "dylib"));
+        if !linkable {
+            continue;
+        }
+        // Prefer rlib for Rust-to-Rust linkage; fall back to a shared lib
+        // (proc-macro / Rust dylib). Never pick `.a`.
         let Some(art) = m
             .artifacts
             .iter()
             .find(|a| a.ends_with(".rlib"))
-            .or(m.artifacts.first())
+            .or_else(|| {
+                m.artifacts
+                    .iter()
+                    .find(|a| a.ends_with(".so") || a.ends_with(".dylib") || a.ends_with(".dll"))
+            })
         else {
             continue;
         };

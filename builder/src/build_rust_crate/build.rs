@@ -58,17 +58,38 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.crate_type.iter().any(|t| t == "cdylib") {
             extra.extend_from_slice(&flags.bso_cdylib);
         }
+        // Rust `dylib` deps must be built with `-C prefer-dynamic` so std
+        // stays a dynamic reference; otherwise the downstream link fails
+        // with "cannot satisfy dependencies so `std` only shows up once".
+        // Cargo gates this on `!is_primary_package`, but in per-crate
+        // derivations every crate is "primary" — yet the only reason to
+        // build a dylib here is for a dependent to link it, so always set it.
+        if config.crate_type.iter().any(|t| t == "dylib") {
+            extra.extend_from_slice(&["-C".into(), "prefer-dynamic".into()]);
+        }
 
         run_cmd(
             &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, false, true),
             config.verbose,
         )?;
 
-        // Own bins/tests link against the lib we just built. Look it up by
-        // metadata so proc-macro / dylib-only crates (no .rlib) still work.
-        let lib_artifact = super::rustc::find_by_metadata("target/lib", metadata)
-            .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
-        lib_extern.extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_artifact}")]);
+        // Own bins/tests link against the lib we just built — but only when
+        // the lib has a Rust-linkable crate-type (cargo's `is_linkable()`:
+        // lib | rlib | dylib | proc-macro). A cdylib-/staticlib-only lib
+        // gets no `--extern`; cargo behaves the same and the bin then sees
+        // "unresolved module" if it tries to `use` the crate.
+        let linkable = config
+            .crate_type
+            .iter()
+            .any(|t| matches!(t.as_str(), "lib" | "rlib" | "dylib" | "proc-macro"));
+        if linkable {
+            // Look it up by metadata so proc-macro / dylib-only crates (no
+            // .rlib) still work.
+            let lib_artifact = super::rustc::find_by_metadata("target/lib", metadata)
+                .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
+            lib_extern
+                .extend_from_slice(&["--extern".into(), format!("{crate_name}={lib_artifact}")]);
+        }
 
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
