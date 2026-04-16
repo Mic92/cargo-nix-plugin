@@ -283,8 +283,6 @@ lib.makeOverridable
           ++ (if edition != null then [ "--edition" edition ] else [ ]);
         capLints = capLints_;
 
-        rustcPath = "${rust}";
-
         # CARGO_CFG_TARGET_* are derived at build time from `rustc --print cfg`,
         # so only the target triple and linker need passing here.
         hostPlatform = {

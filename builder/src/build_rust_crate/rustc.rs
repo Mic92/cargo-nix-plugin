@@ -76,6 +76,18 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
     out
 }
 
+fn find_rustc_prefix_on_path() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join("rustc");
+        if cand.is_file() {
+            // dir is .../bin; we want the store-path prefix above it.
+            return dir.parent().map(|p| p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 /// Compute base rustc flags: opt level, codegen-units, remap, linker,
 /// cross-compilation target, and extra user opts. Independent of deps
 /// and build script output.
@@ -95,11 +107,12 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     if let Ok(build_top) = std::env::var("NIX_BUILD_TOP") {
         flags.push(format!("--remap-path-prefix={build_top}=/"));
     }
-    if !config.rustc_path.is_empty() {
-        flags.push(format!(
-            "--remap-path-prefix={}=/rustc",
-            config.rustc_path
-        ));
+    // Discover the (correctly spliced) rustc that stdenv put on PATH via
+    // nativeBuildInputs and strip /bin/rustc. Doing this at build time avoids
+    // string-interpolating `${rust}` in Nix, which defeats cross-splicing and
+    // drags a host-platform rustc into the closure under pkgsCross.
+    if let Some(rustc_path) = find_rustc_prefix_on_path() {
+        flags.push(format!("--remap-path-prefix={rustc_path}=/rustc"));
     }
 
     if config.is_cross_compiling() {

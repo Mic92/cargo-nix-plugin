@@ -62,11 +62,6 @@ pub struct BuildConfig {
     #[serde(default = "default_colors")]
     pub colors: String,
 
-    /// Store path of rustc — used for --remap-path-prefix to avoid
-    /// leaking rust-src into the closure.
-    #[serde(default)]
-    pub rustc_path: String,
-
     /// Flattened transitive dep lib-output store paths.
     #[serde(default)]
     pub complete_deps: Vec<String>,
