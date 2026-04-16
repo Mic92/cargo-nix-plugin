@@ -314,7 +314,19 @@ pub fn resolve_from_lockfile(
         // Feature rules in Cargo.toml reference the *local* dep key
         // (e.g. rustls says `webpki/ring`, not `rustls-webpki/ring`;
         // `pki-types/std` with a dash, not the rustc-normalized form).
-        let deps_iter = info.dependencies.iter().chain(&info.build_dependencies);
+        //
+        // Dev-deps participate in feature unification too (cargo's
+        // resolver v2 only splits host/target, not dev/normal within
+        // one unit). They're empty for everything but workspace
+        // members, so this only widens the graph at the roots — but
+        // that's exactly where it matters: a dev-only dep like
+        // ripgrep's serde_derive is otherwise unreachable, leaving its
+        // syn/proc-macro2 with zero features and 400+ compile errors.
+        let deps_iter = info
+            .dependencies
+            .iter()
+            .chain(&info.build_dependencies)
+            .chain(&info.dev_dependencies);
         let optional_deps = deps_iter
             .clone()
             .filter(|d| d.optional)
@@ -374,6 +386,7 @@ pub fn resolve_from_lockfile(
         };
         info.dependencies.retain(&keep);
         info.build_dependencies.retain(&keep);
+        info.dev_dependencies.retain(&keep);
     }
 
     // Determine root
@@ -1643,6 +1656,102 @@ source = "git+https://example.com/repo?branch=main#abc123"
         // Feature resolution propagated through the git crate: consumer
         // pulls foo's default → "a".
         assert!(foo.resolved_default_features.contains(&"a".to_string()));
+    }
+
+    /// Dev-dependencies of workspace members participate in feature
+    /// resolution. ripgrep's only edge to serde_derive is a dev-dep; if we
+    /// skip dev-deps when seeding the feature resolver, serde_derive (and
+    /// transitively syn/proc-macro2/quote) end up with `resolvedFeatures =
+    /// []` and fail to compile with hundreds of E0432/E0433. The dev-dep
+    /// itself is also dropped from the .buildTests drv because optional-dep
+    /// pruning sees it as unreached.
+    #[test]
+    fn dev_deps_participate_in_feature_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(ws.join("devonly/src")).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["devonly"]
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+[dev-dependencies]
+devonly = { path = "devonly", features = ["extra"] }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("devonly/Cargo.toml"),
+            r#"
+[package]
+name = "devonly"
+version = "0.1.0"
+[features]
+default = ["a"]
+a = []
+extra = []
+"#,
+        )
+        .unwrap();
+
+        let cargo_lock = r#"
+version = 4
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = ["devonly"]
+[[package]]
+name = "devonly"
+version = "0.1.0"
+"#;
+
+        let target = TargetDescription {
+            name: "x86_64-unknown-linux-gnu".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            vendor: "unknown".into(),
+            env: "gnu".into(),
+            family: vec!["unix".into()],
+            pointer_width: "64".into(),
+            endian: "little".into(),
+            unix: true,
+            windows: false,
+            extra_cfgs: vec![],
+        };
+
+        let result = resolve_from_lockfile(
+            ws,
+            cargo_lock,
+            tmp.path(),
+            "sparse+https://index.crates.io/",
+            &target,
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let root = &result.crates["root"];
+        assert_eq!(root.dev_dependencies.len(), 1, "root → devonly dev-dep edge");
+        assert_eq!(root.dev_dependencies[0].package_id, "devonly");
+
+        // Reached via dev-dep edge: root requested features=["extra"] plus
+        // default-features=true → default → a. devonly is a workspace
+        // member too so it's also seeded with ["default"], but "extra"
+        // can ONLY arrive via root's dev-dep edge.
+        let devonly = &result.crates["devonly"];
+        for f in ["default", "a", "extra"] {
+            assert!(
+                devonly.resolved_default_features.contains(&f.to_string()),
+                "devonly missing feature {f}: {:?}",
+                devonly.resolved_default_features
+            );
+        }
     }
 
     /// Missing gitSources entry surfaces a clear error naming the key.

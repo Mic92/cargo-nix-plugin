@@ -345,29 +345,22 @@ let
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
       mkCrates =
-        variant:
+        libOnly:
         lib.mapAttrs (
-          packageId: _: buildCrate variant self cratePkgs buildRustCrate packageId
+          packageId: _: buildCrate libOnly self cratePkgs buildRustCrate packageId
         ) resolved.crates;
 
       self = {
         # With-bins variant — exposed via workspaceMembers.<name>.build so
         # the top-level crate builds its binaries. Its deps still resolve via
         # cratesLibOnly (see depDrv below), so only the root pays the bin cost.
-        crates = mkCrates { libOnly = false; };
+        crates = mkCrates false;
         # Lib-only variant — what dep edges resolve to. Cargo doesn't expose
         # a dependency's binaries to downstream crates (nightly artifact-deps /
         # CARGO_BIN_FILE_* aren't wired by buildRustCrate anyway). Shares the
         # same transitive closure with `crates` because both variants route dep
         # edges through here — no duplicate work, just different roots.
-        cratesLibOnly = mkCrates { libOnly = true; };
-        # With-bins + dev-deps variant — exposed via
-        # workspaceMembers.<name>.buildTests. Dev-deps resolve through
-        # cratesLibOnly like normal deps, so the cached closure is shared.
-        # Only workspace members carry non-empty devDependencies (the
-        # resolver drops them for registry/git crates), so this is a no-op
-        # root for everything else.
-        cratesWithDevDeps = mkCrates { libOnly = false; withDevDeps = true; };
+        cratesLibOnly = mkCrates true;
         target = makeDefaultTarget cratePkgs.stdenv.hostPlatform;
         build = mkBuiltByPackageIdByPkgs cratePkgs.buildPackages;
       };
@@ -375,8 +368,7 @@ let
     self;
 
   buildCrate =
-    { libOnly, withDevDeps ? false }:
-    self: cratePkgs: buildRustCrate: packageId:
+    libOnly: self: cratePkgs: buildRustCrate: packageId:
     let
       crateInfo = resolved.crates.${packageId};
 
@@ -407,18 +399,24 @@ let
       # Dependencies are already filtered by the Rust resolver:
       # platform-incompatible and inactive optional deps are excluded.
       # Dev-dependencies share the DepInfo shape (packageId/name/rename),
-      # so they go through the same depDrv path and merge into
-      # `dependencies` — buildRustCrate has no separate dev-dep input,
-      # and an extra --extern on the lib/bin compile is benign.
+      # so they go through the same depDrv path. They are passed to
+      # buildRustCrate as a separate `devDependencies` list and only
+      # folded into the rustc --extern set when buildTests = true, so
+      # `.build` drvs stay byte-identical to a no-dev-deps build while
+      # `.build.override { buildTests = true; }` (and `.buildTests`)
+      # both see them.
       normalDeps = crateInfo.dependencies or [ ];
       devDeps = crateInfo.devDependencies or [ ];
-      depEdges = normalDeps ++ lib.optionals withDevDeps devDeps;
-      dependencies = map depDrv depEdges;
+      dependencies = map depDrv normalDeps;
+      # Only the with-bins root ever has buildTests flipped on; lib-only
+      # is the dep-edge variant where tests are never built, so don't
+      # drag dev-dep drvs into its closure even lazily.
+      devDependencies = if libOnly then [ ] else map depDrv devDeps;
       buildDependencies = map buildDepDrv (crateInfo.buildDependencies or [ ]);
 
       # Renames: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
       renamedDeps = lib.filter (d: d ? rename && d.rename != null) (
-        depEdges ++ (crateInfo.buildDependencies or [ ])
+        normalDeps ++ devDeps ++ (crateInfo.buildDependencies or [ ])
       );
       crateRenames =
         let
@@ -439,7 +437,7 @@ let
         sha256 = crateInfo.sha256 or "";
         src = crateSrc;
         authors = crateInfo.authors or [ ];
-        inherit dependencies buildDependencies crateRenames;
+        inherit dependencies devDependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
       }
@@ -552,7 +550,7 @@ let
             isWorkspaceMember = lib.elem packageId workspaceMemberIds;
           in
           if isWorkspaceMember then
-            buildCrate { libOnly = false; } self cratePkgs clippyBuildRustCrate packageId
+            buildCrate false self cratePkgs clippyBuildRustCrate packageId
           else
             normalBuilt.cratesLibOnly.${packageId}
         ) resolved.crates;
@@ -573,9 +571,10 @@ in
   workspaceMembers = lib.mapAttrs (name: packageId: {
     inherit packageId;
     build = builtCrates.crates.${packageId};
-    # Compile (and run) tests with dev-dependencies wired in. Prefer this
-    # over `.build.override { buildTests = true; }`, which lacks dev-deps.
-    buildTests = builtCrates.cratesWithDevDeps.${packageId}.override {
+    # Compile tests with dev-dependencies wired in. Equivalent to
+    # `.build.override { buildTests = true; }` — buildRustCrate folds
+    # devDependencies into the --extern set only when buildTests is set.
+    buildTests = builtCrates.crates.${packageId}.override {
       buildTests = true;
     };
   }) resolved.workspaceMembers;

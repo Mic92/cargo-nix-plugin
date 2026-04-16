@@ -35,6 +35,12 @@ lib.makeOverridable
       buildInputs,
       crateOverrides,
       dependencies,
+      # Dev-dependencies are only added to the rustc command line when
+      # buildTests = true. Kept separate so `.override { buildTests = true; }`
+      # on a derivation that was instantiated without tests can still pull
+      # them in, while the non-test drv stays byte-identical (laziness keeps
+      # the list unevaluated when buildTests = false).
+      devDependencies,
       buildDependencies,
       crateRenames,
       capLints,
@@ -56,7 +62,7 @@ lib.makeOverridable
 
     let
       crate = crate_ // (lib.attrByPath [ crate_.crateName ] (attr: { }) crateOverrides crate_);
-      dependencies_ = dependencies;
+      dependencies_ = dependencies ++ lib.optionals buildTests devDependencies;
       buildDependencies_ = buildDependencies;
       # Every input-`crate` key we re-derive below. Anything not listed
       # leaks through extraDerivationAttrs and //-overrides the computed
@@ -71,6 +77,7 @@ lib.makeOverridable
         "libPath"
         "buildDependencies"
         "dependencies"
+        "devDependencies"
         "features"
         "crateRenames"
         "crateName"
@@ -379,6 +386,7 @@ lib.makeOverridable
     preInstall = crate_.preInstall or "";
     postInstall = crate_.postInstall or "";
     dependencies = crate_.dependencies or [ ];
+    devDependencies = crate_.devDependencies or [ ];
     buildDependencies = crate_.buildDependencies or [ ];
     capLints = "allow";
     crateRenames = crate_.crateRenames or { };
