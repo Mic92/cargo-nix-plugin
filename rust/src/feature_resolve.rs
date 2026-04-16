@@ -100,7 +100,9 @@ pub fn resolve_features(
                 .filter_map(|f| pkg.features.get(f))
                 .flatten()
             {
-                if let Some(rest) = rule.strip_prefix(&strong).or_else(|| rule.strip_prefix(&weak))
+                if let Some(rest) = rule
+                    .strip_prefix(&strong)
+                    .or_else(|| rule.strip_prefix(&weak))
                 {
                     dep_features.push(rest.to_string());
                 }
@@ -487,7 +489,10 @@ mod tests {
         );
 
         let result = resolve_features(&packages, &[("root".into(), vec!["default".into()])]);
-        let leaf = result.features.get("leaf").expect("leaf reached via dev-dep");
+        let leaf = result
+            .features
+            .get("leaf")
+            .expect("leaf reached via dev-dep");
         for f in ["default", "d", "extra"] {
             assert!(leaf.contains(f), "leaf missing {f}: {leaf:?}");
         }
