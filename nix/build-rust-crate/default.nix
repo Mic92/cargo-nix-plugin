@@ -66,6 +66,7 @@ lib.makeOverridable
         "nativeBuildInputs"
         "buildInputs"
         "crateBin"
+        "crateLib"
         "libName"
         "libPath"
         "buildDependencies"
@@ -119,7 +120,10 @@ lib.makeOverridable
       capLints_ = capLints;
       buildTests_ = buildTests;
 
-      crateBin' = crate.crateBin or [ ];
+      # crate2nix used to passthrough `crateBin = [{name = ",";}];` as a
+      # sentinel for "has [[bin]] but it's empty" — strip those so the
+      # builder doesn't try to compile a binary literally named `,`.
+      crateBin' = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
       hasCrateBin' = crate ? crateBin;
 
     in
