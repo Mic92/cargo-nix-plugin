@@ -40,6 +40,12 @@ pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
 /// own `lib_name`. Deps that built no linkable artifact are skipped.
 pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(deps.len() * 2);
+    // `noprelude:` is gated behind -Z unstable-options; emit it once if any
+    // dep is a stdlib crate (custom-std / build-std workflows).
+    if deps.iter().any(|d| d.stdlib) {
+        out.push("-Z".into());
+        out.push("unstable-options".into());
+    }
     for dep in deps {
         let m = super::config::CrateMetadata::load(&dep.lib_out).unwrap_or_else(|| {
             panic!(
@@ -63,8 +69,9 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
         } else {
             &m.lib_name
         };
+        let prefix = if dep.stdlib { "noprelude:" } else { "" };
         out.push("--extern".into());
-        out.push(format!("{name}={dir}/{art}"));
+        out.push(format!("{prefix}{name}={dir}/{art}"));
     }
     out
 }

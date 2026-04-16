@@ -153,6 +153,12 @@ pub struct DepExtern {
     pub extern_name: String,
     #[serde(default)]
     pub is_rename: bool,
+    /// Set for `core`/`alloc`/`std` deps in custom-std builds. Emits
+    /// `--extern noprelude:NAME=…` (and `-Z unstable-options`) so the
+    /// crate's own prelude resolution isn't perturbed — cargo's
+    /// `compiler/mod.rs` does the same for `dep.is_std()`.
+    #[serde(default)]
+    pub stdlib: bool,
     /// Store path of the dep's lib output, where `crate-metadata.json` lives.
     pub lib_out: String,
 }

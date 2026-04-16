@@ -188,6 +188,7 @@ lib.makeOverridable
                 in {
                   externName = if r != null then r else normalizeName dep.libName;
                   isRename = r != null;
+                  stdlib = dep.stdlib or false;
                   libOut = toString (lib.getLib dep);
                 };
             in
