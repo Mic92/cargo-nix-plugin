@@ -1,5 +1,37 @@
 use std::io::IsTerminal;
 use std::process::Command;
+use std::sync::OnceLock;
+
+/// Process-wide jobserver sized to NIX_BUILD_CORES. cargo creates one
+/// (build_runner/mod.rs) and passes it to every rustc and build-script via
+/// `inherit_jobserver`, which sets CARGO_MAKEFLAGS and arranges fd
+/// inheritance. rustc uses it to throttle parallel codegen/LLVM; cc-rs uses
+/// it to parallelise C compiles (falling back to NUM_JOBS otherwise). We run
+/// one child at a time, so the child gets the full token budget.
+fn jobserver() -> Option<&'static jobserver::Client> {
+    static JS: OnceLock<Option<jobserver::Client>> = OnceLock::new();
+    JS.get_or_init(|| {
+        let n: usize = std::env::var("NIX_BUILD_CORES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1);
+        // Non-fatal: rustc/cc-rs degrade gracefully without a jobserver.
+        let c = jobserver::Client::new(n).ok()?;
+        // Match cargo (build_runner/mod.rs): one token is this process, so a
+        // child sees its implicit token plus n-1 in the pipe = n parallel.
+        c.acquire_raw().ok()?;
+        Some(c)
+    })
+    .as_ref()
+}
+
+/// Set CARGO_MAKEFLAGS and mark the jobserver fds inheritable on `cmd`.
+pub fn inherit_jobserver(cmd: &mut Command) {
+    if let Some(c) = jobserver() {
+        c.configure(cmd);
+    }
+}
 
 pub fn echo_colored(msg: &str) {
     if std::io::stderr().is_terminal() {
@@ -22,6 +54,7 @@ pub fn echo_cmd(cmd: &Command) {
 
 /// Run a command, printing it if verbose. Exits on failure.
 pub fn run_cmd(cmd: &mut Command, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+    inherit_jobserver(cmd);
     if verbose {
         echo_cmd(cmd);
     }

@@ -165,7 +165,13 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         // Run build script
         let mut cmd = Command::new(format!("{build_dir}/build_script_build"));
+        // cargo custom_build.rs: remove RUSTFLAGS and the wrapper vars so
+        // compile-probes inside build.rs (autocfg, anyhow, proc-macro2)
+        // invoke a bare rustc.
         cmd.env_remove("RUSTFLAGS");
+        cmd.env_remove("RUSTC_WRAPPER");
+        cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
+        super::util::inherit_jobserver(&mut cmd);
         cmd.env("RUST_BACKTRACE", "1");
         cmd.envs(&env);
         // cargo exposes the target linker to build scripts so cc-rs / probes

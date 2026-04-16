@@ -14,13 +14,19 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
         Err(_) => BuildScriptOutputs::default(),
     };
 
+    // Export only what cargo's compilation.rs::fill_env sets on rustc:
+    // CARGO, CARGO_MANIFEST_{DIR,PATH}, CARGO_PKG_*, plus the per-target
+    // CARGO_CRATE_NAME / CARGO_BIN_NAME / CARGO_PRIMARY_PACKAGE /
+    // CARGO_TARGET_TMPDIR / CARGO_BIN_EXE_* added later in build_bin/cmd.
+    // CARGO_CFG_* / CARGO_FEATURE_* / CARGO_ENCODED_RUSTFLAGS /
+    // CARGO_MANIFEST_LINKS are build-script-only (custom_build.rs); leaking
+    // them to rustc is harmless today but diverges from cargo's contract.
     for (k, v) in build_env(config, "") {
-        // Only the CARGO* subset of build_env is set on rustc invocations;
-        // TARGET/HOST/PROFILE/DEBUG/OPT_LEVEL/NUM_JOBS/RUSTC/RUSTDOC are
-        // build-script-only (cargo's compilation.rs vs custom_build.rs).
-        // `CARGO` itself (no underscore) is set on every process cargo
-        // spawns — real tests do `Command::new(env!("CARGO"))`.
-        if k == "CARGO" || k.starts_with("CARGO_") {
+        let pass = k == "CARGO"
+            || k == "CARGO_CRATE_NAME"
+            || k.starts_with("CARGO_PKG_")
+            || k.starts_with("CARGO_MANIFEST_") && k != "CARGO_MANIFEST_LINKS";
+        if pass {
             std::env::set_var(k, v);
         }
     }
