@@ -2,6 +2,13 @@ use std::io::IsTerminal;
 use std::process::Command;
 use std::sync::OnceLock;
 
+/// `std::env::set_var` wrapper. Safe: this builder is single-threaded at
+/// every call site (no Rayon, jobserver init is later, Command::spawn is the
+/// only fork and happens after env setup).
+pub fn set_var(k: impl AsRef<std::ffi::OsStr>, v: impl AsRef<std::ffi::OsStr>) {
+    unsafe { std::env::set_var(k, v) };
+}
+
 /// Process-wide jobserver sized to NIX_BUILD_CORES, passed to every rustc /
 /// build-script via CARGO_MAKEFLAGS (matches cargo build_runner/mod.rs).
 fn jobserver() -> Option<&'static jobserver::Client> {
@@ -70,7 +77,7 @@ pub fn remove_object_files(dir: &str) -> Result<(), Box<dyn std::error::Error>> 
             let path = entry.path();
             if path.is_dir() {
                 walk(&path)?;
-            } else if path.extension().map(|e| e == "o").unwrap_or(false) {
+            } else if path.extension().is_some_and(|e| e == "o") {
                 std::fs::remove_file(&path)?;
             }
         }

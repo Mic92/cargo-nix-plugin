@@ -222,7 +222,7 @@ impl BuildConfig {
                         .join(" "),
                     _ => continue,
                 };
-                std::env::set_var(k, s);
+                super::util::set_var(k, s);
             }
         }
 

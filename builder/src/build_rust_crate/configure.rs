@@ -105,8 +105,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(script) = build_script {
         echo_colored(&format!("Building {script} ({})", config.lib_name));
 
-        let build_dir = format!("target/build/{}", config.crate_name);
-        let out_dir = format!("target/build/{}.out", config.crate_name);
+        let build_dir = format!("target/build/{n}", n = config.crate_name);
+        let out_dir = format!("target/build/{n}.out", n = config.crate_name);
         fs::create_dir_all(&build_dir)?;
         fs::create_dir_all(&out_dir)?;
         let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
@@ -136,7 +136,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             cmd.args(["-C", "debuginfo=2"]);
         }
-        cmd.args(["-C", &format!("codegen-units={}", config.codegen_units)]);
+        cmd.args(["-C", &format!("codegen-units={n}", n = config.codegen_units)]);
         for o in &config.extra_rustc_opts_for_build_rs {
             cmd.arg(o);
         }
@@ -401,12 +401,12 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
 
     for line in stdout.lines() {
         let line = line.trim();
-        let (new_syntax, d) = match line.strip_prefix("cargo::") {
-            Some(d) => (true, d),
-            None => match line.strip_prefix("cargo:") {
-                Some(d) => (false, d),
-                None => continue,
-            },
+        let (new_syntax, d) = if let Some(d) = line.strip_prefix("cargo::") {
+            (true, d)
+        } else if let Some(d) = line.strip_prefix("cargo:") {
+            (false, d)
+        } else {
+            continue;
         };
         let d = d.trim_end();
 
@@ -416,13 +416,11 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             let mut iter = v.split_whitespace();
             while let Some(tok) = iter.next() {
                 let (flag, val) = if tok == "-L" || tok == "-l" {
-                    match iter.next() {
-                        Some(v) => (tok, v.to_string()),
-                        None => {
-                            rustc_flags.push(tok.to_string());
-                            continue;
-                        }
-                    }
+                    let Some(v) = iter.next() else {
+                        rustc_flags.push(tok.to_string());
+                        continue;
+                    };
+                    (tok, v.to_string())
                 } else if let Some(v) = tok.strip_prefix("-L") {
                     ("-L", v.to_string())
                 } else if let Some(v) = tok.strip_prefix("-l") {
@@ -499,7 +497,7 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             }
         } else if let Some(msg) = d.strip_prefix("warning=") {
             eprintln!("\x1b[0;1;33mwarning\x1b[0m: {msg}");
-        } else if let (true, Some(msg)) = (new_syntax, d.strip_prefix("error=")) {
+        } else if new_syntax && let Some(msg) = d.strip_prefix("error=") {
             // Old-syntax `cargo:error=` is metadata, not fatal (cargo only
             // recognises `cargo::error=`).
             eprintln!("\x1b[0;1;31merror\x1b[0m: {msg}");
@@ -519,10 +517,8 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
         let line = line.trim();
         // cargo:: → only `metadata=` is data; cargo: → anything not in RESERVED_PREFIXES.
         let d = if let Some(rest) = line.strip_prefix("cargo::") {
-            match rest.strip_prefix("metadata=") {
-                Some(kv) => kv,
-                None => continue,
-            }
+            let Some(kv) = rest.strip_prefix("metadata=") else { continue };
+            kv
         } else if let Some(rest) = line.strip_prefix("cargo:") {
             if rest.starts_with("rustc-")
                 || rest.starts_with("warning=")
@@ -634,24 +630,13 @@ fn find_matching_cargo_toml(crate_name: &str) -> Result<String, Box<dyn std::err
         let Ok(doc) = toml::from_str::<toml::Value>(&content) else {
             continue;
         };
-        if let Some(name) = doc
-            .get("package")
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
+        let Some(name_val) = doc.get("package").and_then(|p| p.get("name")) else {
+            continue;
+        };
+        if name_val.as_str() == Some(crate_name)
+            || (name_val.is_table() && find_workspace_name(&entry).as_deref() == Some(crate_name))
         {
-            if name == crate_name {
-                return Ok(entry.parent().unwrap().to_string_lossy().into_owned());
-            }
-        }
-        // workspace inheritance: name = { workspace = true }
-        if let Some(name_val) = doc.get("package").and_then(|p| p.get("name")) {
-            if name_val.is_table() {
-                if let Some(ws_name) = find_workspace_name(&entry) {
-                    if ws_name == crate_name {
-                        return Ok(entry.parent().unwrap().to_string_lossy().into_owned());
-                    }
-                }
-            }
+            return Ok(entry.parent().unwrap().to_string_lossy().into_owned());
         }
     }
     Err(format!("No matching Cargo.toml found for {crate_name}").into())
@@ -701,16 +686,12 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         .filter(|&any| any)
         .and_then(|_| find_workspace_package(Path::new("Cargo.toml")));
     let pkg_str = |key: &str| -> Option<String> {
-        let v = pkg.and_then(|p| p.get(key))?;
+        let v = pkg?.get(key)?;
         if let Some(s) = v.as_str() {
             return Some(s.to_string());
         }
         if is_ws_inherit(v) {
-            return ws_pkg
-                .as_ref()
-                .and_then(|w| w.get(key))
-                .and_then(|w| w.as_str())
-                .map(String::from);
+            return Some(ws_pkg.as_ref()?.get(key)?.as_str()?.to_string());
         }
         None
     };
@@ -752,10 +733,8 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
 
     // CARGO_PKG_* recovery for lockfile-resolve mode (resolver emits "").
     let fill = |dst: &mut String, key: &str| {
-        if dst.is_empty() {
-            if let Some(v) = pkg_str(key) {
-                *dst = v;
-            }
+        if dst.is_empty() && let Some(v) = pkg_str(key) {
+            *dst = v;
         }
     };
     fill(&mut config.crate_description, "description");
@@ -782,14 +761,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     if config.build.is_empty() {
         match pkg.and_then(|p| p.get("build")) {
             Some(v) if v.as_bool() == Some(false) => config.build = "false".into(),
-            Some(v) => {
-                if let Some(p) = v.as_str() {
-                    if Path::new(p).exists() {
-                        config.build = p.to_string();
-                    }
-                }
+            Some(v) if v.as_str().is_some_and(|p| Path::new(p).exists()) => {
+                config.build = v.as_str().unwrap().to_string();
             }
-            None => {}
+            _ => {}
         }
     }
 
@@ -798,10 +773,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     let lib = doc.get("lib");
 
     // lib.path (fnv etc. use `path = "lib.rs"`; resolve_lib_path only falls back to src/lib.rs).
-    if config.lib_path.is_empty() {
-        if let Some(p) = lib.and_then(|l| l.get("path")).and_then(|v| v.as_str()) {
-            config.lib_path = p.to_string();
-        }
+    if config.lib_path.is_empty()
+        && let Some(p) = lib.and_then(|l| l.get("path")).and_then(|v| v.as_str())
+    {
+        config.lib_path = p.to_string();
     }
 
     // lib.name: drv defaults libName=crateName, so treat that as unset.
@@ -925,7 +900,7 @@ pub fn inferred_bins(crate_name: &str) -> Vec<(String, String)> {
             if fname.starts_with('.') {
                 continue;
             }
-            if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            if path.extension().is_some_and(|e| e == "rs") {
                 let name = path.file_stem().unwrap().to_string_lossy().to_string();
                 bins.push((name, path.to_string_lossy().into_owned()));
             } else if path.is_dir() && path.join("main.rs").exists() {
@@ -947,12 +922,11 @@ fn find_workspace_package(cargo_toml: &Path) -> Option<toml::Value> {
         .to_path_buf();
     loop {
         let ws = dir.join("Cargo.toml");
-        if ws.exists() {
-            if let Ok(doc) = toml::from_str::<toml::Value>(&fs::read_to_string(&ws).ok()?) {
-                if let Some(wp) = doc.get("workspace").and_then(|w| w.get("package")) {
-                    return Some(wp.clone());
-                }
-            }
+        if ws.exists()
+            && let Ok(doc) = toml::from_str::<toml::Value>(&fs::read_to_string(&ws).ok()?)
+            && let Some(wp) = doc.get("workspace").and_then(|w| w.get("package"))
+        {
+            return Some(wp.clone());
         }
         dir = dir.parent()?.to_path_buf();
     }
@@ -1069,10 +1043,7 @@ cargo:rustc-link-arg-tests=-testflag\n";
 
     #[test]
     fn build_script_output_noop_directives_are_ignored() {
-        // examples/benches: builder never compiles those targets, so the
-        // directives are accepted and dropped (cargo would error only if the
-        // package lacks such a target). rerun-if-* are pure no-ops in a Nix
-        // sandbox. None of these may leak into rustc_flags or link fields.
+        // None of these may leak into rustc_flags or link fields.
         let stdout = "\
 cargo:rustc-link-arg-examples=-ex\n\
 cargo::rustc-link-arg-benches=-bn\n\

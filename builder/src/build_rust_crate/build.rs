@@ -4,7 +4,7 @@ use std::path::Path;
 use super::config::BuildConfig;
 use super::configure::{BuildScriptOutputs, build_env, detect_cargo_toml_info};
 use super::rustc::RustcFlags;
-use super::util::{echo_colored, remove_object_files, run_cmd};
+use super::util::{echo_colored, remove_object_files, run_cmd, set_var};
 
 /// Load build-script outputs, export CARGO_* / rustc-env, persist link flags,
 /// compute rustc flags. Caller must already be in the crate root.
@@ -22,11 +22,11 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
             || k.starts_with("CARGO_PKG_")
             || k.starts_with("CARGO_MANIFEST_") && k != "CARGO_MANIFEST_LINKS";
         if pass {
-            std::env::set_var(k, v);
+            set_var(k, v);
         }
     }
     for (k, v) in &bso.envs {
-        std::env::set_var(k, v);
+        set_var(k, v);
     }
 
     persist_bso_link_flags(&bso, config)?;
@@ -328,21 +328,11 @@ fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
             );
             continue;
         }
-        let path = t
-            .path
-            .clone()
-            .or_else(|| {
-                let flat = format!("tests/{}.rs", t.name);
-                let dir = format!("tests/{}/main.rs", t.name);
-                if Path::new(&flat).exists() {
-                    Some(flat)
-                } else if Path::new(&dir).exists() {
-                    Some(dir)
-                } else {
-                    None
-                }
-            });
-        let Some(path) = path else {
+        let Some(path) = t.path.clone().or_else(|| {
+            [format!("tests/{n}.rs", n = t.name), format!("tests/{n}/main.rs", n = t.name)]
+                .into_iter()
+                .find(|p| Path::new(p).exists())
+        }) else {
             eprintln!(
                 "\x1b[0;1;31mERROR: failed to find file for test target: {}\x1b[0m",
                 t.name
@@ -375,7 +365,7 @@ fn inferred_tests() -> Vec<(String, String)> {
         if fname.to_string_lossy().starts_with('.') {
             continue;
         }
-        if p.extension().map(|e| e == "rs").unwrap_or(false) && (p.is_file() || p.is_symlink()) {
+        if p.extension().is_some_and(|e| e == "rs") && (p.is_file() || p.is_symlink()) {
             let name = p.file_stem().unwrap().to_string_lossy().to_string();
             tests.push((name, p.to_string_lossy().into_owned()));
         } else if p.is_dir() && p.join("main.rs").exists() {

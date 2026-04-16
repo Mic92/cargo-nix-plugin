@@ -7,16 +7,11 @@ use super::configure::BuildScriptOutputs;
 /// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`,
 /// falls back to `.so`/`.dylib` (proc-macros may have either under cross).
 pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
     let stem = format!("-{metadata}.");
     let mut dylib_match = None;
-    for entry in entries.flatten() {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(ext) = name.rsplit_once(&stem).map(|(_, e)| e) else {
-            continue;
-        };
+        let Some((_, ext)) = name.rsplit_once(&stem) else { continue };
         match ext {
             "rlib" => return Some(entry.path().to_string_lossy().to_string()),
             "so" | "dylib" => {
@@ -40,7 +35,7 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
     for dep in deps {
         let m = super::config::CrateMetadata::load(&dep.lib_out).unwrap_or_else(|| {
             panic!(
-                "missing {}/crate-metadata.json \u{2014} dep not built by this buildRustCrate?",
+                "missing {}/crate-metadata.json — dep not built by this buildRustCrate?",
                 dep.lib_out
             )
         });
@@ -78,15 +73,9 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
 }
 
 fn find_rustc_prefix_on_path() -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let cand = dir.join("rustc");
-        if cand.is_file() {
-            // dir is .../bin; we want the store-path prefix above it.
-            return dir.parent().map(|p| p.to_string_lossy().into_owned());
-        }
-    }
-    None
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .find(|dir| dir.join("rustc").is_file())
+        .and_then(|bin| Some(bin.parent()?.to_string_lossy().into_owned()))
 }
 
 /// Compute base rustc flags: opt level, codegen-units, remap, linker,
@@ -102,7 +91,7 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     }
     flags.extend_from_slice(&[
         "-C".into(),
-        format!("codegen-units={}", config.codegen_units),
+        format!("codegen-units={n}", n = config.codegen_units),
     ]);
 
     if let Ok(build_top) = std::env::var("NIX_BUILD_TOP") {
@@ -162,11 +151,12 @@ impl RustcFlags {
             base.extend_from_slice(&["--extern".into(), "proc_macro".into()]);
         }
 
+        let m = &config.metadata;
         let meta = vec![
             "-C".into(),
-            format!("metadata={}", config.metadata),
+            format!("metadata={m}"),
             "-C".into(),
-            format!("extra-filename=-{}", config.metadata),
+            format!("extra-filename=-{m}"),
         ];
 
         let mut link = Vec::new();
@@ -183,7 +173,7 @@ impl RustcFlags {
         }
 
         let out_dir = if !bso.build_out_dir.is_empty() {
-            std::env::set_var("OUT_DIR", &bso.build_out_dir);
+            super::util::set_var("OUT_DIR", &bso.build_out_dir);
             vec!["-L".into(), bso.build_out_dir.clone()]
         } else {
             vec![]

@@ -150,11 +150,7 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
 }
 
 fn copy_if_nonempty(src: &str, dst: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if Path::new(src).exists()
-        && fs::read_to_string(src)
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-    {
+    if fs::read_to_string(src).is_ok_and(|s| !s.is_empty()) {
         if let Some(parent) = Path::new(dst).parent() {
             fs::create_dir_all(parent)?;
         }
