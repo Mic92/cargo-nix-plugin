@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use super::config::BuildConfig;
+use super::config::{BuildConfig, CrateMetadata};
 use super::configure::enter_crate_root;
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,11 +19,48 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(out)?;
     fs::create_dir_all(lib_out)?;
 
-    // Copy env
+    // Legacy DEP_* env file (kept for crateOverrides that sed/read it).
     copy_if_nonempty("target/env", &format!("{lib_out}/env"))?;
 
     // Copy link flags for downstream crates
     copy_if_nonempty("target/link.final", &format!("{lib_out}/lib/link"))?;
+
+    // Collect lib artifact filenames for crate-metadata.json. Anything with
+    // the metadata-hash suffix that rustc emitted under target/lib.
+    let mut artifacts = Vec::new();
+    if let Ok(entries) = fs::read_dir("target/lib") {
+        let stem = format!("-{metadata}.");
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.contains(&stem) && !name.ends_with(".d") {
+                artifacts.push(name);
+            }
+        }
+        artifacts.sort();
+    }
+
+    // Canonical machine-readable manifest. Dependents read this for
+    // --extern name/path and DEP_* env; the legacy text/shell files above
+    // are kept only for override compatibility.
+    let links_vars: std::collections::BTreeMap<String, String> =
+        fs::read_to_string("target/links-vars.json")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+    let cm = CrateMetadata {
+        lib_name: config.lib_name_normalized(),
+        metadata: metadata.clone(),
+        crate_types: config.crate_type.clone(),
+        proc_macro: config.crate_type.iter().any(|t| t == "proc-macro"),
+        artifacts,
+        links: config.crate_links.clone(),
+        links_vars,
+    };
+    fs::create_dir_all(lib_out)?;
+    fs::write(
+        format!("{lib_out}/crate-metadata.json"),
+        serde_json::to_string_pretty(&cm)?,
+    )?;
 
     // Copy lib artifacts + create un-hashed symlinks for .so/.dylib
     if dir_has_files("target/lib") {

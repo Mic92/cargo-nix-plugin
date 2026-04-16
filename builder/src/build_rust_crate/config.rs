@@ -1,5 +1,5 @@
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
 /// Top-level config deserialized from NIX_ATTRS_JSON_FILE (__structuredAttrs).
 ///
@@ -116,13 +116,45 @@ pub struct CrateBin {
     pub required_features: Vec<String>,
 }
 
+/// Per-crate metadata installed to `$lib/crate-metadata.json`. This is the
+/// canonical machine-readable description of what a crate built; dependents
+/// read it instead of scraping `$lib/lib/` filenames or parsing shell env
+/// files. Legacy `$lib/lib/link` (text) and `$lib/env` (shell) are still
+/// written and read alongside it so existing crateOverrides that append to /
+/// sed those files keep working.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrateMetadata {
+    pub lib_name: String,
+    pub metadata: String,
+    pub crate_types: Vec<String>,
+    pub proc_macro: bool,
+    /// Installed artifact filenames under `$lib/lib/` (rlib/so/dylib/dll).
+    pub artifacts: Vec<String>,
+    /// `package.links` key, empty if none.
+    #[serde(default)]
+    pub links: String,
+    /// `cargo:KEY=VAL` / `cargo::metadata=KEY=VAL` pairs exposed to
+    /// dependents as `DEP_<links>_<KEY>`.
+    #[serde(default)]
+    pub links_vars: BTreeMap<String, String>,
+}
+
+impl CrateMetadata {
+    pub fn load(dep_lib_out: &str) -> Option<Self> {
+        let s = std::fs::read_to_string(format!("{dep_lib_out}/crate-metadata.json")).ok()?;
+        serde_json::from_str(&s).ok()
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DepExtern {
     pub extern_name: String,
-    pub metadata: String,
     #[serde(default)]
     pub is_rename: bool,
+    /// Store path of the dep's lib output, where `crate-metadata.json` lives.
+    pub lib_out: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

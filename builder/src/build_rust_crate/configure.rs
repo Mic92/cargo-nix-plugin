@@ -59,16 +59,17 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut link_final = link.clone();
     let mut build_link = BTreeSet::new();
 
+    // DEP_<links>_* env from each dep is `source`d by the stdenv shell
+    // (default.nix configurePhase) before this process starts, so it's
+    // already in our environment and will be inherited by build_script_build.
     for path in &config.complete_deps {
         let lib = format!("{path}/lib");
         symlink_libs(&lib, "target/deps")?;
-        source_env(path)?;
         collect_link_flags(&lib, &mut link, &mut link_final)?;
     }
     for path in &config.complete_build_deps {
         let lib = format!("{path}/lib");
         symlink_libs(&lib, "target/buildDeps")?;
-        source_env(path)?;
         if let Ok(c) = fs::read_to_string(format!("{lib}/link")) {
             build_link.extend(c.lines().filter(|l| !l.is_empty()).map(String::from));
         }
@@ -147,6 +148,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         cmd.env_remove("RUSTFLAGS");
         cmd.env("RUST_BACKTRACE", "1");
         cmd.envs(&env);
+        cmd.envs(dep_links_env(config));
         for f in &config.crate_features {
             cmd.env(
                 format!("CARGO_FEATURE_{}", f.replace('-', "_").to_uppercase()),
@@ -177,7 +179,16 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             "target/build-script-outputs.json",
             serde_json::to_string_pretty(&bso)?,
         )?;
-        write_dep_env_file(config, &stdout)?;
+        // Persist links metadata for both the JSON manifest (assembled at
+        // install time) and the legacy `$lib/env` shell file (overrides like
+        // ibverbs-sys still `sed` it in preFixup).
+        if !config.crate_links.is_empty() {
+            let vars = parse_links_metadata(&stdout);
+            if !vars.is_empty() {
+                fs::write("target/links-vars.json", serde_json::to_string(&vars)?)?;
+                write_legacy_dep_env(config, &vars)?;
+            }
+        }
     }
 
     Ok(())
@@ -402,18 +413,10 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
     bso
 }
 
-fn write_dep_env_file(
-    config: &BuildConfig,
-    stdout: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Cargo only emits DEP_* when the crate declares `links`.
-    if config.crate_links.is_empty() {
-        return Ok(());
-    }
-    let links_upper = config.crate_links.replace('-', "_").to_uppercase();
-    let ver_safe = config.crate_version.replace(['.', '+', '-'], "_");
-    let mut lines = Vec::new();
-
+/// Extract `cargo:KEY=VAL` / `cargo::metadata=KEY=VAL` pairs from build-script
+/// stdout. Cargo only exposes these to dependents when `package.links` is set.
+fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
+    let mut vars = BTreeMap::new();
     for line in stdout.lines() {
         let line = line.trim();
         // New-syntax: only `cargo::metadata=KEY=VALUE` is metadata; any other
@@ -435,17 +438,78 @@ fn write_dep_env_file(
             continue;
         }
         if let Some((k, v)) = d.split_once('=') {
-            let key = k.replace('-', "_").to_uppercase();
-            lines.push(format!("export DEP_{links_upper}_{key}=\"{v}\""));
-            lines.push(format!(
-                "export DEP_{links_upper}_{ver_safe}_{key}=\"{v}\""
-            ));
+            vars.insert(k.into(), v.into());
         }
     }
-    if !lines.is_empty() {
-        fs::write("target/env", lines.join("\n"))?;
-    }
+    vars
+}
+
+/// Legacy `$lib/env` writer. The builder itself no longer reads this file
+/// (DEP_* comes from `crate-metadata.json`), but crateOverrides in the wild
+/// `sed`/`grep` it in preFixup, so keep emitting it byte-compatibly.
+fn write_legacy_dep_env(
+    config: &BuildConfig,
+    vars: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let links_upper = config.crate_links.replace('-', "_").to_uppercase();
+    let lines: Vec<String> = vars
+        .iter()
+        .map(|(k, v)| {
+            let key = k.replace('-', "_").to_uppercase();
+            let q = format!("'{}'", v.replace('\'', r"'\''"));
+            format!("export DEP_{links_upper}_{key}={q}")
+        })
+        .collect();
+    fs::write("target/env", lines.join("\n"))?;
     Ok(())
+}
+
+/// Collect `DEP_<links>_<KEY>` env for this crate's build script from every
+/// dep's `crate-metadata.json`. Cargo restricts this to *direct* normal deps
+/// (custom_build.rs:540-560); we still read the full transitive closure for
+/// parity with the old shell builder.
+///
+/// `$dep/env` is layered on top *only* so crateOverrides that `sed` it (e.g.
+/// ibverbs-sys remapping sandbox paths) keep working until migrated to edit
+/// the JSON. Once those are gone, drop the second loop and
+/// `write_legacy_dep_env`.
+fn dep_links_env(config: &BuildConfig) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    for path in config
+        .complete_deps
+        .iter()
+        .chain(&config.complete_build_deps)
+    {
+        let Some(m) = super::config::CrateMetadata::load(path) else {
+            continue;
+        };
+        if m.links.is_empty() {
+            continue;
+        }
+        let links = m.links.replace('-', "_").to_uppercase();
+        for (k, v) in &m.links_vars {
+            let key = k.replace('-', "_").to_uppercase();
+            env.insert(format!("DEP_{links}_{key}"), v.clone());
+        }
+        // Override-authored env file, applied after JSON so its edits win.
+        if let Ok(content) = fs::read_to_string(format!("{path}/env")) {
+            for line in content.lines() {
+                let Some(rest) = line.strip_prefix("export ") else {
+                    continue;
+                };
+                let Some((k, v)) = rest.split_once('=') else {
+                    continue;
+                };
+                let v = v
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                    .map(|s| s.replace(r"'\''", "'"))
+                    .unwrap_or_else(|| v.trim_matches('"').to_string());
+                env.insert(k.to_string(), v);
+            }
+        }
+    }
+    env
 }
 
 fn symlink_libs(lib_dir: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -460,20 +524,6 @@ fn symlink_libs(lib_dir: &str, target: &str) -> Result<(), Box<dyn std::error::E
             let dst = Path::new(target).join(path.file_name().unwrap());
             let _ = fs::remove_file(&dst);
             symlink(&path, &dst)?;
-        }
-    }
-    Ok(())
-}
-
-fn source_env(dep_path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let env_path = PathBuf::from(dep_path).join("env");
-    if let Ok(content) = fs::read_to_string(&env_path) {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("export ") {
-                if let Some((k, v)) = rest.split_once('=') {
-                    std::env::set_var(k, v.trim_matches('"'));
-                }
-            }
         }
     }
     Ok(())

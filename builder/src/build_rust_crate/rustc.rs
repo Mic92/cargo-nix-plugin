@@ -32,34 +32,39 @@ pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     dylib_match
 }
 
-/// Recover the lib name from an artifact path like
-/// `target/deps/libdebug_unreachable-fb242b6c18.rlib`. The metadata hash
-/// uniquely identifies the dep, so the filename is the authoritative source
-/// for the `--extern` key when `[lib].name` differs from the package name
-/// (sparse index can't tell us; the dep's own build named the file).
-fn lib_name_from_path(path: &str, metadata: &str) -> Option<String> {
-    let file = std::path::Path::new(path).file_name()?.to_str()?;
-    let stem = file.strip_prefix("lib")?.rsplit_once('.')?.0;
-    stem.strip_suffix(&format!("-{metadata}")).map(String::from)
-}
-
 /// Compute `--extern NAME=PATH` pairs for a set of deps whose artifacts have
-/// been symlinked into `dir`. The NAME is taken from the artifact filename
-/// (build-time truth) unless the dep was explicitly aliased via
-/// `crateRenames`, in which case the alias wins.
+/// been symlinked into `dir`. Reads each dep's installed
+/// `crate-metadata.json` for the authoritative lib name and artifact
+/// filename (so `.dll`/non-standard extensions just work). NAME is the
+/// alias when the dep was renamed via `crateRenames`, otherwise the dep's
+/// own `lib_name`. Deps that built no linkable artifact are skipped.
 pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(deps.len() * 2);
     for dep in deps {
-        let path = find_by_metadata(dir, &dep.metadata)
-            .unwrap_or_else(|| format!("{dir}/lib{}-{}.rlib", dep.extern_name, dep.metadata));
+        let m = super::config::CrateMetadata::load(&dep.lib_out).unwrap_or_else(|| {
+            panic!(
+                "missing {}/crate-metadata.json \u{2014} dep not built by this buildRustCrate?",
+                dep.lib_out
+            )
+        });
+        // Prefer rlib for Rust-to-Rust linkage; otherwise the first
+        // artifact (proc-macro/dylib). Empty when the dep is bin-only or
+        // staticlib-only — nothing to `--extern`.
+        let Some(art) = m
+            .artifacts
+            .iter()
+            .find(|a| a.ends_with(".rlib"))
+            .or(m.artifacts.first())
+        else {
+            continue;
+        };
         let name = if dep.is_rename {
-            dep.extern_name.clone()
+            &dep.extern_name
         } else {
-            lib_name_from_path(&path, &dep.metadata)
-                .unwrap_or_else(|| dep.extern_name.clone())
+            &m.lib_name
         };
         out.push("--extern".into());
-        out.push(format!("{name}={path}"));
+        out.push(format!("{name}={dir}/{art}"));
     }
     out
 }

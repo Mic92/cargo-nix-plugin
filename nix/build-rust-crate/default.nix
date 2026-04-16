@@ -187,8 +187,8 @@ lib.makeOverridable
                 let r = findRename dep;
                 in {
                   externName = if r != null then r else normalizeName dep.libName;
-                  metadata = dep.metadata;
                   isRename = r != null;
+                  libOut = toString (lib.getLib dep);
                 };
             in
             {
