@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -54,10 +54,16 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(dir)?;
     }
 
-    // Symlink deps, collect link flags
-    let mut link = BTreeSet::from_iter(config.extra_link_flags.iter().cloned());
+    // Symlink deps, collect link flags. Each entry is one *line* (may contain
+    // spaces, e.g. "-L /nix/store/..."); ordering is preserved and only whole
+    // duplicate lines are dropped — token-level reordering would break
+    // `extraLinkFlags = [ "-L" "${zlib}/lib" ]`.
+    let mut link: Vec<String> = Vec::new();
+    if !config.extra_link_flags.is_empty() {
+        link.push(config.extra_link_flags.join(" "));
+    }
     let mut link_final = link.clone();
-    let mut build_link = BTreeSet::new();
+    let mut build_link: Vec<String> = Vec::new();
 
     // DEP_<links>_* env from each dep is `source`d by the stdenv shell
     // (default.nix configurePhase) before this process starts, so it's
@@ -71,7 +77,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         let lib = format!("{path}/lib");
         symlink_libs(path, "target/buildDeps")?;
         if let Ok(c) = fs::read_to_string(format!("{lib}/link")) {
-            build_link.extend(c.lines().filter(|l| !l.is_empty()).map(String::from));
+            for l in c.lines().filter(|l| !l.is_empty()) {
+                if !build_link.iter().any(|e| e == l) {
+                    build_link.push(l.into());
+                }
+            }
         }
     }
 
@@ -80,10 +90,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     if !build_link.is_empty() {
         write_flags("target/link.build", &build_link)?;
     }
-    fs::write(
-        "target/link_",
-        link.into_iter().collect::<Vec<_>>().join(" "),
-    )?;
+    fs::write("target/link_", link.join(" "))?;
 
     let build_script = match config.build.as_str() {
         "false" => None,
@@ -531,20 +538,24 @@ fn symlink_libs(dep_out: &str, target: &str) -> Result<(), Box<dyn std::error::E
 
 fn collect_link_flags(
     lib_dir: &str,
-    link: &mut BTreeSet<String>,
-    link_final: &mut BTreeSet<String>,
+    link: &mut Vec<String>,
+    link_final: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(content) = fs::read_to_string(format!("{lib_dir}/link")) {
         for line in content.lines().filter(|l| !l.is_empty()) {
-            link.insert(line.into());
-            link_final.insert(line.into());
+            if !link.iter().any(|e| e == line) {
+                link.push(line.into());
+            }
+            if !link_final.iter().any(|e| e == line) {
+                link_final.push(line.into());
+            }
         }
     }
     Ok(())
 }
 
-fn write_flags(path: &str, flags: &BTreeSet<String>) -> Result<(), Box<dyn std::error::Error>> {
-    let mut content = flags.iter().cloned().collect::<Vec<_>>().join("\n");
+fn write_flags(path: &str, flags: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut content = flags.join("\n");
     if !content.is_empty() {
         content.push('\n');
     }
