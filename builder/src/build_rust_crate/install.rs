@@ -19,9 +19,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(out)?;
     fs::create_dir_all(lib_out)?;
 
-    // Legacy DEP_* env file (kept for crateOverrides that sed/read it).
-    copy_if_nonempty("target/env", &format!("{lib_out}/env"))?;
-
     // Copy link flags for downstream crates
     copy_if_nonempty("target/link.final", &format!("{lib_out}/lib/link"))?;
 
@@ -42,11 +39,50 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Canonical machine-readable manifest. Dependents read this for
     // --extern name/path and DEP_* env; the legacy text/shell files above
     // are kept only for override compatibility.
+    //
+    // links_vars (cargo:KEY=VAL from build.rs) frequently contain absolute
+    // paths under the sandbox OUT_DIR (e.g. cargo:root=/build/.../target/build/
+    // <crate>.out). build.rs ran with OUT_DIR=<cwd>/target/build/<crate>.out,
+    // and we copy target/build/* → $lib_out/lib/* below, so remap those
+    // prefixes to the installed location — same transformation
+    // persist_bso_link_flags applies to link-search paths. Without this,
+    // downstream DEP_<LINKS>_* env (DEP_PROTOBUF_SRC_ROOT, DEP_AWS_LC_*_INCLUDE,
+    // DEP_ZSTD_ROOT, ...) point at the dead sandbox.
+    //
+    // Note: bso.envs (cargo:rustc-env=KEY=VAL) are intentionally NOT remapped.
+    // Those are consumed by *this* crate's own lib/bin compile while the
+    // sandbox path is still live. If the crate then bakes the path into the
+    // rlib via env!() (protobuf-src's INSTALL_DIR), that is unfixable here and
+    // needs an upstream crateOverride.
+    let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
+    let sandbox_build = format!("{cwd}/target/build/");
+    let installed_build = format!("{lib_out}/lib/");
     let links_vars: std::collections::BTreeMap<String, String> =
         fs::read_to_string("target/links-vars.json")
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+    let links_vars: std::collections::BTreeMap<String, String> = links_vars
+        .into_iter()
+        .map(|(k, v)| (k, v.replace(&sandbox_build, &installed_build)))
+        .collect();
+
+    // Legacy DEP_* env file (kept for crateOverrides that sed/read it).
+    // Regenerated here from the remapped vars rather than copied from
+    // target/env so it carries store paths, not sandbox paths.
+    if !config.crate_links.is_empty() && !links_vars.is_empty() {
+        let links_upper = config.crate_links.replace('-', "_").to_uppercase();
+        let lines: Vec<String> = links_vars
+            .iter()
+            .map(|(k, v)| {
+                let key = k.replace('-', "_").to_uppercase();
+                let q = format!("'{}'", v.replace('\'', r"'\''"));
+                format!("export DEP_{links_upper}_{key}={q}")
+            })
+            .collect();
+        fs::write(format!("{lib_out}/env"), lines.join("\n"))?;
+    }
+
     let cm = CrateMetadata {
         lib_name: config.lib_name_normalized(),
         metadata: metadata.clone(),

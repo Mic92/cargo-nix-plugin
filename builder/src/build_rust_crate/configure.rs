@@ -206,14 +206,13 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             "target/build-script-outputs.json",
             serde_json::to_string_pretty(&bso)?,
         )?;
-        // Persist links metadata for both the JSON manifest (assembled at
-        // install time) and the legacy `$lib/env` shell file (overrides like
-        // ibverbs-sys still `sed` it in preFixup).
+        // Persist links metadata for the JSON manifest. install.rs reads
+        // this back, remaps sandbox OUT_DIR paths to the installed store
+        // path, and writes both crate-metadata.json and the legacy `$lib/env`.
         if !config.crate_links.is_empty() {
             let vars = parse_links_metadata(&stdout);
             if !vars.is_empty() {
                 fs::write("target/links-vars.json", serde_json::to_string(&vars)?)?;
-                write_legacy_dep_env(config, &vars)?;
             }
         }
     }
@@ -558,35 +557,14 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
     vars
 }
 
-/// Legacy `$lib/env` writer. The builder itself no longer reads this file
-/// (DEP_* comes from `crate-metadata.json`), but crateOverrides in the wild
-/// `sed`/`grep` it in preFixup, so keep emitting it byte-compatibly.
-fn write_legacy_dep_env(
-    config: &BuildConfig,
-    vars: &BTreeMap<String, String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let links_upper = config.crate_links.replace('-', "_").to_uppercase();
-    let lines: Vec<String> = vars
-        .iter()
-        .map(|(k, v)| {
-            let key = k.replace('-', "_").to_uppercase();
-            let q = format!("'{}'", v.replace('\'', r"'\''"));
-            format!("export DEP_{links_upper}_{key}={q}")
-        })
-        .collect();
-    fs::write("target/env", lines.join("\n"))?;
-    Ok(())
-}
-
 /// Collect `DEP_<links>_<KEY>` env for this crate's build script from every
 /// dep's `crate-metadata.json`. Cargo restricts this to *direct* normal deps
 /// (custom_build.rs:540-560); we still read the full transitive closure for
 /// parity with the old shell builder.
 ///
-/// `$dep/env` is layered on top *only* so crateOverrides that `sed` it (e.g.
-/// ibverbs-sys remapping sandbox paths) keep working until migrated to edit
-/// the JSON. Once those are gone, drop the second loop and
-/// `write_legacy_dep_env`.
+/// `$dep/env` is layered on top *only* so crateOverrides that `sed` it keep
+/// working until migrated to edit the JSON. Once those are gone, drop the
+/// second loop and the legacy env writer in install.rs.
 fn dep_links_env(config: &BuildConfig) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for path in config
