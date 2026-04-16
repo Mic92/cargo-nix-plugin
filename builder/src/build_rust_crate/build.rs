@@ -107,33 +107,17 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let bb = BinBuilder { config, flags: &flags, lib_extern: &lib_extern, test_env: &test_env };
+
     // Bins are always real executables (even under buildTests) so
     // CARGO_BIN_EXE_<name> resolves; matches cargo's default test set.
     for (name, path) in &bins {
-        build_bin(
-            config,
-            &flags,
-            &lib_extern,
-            name,
-            path,
-            BinKind::Bin,
-            false,
-            &test_env,
-        )?;
+        bb.build(name, path, BinKind::Bin)?;
     }
 
     if config.build_tests {
         for (name, path, harness) in resolve_tests(config) {
-            build_bin(
-                config,
-                &flags,
-                &lib_extern,
-                &name,
-                &path,
-                BinKind::Test { harness },
-                true,
-                &test_env,
-            )?;
+            bb.build(&name, &path, BinKind::Test { harness })?;
         }
     }
 
@@ -198,62 +182,56 @@ enum BinKind {
     Test { harness: bool },
 }
 
-#[allow(clippy::too_many_arguments)] // two parallel branches each added one
-fn build_bin(
-    config: &BuildConfig,
-    flags: &RustcFlags,
-    lib_extern: &[String],
-    name: &str,
-    path: &str,
-    kind: BinKind,
-    test: bool,
-    test_env: &[(String, String)],
-) -> Result<(), Box<dyn std::error::Error>> {
-    echo_colored(&format!(
-        "Building {}{name}",
-        if test { "test " } else { "" }
-    ));
-    let out_dir = match kind {
-        BinKind::Bin => "target/bin",
-        BinKind::Test { .. } => "target/tests",
-    };
-    fs::create_dir_all(out_dir)?;
+struct BinBuilder<'a> {
+    config: &'a BuildConfig,
+    flags: &'a RustcFlags,
+    lib_extern: &'a [String],
+    test_env: &'a [(String, String)],
+}
 
-    // Route build-script link-args by target kind (rustc-link-arg-bins/-bin=NAME
-    // vs rustc-link-arg-tests; the universal one is folded into both).
-    let mut extra = match kind {
-        BinKind::Bin => {
-            let mut v = flags.bso_bins.clone();
-            if let Some(per) = flags.bso_bin.get(name) {
-                v.extend_from_slice(per);
+impl BinBuilder<'_> {
+    fn build(&self, name: &str, path: &str, kind: BinKind) -> Result<(), Box<dyn std::error::Error>> {
+        let test = matches!(kind, BinKind::Test { .. });
+        echo_colored(&format!("Building {}{name}", if test { "test " } else { "" }));
+        let out_dir = if test { "target/tests" } else { "target/bin" };
+        fs::create_dir_all(out_dir)?;
+
+        // Route build-script link-args by target kind (rustc-link-arg-bins/-bin=NAME
+        // vs rustc-link-arg-tests; the universal one is folded into both).
+        let mut extra = match kind {
+            BinKind::Bin => {
+                let mut v = self.flags.bso_bins.clone();
+                if let Some(per) = self.flags.bso_bin.get(name) {
+                    v.extend_from_slice(per);
+                }
+                v
             }
-            v
+            BinKind::Test { .. } => self.flags.bso_tests.clone(),
+        };
+        extra.extend_from_slice(self.lib_extern);
+        let crate_name_ = name.replace('-', "_");
+        let harness = !matches!(kind, BinKind::Test { harness: false });
+        let mut cmd = self.flags.cmd(&crate_name_, path, out_dir, &["bin"], &extra, test, harness);
+        cmd.env("CARGO_BIN_NAME", name);
+        if test {
+            for (k, v) in self.test_env {
+                cmd.env(k, v);
+            }
         }
-        BinKind::Test { .. } => flags.bso_tests.clone(),
-    };
-    extra.extend_from_slice(lib_extern);
-    let crate_name_ = name.replace('-', "_");
-    let harness = !matches!(kind, BinKind::Test { harness: false });
-    let mut cmd = flags.cmd(&crate_name_, path, out_dir, &["bin"], &extra, test, harness);
-    cmd.env("CARGO_BIN_NAME", name);
-    if test {
-        for (k, v) in test_env {
-            cmd.env(k, v);
-        }
-    }
-    run_cmd(&mut cmd, config.verbose)?;
+        run_cmd(&mut cmd, self.config.verbose)?;
 
-    // Rename binary if dash vs underscore mismatch
-    if crate_name_ != name {
-        let wasm = format!("{out_dir}/{crate_name_}.wasm");
-        let bin = format!("{out_dir}/{crate_name_}");
-        if Path::new(&wasm).exists() {
-            fs::rename(&wasm, format!("{out_dir}/{name}.wasm"))?;
-        } else if Path::new(&bin).exists() {
-            fs::rename(&bin, format!("{out_dir}/{name}"))?;
+        // Rename binary if dash vs underscore mismatch
+        if crate_name_ != name {
+            let wasm = format!("{out_dir}/{crate_name_}.wasm");
+            let bin = format!("{out_dir}/{crate_name_}");
+            if Path::new(&wasm).exists() {
+                fs::rename(&wasm, format!("{out_dir}/{name}.wasm"))?;
+            } else if Path::new(&bin).exists() {
+                fs::rename(&bin, format!("{out_dir}/{name}"))?;
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
