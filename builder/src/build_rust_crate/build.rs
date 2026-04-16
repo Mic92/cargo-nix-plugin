@@ -15,7 +15,12 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
     };
 
     for (k, v) in build_env(config, "") {
-        if k.starts_with("CARGO_") {
+        // Only the CARGO* subset of build_env is set on rustc invocations;
+        // TARGET/HOST/PROFILE/DEBUG/OPT_LEVEL/NUM_JOBS/RUSTC/RUSTDOC are
+        // build-script-only (cargo's compilation.rs vs custom_build.rs).
+        // `CARGO` itself (no underscore) is set on every process cargo
+        // spawns — real tests do `Command::new(env!("CARGO"))`.
+        if k == "CARGO" || k.starts_with("CARGO_") {
             std::env::set_var(k, v);
         }
     }
