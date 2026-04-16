@@ -57,10 +57,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(dir)?;
     }
 
-    // Symlink deps, collect link flags. Each entry is one *line* (may contain
-    // spaces, e.g. "-L /nix/store/..."); ordering is preserved and only whole
-    // duplicate lines are dropped — token-level reordering would break
-    // `extraLinkFlags = [ "-L" "${zlib}/lib" ]`.
+    // Link flags: one entry = one line (may contain spaces); preserve order,
+    // dedupe whole lines only.
     let mut link: Vec<String> = Vec::new();
     if !config.extra_link_flags.is_empty() {
         link.push(config.extra_link_flags.join(" "));
@@ -68,9 +66,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut link_final = link.clone();
     let mut build_link: Vec<String> = Vec::new();
 
-    // DEP_<links>_* env from each dep is `source`d by the stdenv shell
-    // (default.nix configurePhase) before this process starts, so it's
-    // already in our environment and will be inherited by build_script_build.
     for path in &config.complete_deps {
         let lib = format!("{path}/lib");
         symlink_libs(path, "target/deps")?;
@@ -105,8 +100,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut hook_out_dir = String::new();
     let mut hook_bso_envs: BTreeMap<String, String> = BTreeMap::new();
 
-    // Computed once (spawns `rustc --print=cfg`); only OUT_DIR varies between
-    // the build-script env and the hook-env snapshot below.
     let base_env = build_env(config, "");
 
     if let Some(script) = build_script {
@@ -120,8 +113,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         let mut env = base_env.clone();
         env.insert("OUT_DIR".into(), abs_out_dir.clone());
 
-        // Compile build script. CARGO_PKG_* / CARGO_MANIFEST_DIR are needed at
-        // *compile* time too: build.rs commonly does `env!("CARGO_PKG_NAME")`.
+        // Compile build script (CARGO_PKG_* needed at compile time too for env!()).
         let mut cmd = Command::new("rustc");
         cmd.envs(&env);
         cmd.env("CARGO_CRATE_NAME", "build_script_build");
@@ -163,19 +155,16 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         cmd.arg("--color").arg(&config.colors);
         run_cmd(&mut cmd, config.verbose)?;
 
-        // Run build script
+        // Run build script. Match cargo custom_build.rs: scrub RUSTFLAGS/wrappers
+        // so compile-probes (autocfg etc.) invoke a bare rustc.
         let mut cmd = Command::new(format!("{build_dir}/build_script_build"));
-        // cargo custom_build.rs: remove RUSTFLAGS and the wrapper vars so
-        // compile-probes inside build.rs (autocfg, anyhow, proc-macro2)
-        // invoke a bare rustc.
         cmd.env_remove("RUSTFLAGS");
         cmd.env_remove("RUSTC_WRAPPER");
         cmd.env_remove("RUSTC_WORKSPACE_WRAPPER");
         super::util::inherit_jobserver(&mut cmd);
         cmd.env("RUST_BACKTRACE", "1");
         cmd.envs(&env);
-        // cargo exposes the target linker to build scripts so cc-rs / probes
-        // can link test objects when cross-compiling (custom_build.rs:338).
+        // RUSTC_LINKER for cc-rs / cross probes (custom_build.rs:338).
         if let Some(l) = &config.host_platform.linker_path {
             cmd.env("RUSTC_LINKER", l);
         }
@@ -190,7 +179,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.verbose {
             super::util::echo_cmd(&cmd);
         }
-        // Stream stderr; only stdout carries `cargo:` directives.
         cmd.stderr(std::process::Stdio::inherit());
         cmd.stdout(std::process::Stdio::piped());
         let mut child = cmd.spawn()?;
@@ -212,9 +200,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             "target/build-script-outputs.json",
             serde_json::to_string_pretty(&bso)?,
         )?;
-        // Persist links metadata for the JSON manifest. install.rs reads
-        // this back, remaps sandbox OUT_DIR paths to the installed store
-        // path, and writes both crate-metadata.json and the legacy `$lib/env`.
+        // install.rs remaps these to store paths and writes crate-metadata.json + legacy env.
         if !config.crate_links.is_empty() {
             let vars = parse_links_metadata(&stdout);
             if !vars.is_empty() {
@@ -223,10 +209,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Snapshot the cargo env (CARGO_*, OUT_DIR, TARGET/HOST/PROFILE, plus
-    // build-script rustc-env) so stdenv hooks can `source target/hook-env`.
-    // The old shell builder exported these in the phase shell; the binary's
-    // env is process-local.
+    // Snapshot cargo env so stdenv hooks can `source target/hook-env`
+    // (the binary's env is process-local).
     let mut hook_env = base_env;
     if hook_out_dir.is_empty() {
         hook_env.remove("OUT_DIR");
@@ -333,10 +317,7 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         ),
         ("RUSTC".into(), "rustc".into()),
         ("RUSTDOC".into(), "rustdoc".into()),
-        // Cargo always sets this (empty when no RUSTFLAGS). We deliberately
-        // do NOT forward the builder's own opt-level/--edition/linker flags
-        // here: those are per-crate, and build.rs compile-probes (anyhow,
-        // proc-macro2, eyre, …) re-invoke rustc with this variable verbatim.
+        // Always set, always empty: per-crate flags must not leak into build.rs probes.
         ("CARGO_ENCODED_RUSTFLAGS".into(), String::new()),
         (
             "CARGO_CRATE_NAME".into(),
@@ -369,14 +350,9 @@ fn parse_version(v: &str) -> (String, String, String, String) {
     )
 }
 
-/// `CARGO_CFG_*` env derived from `rustc --print cfg --target <host>`,
-/// matching cargo: multi-valued keys (target_feature, target_has_atomic, …)
-/// are comma-joined; bare keys (unix, windows, …) get an empty string. This
-/// avoids second-guessing target_env/target_family from Nix's `parsed.abi`
-/// (which yields "unknown" on Darwin/wasm where rustc reports "").
+/// `CARGO_CFG_*` env from `rustc --print cfg --target <host>` (multi-valued
+/// keys comma-joined, bare keys empty), avoiding Nix's `parsed.abi` guesswork.
 fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
-    // Called at most twice per process (always with the same triple), so no
-    // caching — a static OnceLock would be wrong if the triple ever differed.
     let o = Command::new("rustc")
         .arg("--print=cfg")
         .arg("--target")
@@ -435,10 +411,8 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
         let d = d.trim_end();
 
         if let Some(v) = d.strip_prefix("rustc-flags=") {
-            // Mirror cargo's parse_rustc_flags: only -L/-l are accepted and are
-            // routed to link_search/link_libs so they propagate to dependents
-            // via $lib/lib/link. Anything else cargo rejects; we keep it in
-            // rustc_flags for back-compat.
+            // cargo parse_rustc_flags: only -L/-l accepted, routed to link
+            // fields; anything else kept in rustc_flags for back-compat.
             let mut iter = v.split_whitespace();
             while let Some(tok) = iter.next() {
                 let (flag, val) = if tok == "-L" || tok == "-l" {
@@ -493,10 +467,7 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             || d.starts_with("rustc-link-arg-benches=")
             || d.starts_with("rerun-if-")
         {
-            // Accepted but inert: this builder never compiles example/bench
-            // targets, and rerun-if-* is meaningless in a content-addressed
-            // sandbox. Listed explicitly so the cargo-parity audit can cite a
-            // line (custom_build.rs RESERVED_PREFIXES).
+            // Accepted but inert (no example/bench targets; rerun-if-* meaningless in sandbox).
         } else if let Some(v) = d.strip_prefix("rustc-link-lib=") {
             bso.link_libs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-link-search=") {
@@ -546,16 +517,13 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
     let mut vars = BTreeMap::new();
     for line in stdout.lines() {
         let line = line.trim();
-        // New-syntax: only `cargo::metadata=KEY=VALUE` is metadata; any other
-        // `cargo::` directive is a (possibly unknown) instruction, not data.
+        // cargo:: → only `metadata=` is data; cargo: → anything not in RESERVED_PREFIXES.
         let d = if let Some(rest) = line.strip_prefix("cargo::") {
             match rest.strip_prefix("metadata=") {
                 Some(kv) => kv,
                 None => continue,
             }
         } else if let Some(rest) = line.strip_prefix("cargo:") {
-            // Old-syntax: skip cargo's RESERVED_PREFIXES (custom_build.rs:817).
-            // `error=` is *not* reserved there, so `cargo:error=..` is metadata.
             if rest.starts_with("rustc-")
                 || rest.starts_with("warning=")
                 || rest.starts_with("rerun-if-")
@@ -573,14 +541,9 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
     vars
 }
 
-/// Collect `DEP_<links>_<KEY>` env for this crate's build script from every
-/// dep's `crate-metadata.json`. Cargo restricts this to *direct* normal deps
-/// (custom_build.rs:540-560); we still read the full transitive closure for
-/// parity with the old shell builder.
-///
-/// `$dep/env` is layered on top *only* so crateOverrides that `sed` it keep
-/// working until migrated to edit the JSON. Once those are gone, drop the
-/// second loop and the legacy env writer in install.rs.
+/// `DEP_<links>_<KEY>` env from each dep's `crate-metadata.json` (full
+/// transitive closure, like the old shell builder; cargo only does direct).
+/// `$dep/env` overlaid afterwards so crateOverrides that sed it still win.
 fn dep_links_env(config: &BuildConfig) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for path in config
@@ -621,11 +584,7 @@ fn dep_links_env(config: &BuildConfig) -> BTreeMap<String, String> {
 }
 
 fn symlink_libs(dep_out: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // crate-metadata.json lists every rustc artifact the dep installed
-    // (filtered by `-{metadata}.` at install time), so this is
-    // extension-agnostic: .rlib/.so/.dylib/.dll and anything rustc invents
-    // next all link. Every dep is built by this same builder, so the file
-    // is authoritative — no need to scan `$lib/lib`.
+    // crate-metadata.json is the authoritative artifact list (extension-agnostic).
     let Some(m) = super::config::CrateMetadata::load(dep_out) else {
         return Ok(());
     };
@@ -714,18 +673,9 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
     Ok(out)
 }
 
-/// Auto-detect crate metadata from Cargo.toml when the resolver could not
-/// supply it at eval time. Replaces the old read-crate-info binary.
-///
-/// In lockfile-resolve mode the sparse index carries no `[lib]` table, so for
-/// registry crates `libPath` / `libName` / `crateType` / `procMacro` arrive as
-/// their derivation defaults. Those defaults are wrong for crates like fnv
-/// (`path = "lib.rs"`), new_debug_unreachable (`name = "debug_unreachable"`)
-/// or anything with `crate-type = ["cdylib","rlib"]`. We learn the truth here
-/// from the unpacked source and overwrite the config in place.
-///
-/// Runs at the top of every phase (each is a separate process). cwd is
-/// already the crate root, set once by the shell from `locate`'s output.
+/// Fill in `libPath`/`libName`/`crateType`/edition/etc from Cargo.toml when
+/// the resolver couldn't supply them (lockfile mode has no `[lib]` table).
+/// Runs at the top of every phase; cwd is already the crate root.
 pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     if !Path::new("Cargo.toml").exists() {
         return;
@@ -740,10 +690,8 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
 
     let pkg = doc.get("package");
 
-    // Resolve `key = { workspace = true }` against the nearest ancestor
-    // [workspace.package] table. Registry tarballs are normalised so this only
-    // matters for path/git deps, but those are exactly the ones we now reach
-    // via find_matching_cargo_toml.
+    // Resolve `{ workspace = true }` against the nearest [workspace.package]
+    // (only matters for path/git deps; registry tarballs are normalised).
     let ws_pkg: Option<toml::Value> = pkg
         .map(|p| {
             p.as_table()
@@ -767,8 +715,6 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         None
     };
 
-    // package.autobins / autotests / autolib (default true). Read before bin
-    // discovery so resolve_bins/resolve_lib_path can honour them.
     let pkg_bool = |key: &str| pkg.and_then(|p| p.get(key)).and_then(|v| v.as_bool());
     if let Some(b) = pkg_bool("autobins") {
         config.autobins = b;
@@ -780,7 +726,6 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         config.autolib = b;
     }
 
-    // Auto-detect edition
     let has_edition =
         |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
     if let Some(ed) = pkg.and_then(|p| p.get("edition")).and_then(|v| {
@@ -805,8 +750,7 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // CARGO_PKG_* recovery for lockfile-resolve mode, where the resolver
-    // emits empty strings for everything but name/version.
+    // CARGO_PKG_* recovery for lockfile-resolve mode (resolver emits "").
     let fill = |dst: &mut String, key: &str| {
         if dst.is_empty() {
             if let Some(v) = pkg_str(key) {
@@ -849,26 +793,18 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // Fallback for path/git deps; registry crates get this from the index.
     fill(&mut config.crate_links, "links");
 
-    // ---- [lib] table -----------------------------------------------------
     let lib = doc.get("lib");
 
-    // lib.path: fnv/fxhash/serde_derive_internals/document-features all use
-    // a non-default `path = "lib.rs"`. resolve_lib_path() only falls back to
-    // src/lib.rs, so without this the build phase silently emits no rlib and
-    // every dependent dies with "extern location for X does not exist".
+    // lib.path (fnv etc. use `path = "lib.rs"`; resolve_lib_path only falls back to src/lib.rs).
     if config.lib_path.is_empty() {
         if let Some(p) = lib.and_then(|l| l.get("path")).and_then(|v| v.as_str()) {
             config.lib_path = p.to_string();
         }
     }
 
-    // lib.name: new_debug_unreachable→debug_unreachable, rustls-webpki→webpki,
-    // utf-8→utf8. The drv defaults libName to crateName (hyphens kept), so we
-    // treat that as "unset" and consult Cargo.toml. The dependent recovers the
-    // real `--extern` key from the artifact filename (see dep_extern_args).
+    // lib.name: drv defaults libName=crateName, so treat that as unset.
     if config.lib_name.is_empty() || config.lib_name == config.crate_name {
         config.lib_name = lib
             .and_then(|l| l.get("name"))
@@ -877,16 +813,13 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
             .unwrap_or_else(|| config.crate_name.replace('-', "_"));
     }
 
-    // lib.crate-type / proc-macro: only rewrite the eval-time default ["lib"];
-    // an explicit value from the resolver or a crateOverride wins.
+    // lib.crate-type / proc-macro: only rewrite the eval-time default ["lib"].
     if config.crate_type == ["lib"] {
         let is_proc_macro = lib
             .and_then(|l| l.get("proc-macro").or_else(|| l.get("proc_macro")))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if is_proc_macro {
-            // RustcFlags::new adds `--extern proc_macro` based on crate_type;
-            // no need to also push it into extra_rustc_opts.
             config.crate_type = vec!["proc-macro".into()];
         } else if let Some(types) = lib
             .and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type")))
@@ -896,12 +829,8 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
                 .iter()
                 .filter_map(|t| t.as_str().map(String::from))
                 .collect();
-            // Registry crates are only ever built here as dependencies, so the
-            // dependent needs an rlib regardless of what the manifest declares.
-            // Cargo does *not* do this (it omits --extern for non-linkable
-            // crate-types and lets the dependent fail to resolve); we promote
-            // because in lockfile mode we cannot tell at eval time which deps
-            // are actually linkable.
+            // Promote to rlib if not Rust-linkable: in lockfile mode we can't
+            // tell at eval time which deps need --extern (cargo just omits it).
             if !ts.iter().any(|t| t == "lib" || t == "rlib" || t == "proc-macro") {
                 ts.push("rlib".into());
             }
@@ -911,10 +840,8 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // Populate crate_bin from [[bin]] entries for required-features filtering.
-    // Only when the drv didn't set crateBin at all: an explicit `crateBin = []`
-    // (has_crate_bin = true) is how lib/default.nix suppresses bins on the
-    // lib-only dep variant, and that must not be undone here.
+    // [[bin]] entries. Skip when the drv set crateBin (an explicit `[]` is how
+    // lib/default.nix suppresses bins on the lib-only dep variant).
     if !config.has_crate_bin && config.crate_bin.is_empty() {
         if let Some(bins) = doc.get("bin").and_then(|v| v.as_array()) {
             for bin in bins {
@@ -936,10 +863,7 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
                 });
             }
         }
-        // Cargo merges explicit [[bin]] with the inferred set (autobins) and
-        // dedupes by name *or* path. We do the same so a crate that declares
-        // one [[bin]] (e.g. for required-features) still gets src/main.rs and
-        // the rest of src/bin/* built.
+        // Merge with inferred set, dedupe by name *or* path (cargo behaviour).
         if config.autobins {
             for (name, path) in inferred_bins(&config.crate_name) {
                 let taken = config.crate_bin.iter().any(|b| {
@@ -960,8 +884,6 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         }
     }
 
-    // [[test]] targets: name/path/required-features/harness. resolve_tests()
-    // merges with the inferred tests/*.rs set and honours autotests=false.
     if let Some(tests) = doc.get("test").and_then(|v| v.as_array()) {
         for t in tests {
             let Some(name) = t.get("name").and_then(|v| v.as_str()).map(String::from) else {

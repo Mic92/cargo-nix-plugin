@@ -2,10 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
 /// Top-level config deserialized from NIX_ATTRS_JSON_FILE (__structuredAttrs).
-///
-/// Field names use camelCase to match the Nix attribute names directly.
-/// Nix passes all derivation attributes as structured JSON, so we get
-/// typed access to everything without string parsing.
+/// camelCase to match Nix attribute names.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildConfig {
@@ -26,8 +23,7 @@ pub struct BuildConfig {
     pub crate_bin: Vec<CrateBin>,
     #[serde(default)]
     pub has_crate_bin: bool,
-    // Cargo's auto-target-discovery toggles. Not passed from Nix; learned
-    // from Cargo.toml in detect_cargo_toml_info, default true (2018+).
+    // Auto-target-discovery toggles, learned from Cargo.toml (not passed from Nix).
     #[serde(skip, default = "default_true")]
     pub autobins: bool,
     #[serde(skip, default = "default_true")]
@@ -137,18 +133,13 @@ pub struct CrateTest {
     pub name: String,
     pub path: Option<String>,
     pub required_features: Vec<String>,
-    /// `harness = false` → build with `--cfg test` instead of `--test`
-    /// (cargo's build_base_args: no libtest harness, target supplies its
-    /// own `main`).
+    /// `harness = false` → `--cfg test` instead of `--test` (cargo build_base_args).
     pub harness: bool,
 }
 
-/// Per-crate metadata installed to `$lib/crate-metadata.json`. This is the
-/// canonical machine-readable description of what a crate built; dependents
-/// read it instead of scraping `$lib/lib/` filenames or parsing shell env
-/// files. Legacy `$lib/lib/link` (text) and `$lib/env` (shell) are still
-/// written and read alongside it so existing crateOverrides that append to /
-/// sed those files keep working.
+/// Per-crate manifest installed to `$lib/crate-metadata.json`; dependents read
+/// this instead of scraping `$lib/lib/`. Legacy `$lib/lib/link` and `$lib/env`
+/// are still written for crateOverrides that sed them.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CrateMetadata {
@@ -180,10 +171,7 @@ pub struct DepExtern {
     pub extern_name: String,
     #[serde(default)]
     pub is_rename: bool,
-    /// Set for `core`/`alloc`/`std` deps in custom-std builds. Emits
-    /// `--extern noprelude:NAME=…` (and `-Z unstable-options`) so the
-    /// crate's own prelude resolution isn't perturbed — cargo's
-    /// `compiler/mod.rs` does the same for `dep.is_std()`.
+    /// custom-std: emit `--extern noprelude:NAME=…` (matches cargo `dep.is_std()`).
     #[serde(default)]
     pub stdlib: bool,
     /// Store path of the dep's lib output, where `crate-metadata.json` lives.
@@ -205,10 +193,9 @@ impl BuildConfig {
         let content = std::fs::read_to_string(path)?;
         let config: Self = serde_json::from_str(&content)?;
 
-        // Export ALL_CAPS scalar attrs as env vars — with __structuredAttrs
-        // these end up in JSON but not the process environment, but crate
-        // overrides setting e.g. `OPENSSL_NO_VENDOR = 1;` expect them there.
-        // Coerce bools/ints/lists like stdenv would for non-structured attrs.
+        // Export ALL_CAPS attrs as env vars: __structuredAttrs puts them in JSON
+        // but overrides like `OPENSSL_NO_VENDOR = 1;` expect them in the env.
+        // Coercion matches stdenv's non-structured behaviour.
         if let Some(obj) = serde_json::from_str::<serde_json::Value>(&content)
             .ok()
             .as_ref()

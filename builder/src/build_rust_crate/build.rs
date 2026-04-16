@@ -14,13 +14,8 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
         Err(_) => BuildScriptOutputs::default(),
     };
 
-    // Export only what cargo's compilation.rs::fill_env sets on rustc:
-    // CARGO, CARGO_MANIFEST_{DIR,PATH}, CARGO_PKG_*, plus the per-target
-    // CARGO_CRATE_NAME / CARGO_BIN_NAME / CARGO_PRIMARY_PACKAGE /
-    // CARGO_TARGET_TMPDIR / CARGO_BIN_EXE_* added later in build_bin/cmd.
-    // CARGO_CFG_* / CARGO_FEATURE_* / CARGO_ENCODED_RUSTFLAGS /
-    // CARGO_MANIFEST_LINKS are build-script-only (custom_build.rs); leaking
-    // them to rustc is harmless today but diverges from cargo's contract.
+    // Export only the subset cargo's compilation.rs::fill_env sets on rustc
+    // (CARGO_CFG_*/CARGO_FEATURE_*/CARGO_ENCODED_RUSTFLAGS are build-script-only).
     for (k, v) in build_env(config, "") {
         let pass = k == "CARGO"
             || k == "CARGO_CRATE_NAME"
@@ -30,8 +25,6 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
             std::env::set_var(k, v);
         }
     }
-    // rustc-env from build script, verbatim: scripts that need absolute paths
-    // join OUT_DIR/CARGO_MANIFEST_DIR themselves.
     for (k, v) in &bso.envs {
         std::env::set_var(k, v);
     }
@@ -58,12 +51,9 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.crate_type.iter().any(|t| t == "cdylib") {
             extra.extend_from_slice(&flags.bso_cdylib);
         }
-        // Rust `dylib` deps must be built with `-C prefer-dynamic` so std
-        // stays a dynamic reference; otherwise the downstream link fails
-        // with "cannot satisfy dependencies so `std` only shows up once".
-        // Cargo gates this on `!is_primary_package`, but in per-crate
-        // derivations every crate is "primary" — yet the only reason to
-        // build a dylib here is for a dependent to link it, so always set it.
+        // Rust `dylib` deps need `-C prefer-dynamic` or downstream links fail
+        // on duplicate std. Cargo gates on `!is_primary_package`; in per-crate
+        // derivations a dylib is always built as a dep, so always set it.
         if config.crate_type.iter().any(|t| t == "dylib") {
             extra.extend_from_slice(&["-C".into(), "prefer-dynamic".into()]);
         }
@@ -73,18 +63,13 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             config.verbose,
         )?;
 
-        // Own bins/tests link against the lib we just built — but only when
-        // the lib has a Rust-linkable crate-type (cargo's `is_linkable()`:
-        // lib | rlib | dylib | proc-macro). A cdylib-/staticlib-only lib
-        // gets no `--extern`; cargo behaves the same and the bin then sees
-        // "unresolved module" if it tries to `use` the crate.
+        // Own bins/tests link the lib only when Rust-linkable (matches
+        // cargo Target::is_linkable(): lib|rlib|dylib|proc-macro).
         let linkable = config
             .crate_type
             .iter()
             .any(|t| matches!(t.as_str(), "lib" | "rlib" | "dylib" | "proc-macro"));
         if linkable {
-            // Look it up by metadata so proc-macro / dylib-only crates (no
-            // .rlib) still work.
             let lib_artifact = super::rustc::find_by_metadata("target/lib", metadata)
                 .unwrap_or_else(|| format!("target/lib/lib{crate_name}-{metadata}.rlib"));
             lib_extern
@@ -104,8 +89,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Per-test-target env: CARGO_TARGET_TMPDIR plus CARGO_BIN_EXE_<name> for
-    // every resolved bin so integration tests can `env!("CARGO_BIN_EXE_foo")`.
     let bins = resolve_bins(config);
     let mut test_env: Vec<(String, String)> = Vec::new();
     if config.build_tests {
@@ -116,19 +99,16 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         .to_string_lossy()
         .into_owned();
         test_env.push(("CARGO_TARGET_TMPDIR".into(), tmp));
-        // Point at the *installed* location: install_tests() copies real bins
-        // to $out/bin/, and the sandbox target/bin path is gone by the time
-        // the test binary runs.
+        // Point CARGO_BIN_EXE_* at the installed $out/bin (sandbox path is
+        // gone by the time tests run).
         let out = config.out_path();
         for (name, _) in &bins {
             test_env.push((format!("CARGO_BIN_EXE_{name}"), format!("{out}/bin/{name}")));
         }
     }
 
-    // Build binaries. Even under buildTests these are built as the *real*
-    // executables (not `--test` unit-test harnesses) so that
-    // CARGO_BIN_EXE_<name> has something to point at; cargo's default test
-    // set likewise excludes per-bin unit tests.
+    // Bins are always real executables (even under buildTests) so
+    // CARGO_BIN_EXE_<name> resolves; matches cargo's default test set.
     for (name, path) in &bins {
         build_bin(
             config,
@@ -142,8 +122,6 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    // Build integration tests: explicit [[test]] merged with inferred
-    // tests/*.rs (autotests), required-features filtered, harness honoured.
     if config.build_tests {
         for (name, path, harness) in resolve_tests(config) {
             build_bin(
@@ -235,17 +213,14 @@ fn build_bin(
         "Building {}{name}",
         if test { "test " } else { "" }
     ));
-    // Keep test executables apart from real bins so install_tests() can route
-    // them to $out/tests vs $out/bin without guessing.
     let out_dir = match kind {
         BinKind::Bin => "target/bin",
         BinKind::Test { .. } => "target/tests",
     };
     fs::create_dir_all(out_dir)?;
 
-    // Route build-script link-args by target kind: rustc-link-arg-bins / -bin=NAME
-    // apply only to real [[bin]] targets, rustc-link-arg-tests only to integration
-    // tests; rustc-link-arg (folded into both) applies everywhere.
+    // Route build-script link-args by target kind (rustc-link-arg-bins/-bin=NAME
+    // vs rustc-link-arg-tests; the universal one is folded into both).
     let mut extra = match kind {
         BinKind::Bin => {
             let mut v = flags.bso_bins.clone();
@@ -258,8 +233,6 @@ fn build_bin(
     };
     extra.extend_from_slice(lib_extern);
     let crate_name_ = name.replace('-', "_");
-    // harness=false test targets supply their own main(); cargo passes
-    // `--cfg test` instead of `--test` (build_base_args).
     let harness = !matches!(kind, BinKind::Test { harness: false });
     let mut cmd = flags.cmd(&crate_name_, path, out_dir, &["bin"], &extra, test, harness);
     cmd.env("CARGO_BIN_NAME", name);
@@ -331,18 +304,14 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
             }
         }
     } else if !config.has_crate_bin && config.autobins {
-        // No explicit [[bin]] and no `crateBin` from Nix: pure inference.
-        // (When [[bin]] is present detect_cargo_toml_info already merged the
-        // inferred set into config.crate_bin, so we don't reach this branch.)
+        // No [[bin]] and no Nix crateBin: pure inference.
         bins.extend(super::configure::inferred_bins(&config.crate_name));
     }
     bins
 }
 
-/// Mirror of resolve_bins for integration tests: merge explicit `[[test]]`
-/// entries with the autotests-inferred set (tests/*.rs, tests/*/main.rs),
-/// dedupe by name or path, drop targets whose required-features aren't all
-/// enabled, and carry the per-target `harness` flag through.
+/// Merge explicit `[[test]]` with autotests-inferred targets, dedupe by
+/// name/path, filter on required-features, carry `harness` through.
 fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
     let mut tests: Vec<(String, String, bool)> = Vec::new();
     for t in &config.crate_tests {

@@ -4,12 +4,8 @@ use std::process::Command;
 use super::config::BuildConfig;
 use super::configure::BuildScriptOutputs;
 
-/// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`
-/// (Rust-to-Rust linkage), falls back to any `.so`/`.dylib` (proc-macro
-/// deps are built for the build platform, so under cross-compile their
-/// extension may differ from the host's). The eval-time `crateType` is
-/// unreliable in lockfile-resolve mode, so a caller-supplied preference
-/// would be a guess anyway.
+/// Locate a dep artifact in `dir` by its metadata hash. Prefers `.rlib`,
+/// falls back to `.so`/`.dylib` (proc-macros may have either under cross).
 pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     let Ok(entries) = fs::read_dir(dir) else {
         return None;
@@ -32,16 +28,11 @@ pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     dylib_match
 }
 
-/// Compute `--extern NAME=PATH` pairs for a set of deps whose artifacts have
-/// been symlinked into `dir`. Reads each dep's installed
-/// `crate-metadata.json` for the authoritative lib name and artifact
-/// filename (so `.dll`/non-standard extensions just work). NAME is the
-/// alias when the dep was renamed via `crateRenames`, otherwise the dep's
-/// own `lib_name`. Deps that built no linkable artifact are skipped.
+/// `--extern NAME=PATH` pairs from deps' `crate-metadata.json`. NAME is the
+/// rename alias if any, else the dep's own lib_name. Non-linkable deps skipped.
 pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<String> {
     let mut out = Vec::with_capacity(deps.len() * 2);
-    // `noprelude:` is gated behind -Z unstable-options; emit it once if any
-    // dep is a stdlib crate (custom-std / build-std workflows).
+    // `noprelude:` needs -Z unstable-options (custom-std workflows).
     if deps.iter().any(|d| d.stdlib) {
         out.push("-Z".into());
         out.push("unstable-options".into());
@@ -53,13 +44,8 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
                 dep.lib_out
             )
         });
-        // Cargo only emits `--extern` when the dep target `is_linkable()`
-        // (lib | rlib | dylib | proc-macro — see
-        // cargo/core/compiler/crate_type.rs). cdylib/staticlib produce
-        // .so/.a artifacts that carry no Rust metadata, so pointing
-        // `--extern` at them yields E0786 instead of the expected
-        // "unresolved module" — and the dep was never meant to be
-        // `use`d from Rust anyway.
+        // Matches cargo Target::is_linkable(); cdylib/staticlib carry no Rust
+        // metadata, so --extern would yield E0786.
         let linkable = m.proc_macro
             || m.crate_types
                 .iter()
@@ -67,8 +53,6 @@ pub fn dep_extern_args(deps: &[super::config::DepExtern], dir: &str) -> Vec<Stri
         if !linkable {
             continue;
         }
-        // Prefer rlib for Rust-to-Rust linkage; fall back to a shared lib
-        // (proc-macro / Rust dylib). Never pick `.a`.
         let Some(art) = m
             .artifacts
             .iter()
@@ -124,10 +108,7 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     if let Ok(build_top) = std::env::var("NIX_BUILD_TOP") {
         flags.push(format!("--remap-path-prefix={build_top}=/"));
     }
-    // Discover the (correctly spliced) rustc that stdenv put on PATH via
-    // nativeBuildInputs and strip /bin/rustc. Doing this at build time avoids
-    // string-interpolating `${rust}` in Nix, which defeats cross-splicing and
-    // drags a host-platform rustc into the closure under pkgsCross.
+    // Locate rustc via PATH (interpolating `${rust}` in Nix breaks cross-splicing).
     if let Some(rustc_path) = find_rustc_prefix_on_path() {
         flags.push(format!("--remap-path-prefix={rustc_path}=/rustc"));
     }
@@ -140,14 +121,11 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     }
 
     flags.extend_from_slice(&config.extra_rustc_opts);
-    // Runtime hook for preBuild overrides and external schedulers; the old
-    // shell builder appended $EXTRA_RUSTC_FLAGS verbatim to every rustc call.
+    // Runtime hook (preBuild overrides), like the old shell builder.
     if let Ok(v) = std::env::var("EXTRA_RUSTC_FLAGS") {
         flags.extend(v.split_whitespace().map(String::from));
     }
-    // Omit when Nix gave us no linker (bare-metal / wasm stdenvs without a
-    // CC and not using lld) — rustc's built-in default is correct there,
-    // whereas `-C linker=cc` would point at a non-existent binary.
+    // Omit when Nix supplied no linker (bare-metal/wasm); rustc's default is correct there.
     if let Some(linker) = config.host_platform.linker_path.as_deref().filter(|s| !s.is_empty()) {
         flags.extend_from_slice(&["-C".into(), format!("linker={linker}")]);
     }
@@ -174,17 +152,12 @@ impl RustcFlags {
     pub fn new(config: &BuildConfig, bso: &BuildScriptOutputs) -> Self {
         let mut base = base_rustc_flags(config);
 
-        // Dependency --extern flags. Paths and names are derived from the
-        // artifacts symlinked into target/deps (build-time truth), not the
-        // eval-time guesses.
         base.extend(dep_extern_args(&config.dep_externs, "target/deps"));
 
-        // Feature --cfg flags
         for f in &config.crate_features {
             base.extend_from_slice(&["--cfg".into(), format!("feature=\"{f}\"")]);
         }
 
-        // Proc-macro extern
         if config.crate_type.iter().any(|t| t == "proc-macro") {
             base.extend_from_slice(&["--extern".into(), "proc_macro".into()]);
         }
@@ -196,14 +169,11 @@ impl RustcFlags {
             format!("extra-filename=-{}", config.metadata),
         ];
 
-        // Link flags from target/link_
         let mut link = Vec::new();
         if let Ok(content) = fs::read_to_string("target/link_") {
             link.extend(content.split_whitespace().map(String::from));
         }
-
-        // Build script rustc flags and cfgs (link_search/link_libs are
-        // already in target/link_ via persist_bso_link_flags)
+        // bso.link_search/link_libs are already in target/link_.
         link.extend(bso.rustc_flags.split_whitespace().map(String::from));
         for cfg in &bso.cfgs {
             link.extend_from_slice(&["--cfg".into(), cfg.clone()]);
@@ -262,8 +232,6 @@ impl RustcFlags {
         harness: bool,
     ) -> Command {
         let mut cmd = Command::new("rustc");
-        // Per-target env that cargo sets on every rustc invocation. We only
-        // ever build the package itself, so CARGO_PRIMARY_PACKAGE is always 1.
         cmd.env("CARGO_CRATE_NAME", crate_name);
         cmd.env("CARGO_PRIMARY_PACKAGE", "1");
         cmd.arg("--crate-name")
@@ -280,8 +248,7 @@ impl RustcFlags {
             cmd.arg("--crate-type").arg(*ct);
         }
         if test {
-            // cargo build_base_args: harnessed test targets get `--test`
-            // (libtest main); harness=false targets only get `--cfg test`.
+            // cargo build_base_args: harness=false → `--cfg test` instead of `--test`.
             if harness {
                 cmd.arg("--test");
             } else {

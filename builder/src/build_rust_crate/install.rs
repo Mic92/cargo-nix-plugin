@@ -22,8 +22,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // Copy link flags for downstream crates
     copy_if_nonempty("target/link.final", &format!("{lib_out}/lib/link"))?;
 
-    // Collect lib artifact filenames for crate-metadata.json. Anything with
-    // the metadata-hash suffix that rustc emitted under target/lib.
+    // Lib artifact filenames for crate-metadata.json (anything with `-{metadata}.`).
     let mut artifacts = Vec::new();
     if let Ok(entries) = fs::read_dir("target/lib") {
         let stem = format!("-{metadata}.");
@@ -36,24 +35,10 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         artifacts.sort();
     }
 
-    // Canonical machine-readable manifest. Dependents read this for
-    // --extern name/path and DEP_* env; the legacy text/shell files above
-    // are kept only for override compatibility.
-    //
-    // links_vars (cargo:KEY=VAL from build.rs) frequently contain absolute
-    // paths under the sandbox OUT_DIR (e.g. cargo:root=/build/.../target/build/
-    // <crate>.out). build.rs ran with OUT_DIR=<cwd>/target/build/<crate>.out,
-    // and we copy target/build/* → $lib_out/lib/* below, so remap those
-    // prefixes to the installed location — same transformation
-    // persist_bso_link_flags applies to link-search paths. Without this,
-    // downstream DEP_<LINKS>_* env (DEP_PROTOBUF_SRC_ROOT, DEP_AWS_LC_*_INCLUDE,
-    // DEP_ZSTD_ROOT, ...) point at the dead sandbox.
-    //
-    // Note: bso.envs (cargo:rustc-env=KEY=VAL) are intentionally NOT remapped.
-    // Those are consumed by *this* crate's own lib/bin compile while the
-    // sandbox path is still live. If the crate then bakes the path into the
-    // rlib via env!() (protobuf-src's INSTALL_DIR), that is unfixable here and
-    // needs an upstream crateOverride.
+    // links_vars often point under the sandbox OUT_DIR. We copy target/build/*
+    // → $lib_out/lib/* below, so remap that prefix in DEP_<LINKS>_* values to
+    // the installed location (bso.envs are NOT remapped: they're consumed by
+    // this crate's own compile while the sandbox path is still live).
     let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
     let sandbox_build = format!("{cwd}/target/build/");
     let installed_build = format!("{lib_out}/lib/");
@@ -67,9 +52,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         .map(|(k, v)| (k, v.replace(&sandbox_build, &installed_build)))
         .collect();
 
-    // Legacy DEP_* env file (kept for crateOverrides that sed/read it).
-    // Regenerated here from the remapped vars rather than copied from
-    // target/env so it carries store paths, not sandbox paths.
+    // Legacy DEP_* env file (for crateOverrides that sed it); regenerated from remapped vars.
     if !config.crate_links.is_empty() && !links_vars.is_empty() {
         let links_upper = config.crate_links.replace('-', "_").to_uppercase();
         let lines: Vec<String> = links_vars
@@ -140,9 +123,8 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
     fs::create_dir_all(&tests_dst)?;
     fs::create_dir_all(&bin_dst)?;
 
-    // Test executables: lib unit-test (in target/lib) + integration tests.
-    // Real [[bin]] executables go to $out/bin so CARGO_BIN_EXE_<name> resolves
-    // and the runTests wrapper doesn't accidentally execute them.
+    // Tests → $out/tests; real bins → $out/bin (so CARGO_BIN_EXE_* resolves
+    // and runTests doesn't execute them).
     for (dir, dst) in [
         ("target/tests", tests_dst.as_str()),
         ("target/lib", tests_dst.as_str()),
@@ -154,7 +136,6 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
         for entry in entries.flatten() {
             let p = entry.path();
             let name = p.file_name().unwrap().to_string_lossy();
-            // Skip non-test artifacts that share target/lib.
             let is_lib = matches!(
                 p.extension().and_then(|e| e.to_str()),
                 Some("rlib" | "so" | "dylib" | "a" | "d")
