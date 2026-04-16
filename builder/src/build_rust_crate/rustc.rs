@@ -135,6 +135,7 @@ pub struct RustcFlags {
     pub bso_cdylib: Vec<String>,
     pub out_dir: Vec<String>,
     pub cap_lints: String,
+    pub colors: String,
 }
 
 impl RustcFlags {
@@ -200,6 +201,7 @@ impl RustcFlags {
             bso_cdylib: bso.cdylib_link_args.clone(),
             out_dir,
             cap_lints: config.cap_lints.clone(),
+            colors: config.colors.clone(),
         }
     }
 
@@ -236,7 +238,7 @@ impl RustcFlags {
             .args(&self.out_dir)
             .args(extra_flags)
             .arg("--color")
-            .arg("auto");
+            .arg(&self.colors);
         cmd
     }
 }

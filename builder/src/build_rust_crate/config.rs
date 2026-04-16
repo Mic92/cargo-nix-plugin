@@ -46,6 +46,8 @@ pub struct BuildConfig {
     pub extra_rustc_opts_for_build_rs: Vec<String>,
     #[serde(default = "default_cap_lints")]
     pub cap_lints: String,
+    #[serde(default = "default_colors")]
+    pub colors: String,
 
     /// Store path of rustc — used for --remap-path-prefix to avoid
     /// leaking rust-src into the closure.
@@ -103,6 +105,9 @@ fn default_codegen_units() -> u32 {
 }
 fn default_cap_lints() -> String {
     "allow".into()
+}
+fn default_colors() -> String {
+    "always".into()
 }
 
 #[derive(Debug, Deserialize, Clone)]

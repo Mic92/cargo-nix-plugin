@@ -76,6 +76,7 @@ lib.makeOverridable
         "version"
         "build"
         "authors"
+        "colors"
         "edition"
         "buildTests"
         "codegenUnits"
@@ -264,6 +265,7 @@ lib.makeOverridable
             [ "dylib" ]
           else
             (crate.type or [ "lib" ]);
+        colors = lib.attrByPath [ "colors" ] "always" crate;
         extraLinkFlags = crate.extraLinkFlags or [ ];
         edition = crate.edition or null;
         codegenUnits = if crate ? codegenUnits then crate.codegenUnits else defaultCodegenUnits;

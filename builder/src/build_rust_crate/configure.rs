@@ -140,7 +140,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
                 cmd.arg(f);
             }
         }
-        cmd.arg("--color").arg("auto");
+        cmd.arg("--color").arg(&config.colors);
         run_cmd(&mut cmd, config.verbose)?;
 
         // Run build script
