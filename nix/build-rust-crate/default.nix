@@ -290,7 +290,9 @@ lib.makeOverridable
             else if stdenv.hasCC then
               "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc"
             else
-              "cc";
+              # No CC and not lld → let rustc pick its built-in default
+              # rather than pointing -C linker= at a non-existent `cc`.
+              null;
         };
         buildPlatform.rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
 

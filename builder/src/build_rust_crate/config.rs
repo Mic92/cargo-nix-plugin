@@ -167,8 +167,10 @@ pub struct DepExtern {
 #[serde(rename_all = "camelCase")]
 pub struct PlatformInfo {
     pub rustc_target_spec: String,
+    /// `None` when the stdenv has no CC and isn't using lld; the builder
+    /// then omits `-C linker=` entirely and lets rustc pick its default.
     #[serde(default)]
-    pub linker_path: String,
+    pub linker_path: Option<String>,
 }
 
 impl BuildConfig {

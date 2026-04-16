@@ -115,10 +115,12 @@ pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     if let Ok(v) = std::env::var("EXTRA_RUSTC_FLAGS") {
         flags.extend(v.split_whitespace().map(String::from));
     }
-    flags.extend_from_slice(&[
-        "-C".into(),
-        format!("linker={}", config.host_platform.linker_path),
-    ]);
+    // Omit when Nix gave us no linker (bare-metal / wasm stdenvs without a
+    // CC and not using lld) — rustc's built-in default is correct there,
+    // whereas `-C linker=cc` would point at a non-existent binary.
+    if let Some(linker) = config.host_platform.linker_path.as_deref().filter(|s| !s.is_empty()) {
+        flags.extend_from_slice(&["-C".into(), format!("linker={linker}")]);
+    }
 
     flags
 }
