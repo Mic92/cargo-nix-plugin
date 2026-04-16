@@ -120,6 +120,38 @@ cargoNix = cargo-nix-plugin.lib {
 The same shape works wrapped in a fixed-output derivation if you want the
 cache pinned by hash rather than checked in.
 
+### Git dependencies
+
+`git+…` entries in `Cargo.lock` are fetched at eval time with
+`builtins.fetchGit { url; rev; allRefs = true; }` so the resolver can read
+each crate's `Cargo.toml` (the registry index has no record of them). When
+the upstream repo is a Cargo workspace, the resolver locates the right
+member and passes its sub-directory to `buildRustCrate` as
+`workspace_member`.
+
+Override `gitSources` when `fetchGit` can't reach the repo (private,
+vendored fixture) or you need `submodules = true`:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  gitSources = {
+    # key = "${url}#${rev}" with git+ and ?query stripped — exactly what
+    # appears in Cargo.lock after `git+` and before `?`, plus `#REV`.
+    "https://github.com/Byron/gitoxide#abcdef…" = builtins.fetchGit {
+      url = "git@github.com:Byron/gitoxide";
+      rev = "abcdef…";
+      allRefs = true;
+      submodules = true;
+    };
+  };
+};
+```
+
+A `git+` source without a pinned `#rev` is rejected; `Cargo.lock` always
+pins one.
+
 ### Debug logging
 
 The resolver stays quiet on the happy path so eval output isn't drowned in
