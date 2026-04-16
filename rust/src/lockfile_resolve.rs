@@ -34,6 +34,11 @@ struct WorkspaceManifest {
     members: Vec<WorkspaceMember>,
     /// The root package, if this is also a package (not a virtual workspace).
     root_package: Option<WorkspaceMember>,
+    /// Local `path = "..."` dependencies that are NOT in [workspace].members.
+    /// Cargo.lock gives them `source = None` (same as members) but no path,
+    /// so we must discover them by walking referrers' `[dependencies].path`
+    /// fields. Keyed by package name.
+    path_deps: HashMap<String, WorkspaceMember>,
 }
 
 /// Fields from `[workspace.package]` that `foo.workspace = true` inherits.
@@ -76,6 +81,10 @@ struct ManifestDep {
     default_features: bool,
     features: Vec<String>,
     target: Option<String>,
+    /// `path = "..."` from the manifest, relative to that manifest's dir.
+    /// Only used to discover non-member local crates; the lockfile alone
+    /// doesn't record where a path dep lives.
+    path: Option<String>,
 }
 
 /// Resolve a workspace using Cargo.lock + registry index (no cargo metadata).
@@ -110,6 +119,9 @@ pub fn resolve_from_lockfile(
     // 4. Build the resolved crates
     let workspace_member_names: HashSet<String> =
         workspace.members.iter().map(|m| m.name.clone()).collect();
+    // Canonical workspace root for the out-of-tree path-dep check.
+    let canonical_ws_root = std::fs::canonicalize(workspace_root)
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
 
     // Map a lockfile source string to the sparse index URL we'd fetch
     // from. None for local/git sources (no index involved). crates.io
@@ -271,9 +283,65 @@ pub fn resolve_from_lockfile(
                         sub_path,
                     });
                     (deps, build_deps, member.features.clone(), member.links.clone())
+                } else if pkg.source.is_none() {
+                    // Local path dependency that is NOT a [workspace] member.
+                    // Cargo.lock omits `source` for these exactly as it does
+                    // for members, but we have no manifest_dir from the
+                    // members walk. parse_workspace() discovered it by
+                    // following `path = "..."` edges from referrers.
+                    let member = workspace.path_deps.get(&pkg.name).ok_or_else(|| {
+                        format!(
+                            "package {} {} has no `source` in Cargo.lock and is not a \
+                             workspace member. It is likely a `path = \"...\"` dependency \
+                             but no referring manifest under {} declares it. If it lives \
+                             outside the workspace src, it cannot be built (the Nix \
+                             derivation only sees `src`).",
+                            pkg.name,
+                            pkg.version,
+                            workspace_root.display(),
+                        )
+                    })?;
+                    // Reject paths that escape the workspace src — the drv
+                    // gets `src = <workspace>`, so ../sibling would silently
+                    // build against the wrong directory (or nothing).
+                    let dir = std::fs::canonicalize(&member.manifest_dir)
+                        .unwrap_or_else(|_| PathBuf::from(&member.manifest_dir));
+                    if !dir.starts_with(&canonical_ws_root) {
+                        return Err(format!(
+                            "path dependency {} at {} is outside the workspace root {}. \
+                             cargo-nix-plugin builds local crates from `src`; a path dep \
+                             that points outside it has no source in the build sandbox. \
+                             Either add it to [workspace].members and move it under the \
+                             workspace, or vendor it.",
+                            pkg.name,
+                            dir.display(),
+                            canonical_ws_root.display(),
+                        ));
+                    }
+                    let (deps, build_deps, _) = resolve_member_deps(
+                        member,
+                        &pkg.dependencies,
+                        &lock_packages,
+                        &short_id,
+                        target,
+                    );
+                    source_info = Some(SourceInfo::Local {
+                        path: member.manifest_dir.clone(),
+                    });
+                    (deps, build_deps, member.features.clone(), member.links.clone())
                 } else {
                     (Vec::new(), Vec::new(), BTreeMap::new(), None)
                 };
+
+            // For path deps we parsed the manifest ourselves, so we know
+            // edition/proc_macro/lib_path etc. — don't leave them for
+            // build-time auto-detect (which would look in the wrong dir
+            // before the workspace_member cd).
+            let path_member = if pkg.source.is_none() {
+                workspace.path_deps.get(&pkg.name)
+            } else {
+                None
+            };
 
             crates.insert(
                 sid,
@@ -281,7 +349,7 @@ pub fn resolve_from_lockfile(
                     crate_name: pkg.name.clone(),
                     version: pkg.version.clone(),
                     // These fields will be auto-detected at build time by buildRustCrate
-                    edition: String::new(),
+                    edition: path_member.map(|m| m.edition.clone()).unwrap_or_default(),
                     sha256,
                     source: source_info,
                     dependencies,
@@ -289,12 +357,14 @@ pub fn resolve_from_lockfile(
                     dev_dependencies: Vec::new(), // Not needed for external crates
                     features: features_btree,
                     resolved_default_features: Vec::new(), // filled in below
-                    proc_macro: false, // Auto-detected at build time by build-rust-crate
-                    build: None,       // Auto-detected at build time
-                    lib_path: None,    // Auto-detected at build time
-                    lib_name: None,    // Auto-detected at build time
+                    proc_macro: path_member.map(|m| m.proc_macro).unwrap_or(false),
+                    build: path_member.and_then(|m| m.build_script.clone()),
+                    lib_path: path_member.and_then(|m| m.lib_path.clone()),
+                    lib_name: path_member.and_then(|m| m.lib_name.clone()),
                     crate_bin: Vec::new(), // Not needed for external crates
-                    lib_crate_types: Vec::new(), // Auto-detected at build time
+                    lib_crate_types: path_member
+                        .map(|m| m.lib_crate_types.clone())
+                        .unwrap_or_default(),
                     links,
                     authors: Vec::new(),
                 },
@@ -532,9 +602,60 @@ fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
         }
     }
 
+    // --- Discover non-member path dependencies ---
+    // Cargo.lock gives them `source = None` and no path. The only place
+    // the subdir is recorded is the referring manifest's `path = "..."`
+    // field, so walk outward from every member (and transitively from
+    // each discovered path dep) collecting them.
+    let mut path_deps: HashMap<String, WorkspaceMember> = HashMap::new();
+    let member_names: HashSet<&str> = members.iter().map(|m| m.name.as_str()).collect();
+    // Queue of (referrer_dir, dep_path) edges to visit.
+    let mut queue: Vec<(PathBuf, String)> = Vec::new();
+    let enqueue = |q: &mut Vec<_>, m: &WorkspaceMember| {
+        for d in m
+            .dependencies
+            .iter()
+            .chain(&m.build_dependencies)
+            .chain(&m.dev_dependencies)
+        {
+            if let Some(p) = &d.path {
+                q.push((PathBuf::from(&m.manifest_dir), p.clone()));
+            }
+        }
+    };
+    for m in &members {
+        enqueue(&mut queue, m);
+    }
+    while let Some((referrer_dir, rel)) = queue.pop() {
+        // Lexically normalize (collapse `..`/`.`) rather than canonicalize:
+        // `manifest_dir` must share a textual prefix with `workspace_root`
+        // so lib/default.nix's removePrefix yields the relPath. The
+        // out-of-tree check in the main loop canonicalizes separately.
+        let dir = normalize_path(&referrer_dir.join(&rel));
+        let manifest = dir.join("Cargo.toml");
+        let toml_str = match std::fs::read_to_string(&manifest) {
+            Ok(s) => s,
+            // Missing manifest: leave it for the main loop to produce a
+            // pointed error when the lockfile references this package.
+            Err(_) => continue,
+        };
+        let toml: toml::Value = toml::from_str(&toml_str)
+            .map_err(|e| format!("Failed to parse {}: {e}", manifest.display()))?;
+        let Some(pkg) = toml.get("package") else {
+            continue;
+        };
+        let m = parse_member_manifest(&toml, pkg, &dir, &workspace_deps, &ws_pkg)?;
+        if member_names.contains(m.name.as_str()) || path_deps.contains_key(&m.name) {
+            continue;
+        }
+        enqueue(&mut queue, &m);
+        path_deps.insert(m.name.clone(), m);
+    }
+
     Ok(WorkspaceManifest {
         members,
         root_package,
+        path_deps,
     })
 }
 
@@ -719,8 +840,10 @@ fn parse_manifest_deps(
                 default_features: true,
                 features: Vec::new(),
                 target: None,
+                path: None,
             },
             toml::Value::Table(t) => {
+                let path = t.get("path").and_then(|v| v.as_str()).map(String::from);
                 let package = t.get("package").and_then(|v| v.as_str()).map(String::from);
                 let version_req = t.get("version").and_then(|v| v.as_str()).map(String::from);
                 let optional = t.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -769,6 +892,13 @@ fn parse_manifest_deps(
                             default_features,
                             features,
                             target: None,
+                            // [workspace.dependencies] paths are relative to
+                            // the workspace root, but we resolve path deps
+                            // relative to the *member* dir. Members that
+                            // inherit a path dep are normally also workspace
+                            // members themselves, so leave this unset rather
+                            // than carry a wrongly-based path.
+                            path: None,
                         };
                     }
                     // workspace = true but no entry — cargo errors. We
@@ -784,6 +914,7 @@ fn parse_manifest_deps(
                     default_features: member_default_features.unwrap_or(true),
                     features: member_features,
                     target: None,
+                    path,
                 }
             }
             _ => ManifestDep {
@@ -794,6 +925,7 @@ fn parse_manifest_deps(
                 default_features: true,
                 features: Vec::new(),
                 target: None,
+                path: None,
             },
         })
         .collect()
@@ -1119,6 +1251,29 @@ fn resolve_pkg_source(pkg: &LockPackage) -> Option<SourceInfo> {
         }
         _ => None,
     }
+}
+
+/// Lexically normalize a path: collapse `.` and `..` without touching the
+/// filesystem. Like Go's `path.Clean`. We need `ws/devdep/../inner` →
+/// `ws/inner` so it textually prefixes `workspace_root` for relPath
+/// extraction, but `canonicalize()` would also resolve symlinks and may
+/// diverge from the (non-canonical) `workspace_root` string the Nix side
+/// prefix-strips against.
+fn normalize_path(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push(c);
+                }
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Simple glob expansion for workspace member paths.
@@ -1752,6 +1907,132 @@ version = "0.1.0"
                 devonly.resolved_default_features
             );
         }
+    }
+
+    fn linux_target() -> TargetDescription {
+        TargetDescription {
+            name: "x86_64-unknown-linux-gnu".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            vendor: "unknown".into(),
+            env: "gnu".into(),
+            family: vec!["unix".into()],
+            pointer_width: "64".into(),
+            endian: "little".into(),
+            unix: true,
+            windows: false,
+            extra_cfgs: vec![],
+        }
+    }
+
+    /// A `path = "..."` dependency that is NOT in [workspace].members must
+    /// still get a Local source pointing at its subdir, with edition and
+    /// transitive deps from its own Cargo.toml. Cargo.lock gives it
+    /// `source = None` and no path; previously this fell through to
+    /// source=None and built against the workspace root with artifacts:[].
+    ///
+    /// Fixture: sample-path-dep [dev-dep]→ devdep (path ./devdep)
+    ///                                     └→ inner (path ../inner)
+    /// Neither devdep nor inner is a [workspace] member.
+    #[test]
+    fn path_dep_non_member_gets_local_source() {
+        let ws = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-path-dep");
+        let cargo_lock = std::fs::read_to_string(ws.join("Cargo.lock")).unwrap();
+        let result = resolve_from_lockfile(
+            &ws,
+            &cargo_lock,
+            &ws, // cargo_home — unused, no registry crates
+            "sparse+https://index.crates.io/",
+            &linux_target(),
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let devdep = &result.crates["devdep"];
+        match &devdep.source {
+            Some(SourceInfo::Local { path }) => {
+                assert_eq!(Path::new(path), ws.join("devdep"))
+            }
+            other => panic!("devdep: expected Local source, got {other:?}"),
+        }
+        assert_eq!(devdep.edition, "2021", "edition read from devdep/Cargo.toml");
+        assert_eq!(
+            devdep.dependencies.len(),
+            1,
+            "devdep → inner edge from devdep/Cargo.toml"
+        );
+        assert_eq!(devdep.dependencies[0].package_id, "inner");
+
+        // Transitive: inner was reached via devdep's `path = "../inner"`,
+        // joined onto devdep's dir and canonicalized back under ws.
+        let inner = &result.crates["inner"];
+        match &inner.source {
+            Some(SourceInfo::Local { path }) => {
+                assert_eq!(Path::new(path), ws.join("inner"))
+            }
+            other => panic!("inner: expected Local source, got {other:?}"),
+        }
+
+        // Not promoted to workspace members — they're deps, not roots.
+        assert!(!result.workspace_members.contains_key("devdep"));
+        assert!(!result.workspace_members.contains_key("inner"));
+    }
+
+    /// A path dep pointing OUTSIDE the workspace src must fail loudly at
+    /// resolve time. The drv only has `src` in its sandbox; ../sibling
+    /// would otherwise build against nothing and emit artifacts:[].
+    #[test]
+    fn path_dep_outside_workspace_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let sibling = tmp.path().join("sibling");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(sibling.join("src")).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            r#"
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+sibling = { path = "../sibling" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sibling.join("Cargo.toml"),
+            "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let cargo_lock = r#"
+version = 4
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = ["sibling"]
+[[package]]
+name = "sibling"
+version = "0.1.0"
+"#;
+
+        let err = resolve_from_lockfile(
+            &ws,
+            cargo_lock,
+            tmp.path(),
+            "sparse+https://index.crates.io/",
+            &linux_target(),
+            &[],
+            false,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("sibling") && err.contains("outside the workspace root"),
+            "error should name the crate and the reason: {err}"
+        );
     }
 
     /// Missing gitSources entry surfaces a clear error naming the key.
