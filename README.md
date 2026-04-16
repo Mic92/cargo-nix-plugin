@@ -248,39 +248,33 @@ compilation.
 
 ## Tests
 
-`buildTests = true` compiles lib unit tests and integration tests under
-`tests/` into `$out/tests/` (one executable per target), alongside the
-crate's real `[[bin]]` executables so `env!("CARGO_BIN_EXE_<name>")`
-resolves to a store path.
-`[dev-dependencies]` are pulled in automatically; the regular `.build`
-derivation is unchanged.
+`workspaceMembers.<name>.runTests` compiles lib unit tests and integration
+tests under `tests/` and runs them. `[dev-dependencies]` are pulled in
+automatically; the regular `.build` derivation is unchanged.
 
 ```nix
-let
-  cargoNix = cargo-nix-plugin.lib { inherit pkgs; src = ./.; };
-  testsDrv = cargoNix.workspaceMembers.my-crate.build.override {
-    buildTests = true;
-  };
-in
-pkgs.runCommand "my-crate-tests" { } ''
-  export CARGO_TARGET_TMPDIR="$(mktemp -d)"
-  for t in ${testsDrv}/tests/*; do
-    echo "--- $(basename "$t")"
-    "$t"
-  done
-  touch $out
-''
+let cargoNix = cargo-nix-plugin.lib { inherit pkgs; src = ./.; };
+in cargoNix.workspaceMembers.my-crate.runTests
 ```
 
 As a flake check:
 
 ```nix
-checks.x86_64-linux.my-crate-tests = pkgs.runCommand "my-crate-tests" { } ''
-  for t in ${cargoNix.workspaceMembers.my-crate.build.override { buildTests = true; }}/tests/*; do
-    "$t"
-  done
+checks.x86_64-linux.my-crate-tests =
+  cargoNix.workspaceMembers.my-crate.runTests;
+```
+
+The underlying derivation (test executables in `$out/tests/`, real `[[bin]]`
+executables in `$out/bin/` so `env!("CARGO_BIN_EXE_<name>")` resolves) is
+exposed as `.buildTests` if you need a custom runner:
+
+```nix
+let testsDrv = cargoNix.workspaceMembers.my-crate.buildTests;
+in pkgs.runCommand "my-crate-tests" { } ''
+  export CARGO_TARGET_TMPDIR="$(mktemp -d)"
+  for t in ${testsDrv}/tests/*; do "$t"; done
   touch $out
-'';
+''
 ```
 
 Integration tests can locate the crate's binaries the same way they do under
@@ -296,22 +290,18 @@ fn smoke() {
 }
 ```
 
-Tests that need native inputs at runtime get them via the `runCommand`
-wrapper, not via `crateOverrides`:
+Tests that need native inputs at runtime get them via `.overrideAttrs` on
+the runner, not via `crateOverrides`:
 
 ```nix
-pkgs.runCommand "my-crate-tests" {
+cargoNix.workspaceMembers.my-crate.runTests.overrideAttrs (_: {
   nativeBuildInputs = [ pkgs.sqlite ];  # for tests that shell out to sqlite3
-} ''
-  for t in ${testsDrv}/tests/*; do "$t"; done
-  touch $out
-''
+})
 ```
 
-`CARGO_TARGET_TMPDIR` is baked in at compile time pointing at the build
-sandbox (so `env!()` compiles), but that path does not exist at runtime —
-tests that actually write there must have it overridden by the wrapper as
-shown above.
+`runTests` exports `CARGO_TARGET_TMPDIR` to a fresh temp dir; the
+compile-time `env!()` value points at the build sandbox and is only useful
+for making `env!()` resolve.
 
 Known limitations: doctests are not built, per-`[[bin]]` unit tests are not
 compiled, and tests under `examples/` / `benches/` are not discovered.

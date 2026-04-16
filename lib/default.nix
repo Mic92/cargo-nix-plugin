@@ -568,16 +568,34 @@ let
 in
 {
   # Public interface matching crate2nix
-  workspaceMembers = lib.mapAttrs (name: packageId: {
-    inherit packageId;
-    build = builtCrates.crates.${packageId};
-    # Compile tests with dev-dependencies wired in. Equivalent to
-    # `.build.override { buildTests = true; }` — buildRustCrate folds
-    # devDependencies into the --extern set only when buildTests is set.
-    buildTests = builtCrates.crates.${packageId}.override {
-      buildTests = true;
-    };
-  }) resolved.workspaceMembers;
+  workspaceMembers = lib.mapAttrs (
+    name: packageId:
+    let
+      testsDrv = builtCrates.crates.${packageId}.override { buildTests = true; };
+    in
+    {
+      inherit packageId;
+      build = builtCrates.crates.${packageId};
+      # Compile tests with dev-dependencies wired in. Equivalent to
+      # `.build.override { buildTests = true; }` — buildRustCrate folds
+      # devDependencies into the --extern set only when buildTests is set.
+      buildTests = testsDrv;
+      # Batteries-included runner: sequential across test binaries (matches
+      # `cargo test`), libtest parallelism inside each. Override
+      # nativeBuildInputs via .overrideAttrs for tests that shell out.
+      runTests =
+        pkgs.runCommand "${name}-tests" { passthru = { inherit testsDrv; }; } ''
+          export CARGO_TARGET_TMPDIR="$(mktemp -d)"
+          export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
+          shopt -s nullglob
+          for t in ${testsDrv}/tests/*; do
+            echo "── running $(basename "$t")"
+            "$t"
+          done
+          touch $out
+        '';
+    }
+  ) resolved.workspaceMembers;
 
   rootCrate =
     if resolved.root != null then

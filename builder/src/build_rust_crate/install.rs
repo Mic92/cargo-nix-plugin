@@ -134,10 +134,20 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let dst = format!("{}/tests", config.out_path());
-    fs::create_dir_all(&dst)?;
+    let out = config.out_path();
+    let tests_dst = format!("{out}/tests");
+    let bin_dst = format!("{out}/bin");
+    fs::create_dir_all(&tests_dst)?;
+    fs::create_dir_all(&bin_dst)?;
 
-    for dir in ["target/bin", "target/lib"] {
+    // Test executables: lib unit-test (in target/lib) + integration tests.
+    // Real [[bin]] executables go to $out/bin so CARGO_BIN_EXE_<name> resolves
+    // and the runTests wrapper doesn't accidentally execute them.
+    for (dir, dst) in [
+        ("target/tests", tests_dst.as_str()),
+        ("target/lib", tests_dst.as_str()),
+        ("target/bin", bin_dst.as_str()),
+    ] {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };
