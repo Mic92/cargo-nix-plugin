@@ -411,15 +411,10 @@ let
       # platform, so all their dependencies must be built for that platform.
       buildDepDrv = dep: self.build.cratesLibOnly.${dep.packageId};
 
-      # Dependencies are already filtered by the Rust resolver:
-      # platform-incompatible and inactive optional deps are excluded.
-      # Dev-dependencies share the DepInfo shape (packageId/name/rename),
-      # so they go through the same depDrv path. They are passed to
-      # buildRustCrate as a separate `devDependencies` list and only
-      # folded into the rustc --extern set when buildTests = true, so
-      # `.build` drvs stay byte-identical to a no-dev-deps build while
-      # `.build.override { buildTests = true; }` (and `.buildTests`)
-      # both see them.
+      # The resolver has already filtered platform / inactive-optional deps.
+      # Dev-deps share the DepInfo shape so reuse depDrv; buildRustCrate
+      # only folds them into --extern when buildTests=true so `.build`
+      # stays byte-identical to a no-dev-deps build.
       normalDeps = crateInfo.dependencies or [ ];
       devDeps = crateInfo.devDependencies or [ ];
       dependencies = map depDrv normalDeps;
@@ -447,8 +442,7 @@ let
     in
     buildRustCrate (
       {
-        crateName = crateInfo.crateName;
-        version = crateInfo.version;
+        inherit (crateInfo) crateName version;
         sha256 = crateInfo.sha256 or "";
         inherit (crateSrc) src;
         authors = crateInfo.authors or [ ];
@@ -456,24 +450,18 @@ let
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
       }
-      # Only pass crateBin to *suppress* bins on the lib-only dep variant.
-      # Never forward the resolver's crateInfo.crateBin: that list is only the
-      # explicit [[bin]] entries from Cargo.toml, and passing it sets
-      # has_crate_bin=true in the builder, which short-circuits the autobins
-      # merge in configure.rs (so an inferred src/main.rs alongside an
-      # explicit [[bin]] is dropped). The builder re-reads the unpacked
-      # Cargo.toml and does [[bin]] + autobins itself. A user-supplied
-      # crateOverrides.<name>.crateBin still wins — it is applied inside
-      # buildRustCrate (crate_ // override) and makes `crate ? crateBin` true.
+      # Only ever pass crateBin to *suppress* bins on the lib-only variant.
+      # Never forward crateInfo.crateBin: that is only the explicit [[bin]]
+      # entries, and passing it sets has_crate_bin=true which short-circuits
+      # the builder's [[bin]]+autobins merge. crateOverrides.<name>.crateBin
+      # still wins via buildRustCrate's `crate_ // override`.
       // lib.optionalAttrs libOnly {
         crateBin = [ ];
       }
       // lib.optionalAttrs ((crateSrc.workspace_member or null) != null) {
-        # Local workspace members: unpack the full workspace src and cd into
-        # this subdir, so find_workspace_package can resolve
-        # `field.workspace = true` against the root [workspace.package].
-        # Git deps: the checkout may be a workspace; when the resolver
-        # couldn't determine the subdir fall back to the builder's auto-scan.
+        # Subdir to cd into after unpack so `field.workspace = true` resolves
+        # against the root [workspace.package]. Omitted (→ builder auto-scan)
+        # for git checkouts where the resolver couldn't locate the crate.
         inherit (crateSrc) workspace_member;
       }
       // lib.optionalAttrs ((crateInfo.edition or "") != "") {
@@ -510,8 +498,7 @@ let
 
   clippyRustcWrapper =
     let
-      clippy = pkgs.clippy;
-      rustc = pkgs.rustc;
+      inherit (pkgs) clippy rustc;
       extraArgs = lib.concatMapStringsSep " " lib.escapeShellArg clippyArgs;
     in
     pkgs.runCommand "clippy-as-rustc"

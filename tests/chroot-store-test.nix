@@ -60,27 +60,30 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     # and the flake's pkgs can derive different output paths for the same
     # package, and a near-miss means rebuilding jq (and perl, and autoconf)
     # from source. Empty substituters so we never attempt cache.nixos.org.
-    ${nix}/bin/nix build \
-      --store "$CHROOT" \
-      --substituters "" \
-      --option plugin-files "${plugin}/lib/nix/plugins" \
-      --impure --no-link \
-      --expr '
-        let
-          pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
-          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
-            rustc = builtins.storePath ${pkgs.rustc};
-            cargo = builtins.storePath ${pkgs.cargo};
-            mold = builtins.storePath ${pkgs.mold};
-            buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
-          };
-        in (import ${pluginSrc}/lib {
-          inherit pkgs;
-          src = ${sampleProject};
-          buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
-        }).workspaceMembers.nodeps-bin.build
-      '
+    inner_build() {
+      local attr=$1; shift
+      ${nix}/bin/nix build \
+        --store "$CHROOT" \
+        --substituters "" \
+        --option plugin-files "${plugin}/lib/nix/plugins" \
+        --impure --no-link "$@" \
+        --expr '
+          let
+            pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
+            pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
+              rustc = builtins.storePath ${pkgs.rustc};
+              cargo = builtins.storePath ${pkgs.cargo};
+              mold = builtins.storePath ${pkgs.mold};
+              buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
+            };
+          in (import ${pluginSrc}/lib {
+            inherit pkgs;
+            src = ${sampleProject};
+            buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
+          }).workspaceMembers.'"$attr"
+    }
 
+    inner_build 'nodeps-bin.build'
     echo "PASS: chroot store build succeeded"
 
     # Verify the binary was actually placed in the chroot store and runs.
@@ -106,26 +109,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
 
     # Target-discovery parity: nodeps-mixed has one explicit [[bin]] plus an
     # inferred src/main.rs, edition.workspace=true, and a dotfile in src/bin/.
-    ${nix}/bin/nix build \
-      --store "$CHROOT" \
-      --substituters "" \
-      --option plugin-files "${plugin}/lib/nix/plugins" \
-      --impure --no-link --print-out-paths \
-      --expr '
-        let
-          pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
-          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
-            rustc = builtins.storePath ${pkgs.rustc};
-            cargo = builtins.storePath ${pkgs.cargo};
-            mold = builtins.storePath ${pkgs.mold};
-            buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
-          };
-        in (import ${pluginSrc}/lib {
-          inherit pkgs;
-          src = ${sampleProject};
-          buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
-        }).workspaceMembers.nodeps-mixed.build
-      ' > mixed-out
+    inner_build 'nodeps-mixed.build' --print-out-paths > mixed-out
     mixed_out=$(cat mixed-out)
     [[ "$($CHROOT$mixed_out/bin/nodeps-mixed)" == "mixed-main ok" ]] || {
       echo "FAIL: inferred src/main.rs lost when [[bin]] present"; exit 1;
@@ -138,26 +122,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     # Regression for the lib_path-shadowing bug: buildTests=true compiles the
     # lib with --test (unit tests) and an integration test under tests/, both
     # linked against the just-built rlib.
-    ${nix}/bin/nix build \
-      --store "$CHROOT" \
-      --substituters "" \
-      --option plugin-files "${plugin}/lib/nix/plugins/libcargo_nix_plugin.so" \
-      --impure --no-link --print-out-paths \
-      --expr '
-        let
-          pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
-          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
-            rustc = builtins.storePath ${pkgs.rustc};
-            cargo = builtins.storePath ${pkgs.cargo};
-            mold = builtins.storePath ${pkgs.mold};
-            buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
-          };
-        in (import ${pluginSrc}/lib {
-          inherit pkgs;
-          src = ${sampleProject};
-          buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
-        }).workspaceMembers.nodeps-lib.build.override { buildTests = true; }
-      ' > tests-out
+    inner_build 'nodeps-lib.build.override { buildTests = true; }' --print-out-paths > tests-out
     tests_out=$(cat tests-out)
     ran=0
     for t in "$CHROOT$tests_out"/tests/*; do

@@ -128,12 +128,6 @@ lib.makeOverridable
       capLints_ = capLints;
       buildTests_ = buildTests;
 
-      # crate2nix used to passthrough `crateBin = [{name = ",";}];` as a
-      # sentinel for "has [[bin]] but it's empty" — strip those so the
-      # builder doesn't try to compile a binary literally named `,`.
-      crateBin' = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
-      hasCrateBin' = crate ? crateBin;
-
     in
     stdenv.mkDerivation (
       rec {
@@ -166,7 +160,7 @@ lib.makeOverridable
           cargo
           buildRustCrateBin
         ]
-        ++ lib.optionals (defaultMold != null) [ defaultMold ]
+        ++ lib.optional (defaultMold != null) defaultMold
         ++ lib.optionals stdenv.hasCC [ stdenv.cc ]
         ++ lib.optionals stdenv.buildPlatform.isDarwin [ libiconv ]
         ++ (crate.nativeBuildInputs or [ ])
@@ -181,18 +175,15 @@ lib.makeOverridable
           ++ (crate.buildInputs or [ ])
           ++ buildInputs_;
 
-        # Per-dependency extern info computed at Nix eval time. The same
-        # rename logic applies to build-deps; the resolver folds both
-        # [dependencies] and [build-dependencies] renames into crateRenames.
+        # Per-dependency extern info computed at Nix eval time. The resolver
+        # folds [dependencies]/[build-dependencies] renames into one map.
         inherit
           (
             let
               normalizeName = lib.replaceStrings [ "-" ] [ "_" ];
-              # Returns the alias if a rename actually applies to this dep,
-              # null otherwise. `hasAttr` alone over-triggers when only one
-              # of two versions is renamed; the un-renamed sibling must keep
-              # isRename=false so dep_extern_args can recover the real
-              # `--extern` key from the artifact filename.
+              # null when no rename applies to *this* version of the dep —
+              # the un-renamed sibling must keep isRename=false so the
+              # builder recovers `--extern` from the artifact filename.
               findRename = dep:
                 let choices = crateRenames.${dep.crateName} or null;
                 in
@@ -262,8 +253,10 @@ lib.makeOverridable
 
         build = crate.build or "";
         workspace_member = crate.workspace_member or ".";
-        crateBin = crateBin';
-        hasCrateBin = hasCrateBin';
+        # Strip the crate2nix "empty [[bin]]" sentinel so the builder doesn't
+        # try to compile a binary named `,`.
+        crateBin = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
+        hasCrateBin = crate ? crateBin;
         crateAuthors = if crate ? authors && lib.isList crate.authors then crate.authors else [ ];
         crateDescription = crate.description or "";
         crateHomepage = crate.homepage or "";
@@ -288,12 +281,12 @@ lib.makeOverridable
         extraRustcOpts =
           lib.optionals (crate ? extraRustcOpts) crate.extraRustcOpts
           ++ extraRustcOpts_
-          ++ (if edition != null then [ "--edition" edition ] else [ ])
+          ++ lib.optionals (edition != null) [ "--edition" edition ]
           ++ lib.optionals (defaultMold != null) [ "-C" "link-arg=-fuse-ld=mold" ];
         extraRustcOptsForBuildRs =
           lib.optionals (crate ? extraRustcOptsForBuildRs) crate.extraRustcOptsForBuildRs
           ++ extraRustcOptsForBuildRs_
-          ++ (if edition != null then [ "--edition" edition ] else [ ]);
+          ++ lib.optionals (edition != null) [ "--edition" edition ];
         capLints = capLints_;
 
         # CARGO_CFG_TARGET_* are derived at build time from `rustc --print cfg`,
@@ -312,13 +305,10 @@ lib.makeOverridable
         };
         buildPlatform.rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
 
-        # Hooks must observe the crate-root cwd and CARGO_*/OUT_DIR/rustc-env
-        # that the old shell builder exported. `locate` resolves
-        # workspace_member (or auto-discovers it) and prints the absolute dir;
-        # we cd there once. `configure` writes target/hook-env with the cargo
-        # env snapshot, sourced once here. genericBuild runs all phases in one
-        # shell, so cwd and exports carry into buildPhase/installPhase just as
-        # in the old configure-crate.nix.
+        # `locate` resolves/auto-discovers workspace_member; `configure`
+        # writes target/hook-env with the CARGO_*/OUT_DIR snapshot. Sourcing
+        # it here lets hooks observe the same env the old shell builder set;
+        # genericBuild keeps cwd/exports across phases.
         configurePhase = ''
           cd "$(build-rust-crate locate)"
           runHook preConfigure
@@ -350,10 +340,8 @@ lib.makeOverridable
             ];
         outputDev = if buildTests then [ "out" ] else [ "lib" ];
 
-        # Expose the dependency derivations for downstream introspection
-        # (e.g. cross-compilation tests asserting build-dep host platform).
-        # Kept out of the env via passthru since __structuredAttrs would
-        # otherwise JSON-serialize the full derivations.
+        # Exposed for downstream introspection (cross tests etc.). passthru
+        # keeps __structuredAttrs from JSON-serialising the full drvs.
         passthru = {
           dependencies = dependencies_;
           buildDependencies = buildDependencies_;
