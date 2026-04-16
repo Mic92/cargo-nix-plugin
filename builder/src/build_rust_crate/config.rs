@@ -161,7 +161,79 @@ impl CrateMetadata {
         let s = std::fs::read_to_string(format!("{dep_lib_out}/crate-metadata.json")).ok()?;
         serde_json::from_str(&s).ok()
     }
+
+    pub fn write(&self, lib_out: &str) -> std::io::Result<()> {
+        std::fs::create_dir_all(lib_out)?;
+        std::fs::write(
+            format!("{lib_out}/crate-metadata.json"),
+            serde_json::to_string_pretty(self).expect("CrateMetadata is plain data"),
+        )
+    }
+
+    /// Construct from a `BuildConfig` whose `detect_cargo_toml_info` has run,
+    /// with `artifacts` derived from `crate_type` (rather than scanned from
+    /// `target/lib`). Called from `build` (before the lib rustc invocation) so
+    /// a pipelining scheduler that starts dependents on this crate's rmeta
+    /// finds a usable manifest. `install` overwrites with the scanned set;
+    /// for `lib`/`rlib` — the only crate-types whose provisional copy a
+    /// pipelined dependent ever reads — the two are identical. See the
+    /// `DLL_PREFIX`/`DLL_EXTENSION` comment below for where they can diverge
+    /// and why it's unobservable.
+    ///
+    /// `links_vars` is left empty here: a `links` crate's dependents need its
+    /// build-script output and so can't pipeline on rmeta anyway — they read
+    /// the install-written copy.
+    pub fn provisional(config: &BuildConfig) -> Self {
+        let lib_name = config.lib_name_normalized();
+        let m = &config.metadata;
+        let dll = format!("{DLL_PREFIX}{lib_name}-{m}.{DLL_EXTENSION}");
+        let mut artifacts: Vec<String> = config
+            .crate_type
+            .iter()
+            .filter_map(|t| match t.as_str() {
+                "lib" | "rlib" => Some(format!("lib{lib_name}-{m}.rlib")),
+                "proc-macro" | "dylib" | "cdylib" => Some(dll.clone()),
+                "staticlib" => Some(format!("lib{lib_name}-{m}.a")),
+                _ => None,
+            })
+            .collect();
+        artifacts.sort();
+        artifacts.dedup();
+        Self {
+            lib_name,
+            metadata: m.clone(),
+            crate_types: config.crate_type.clone(),
+            proc_macro: config.crate_type.iter().any(|t| t == "proc-macro"),
+            artifacts,
+            links: config.crate_links.clone(),
+            links_vars: BTreeMap::new(),
+        }
+    }
 }
+
+// Build-platform DLL naming, baked in via cfg(target_os) on the builder
+// binary itself. This is exact for `proc-macro` (proc-macros always target
+// the build platform — they're dlopen'd by rustc) and for native builds. It
+// is wrong for cross-compiled `dylib`/`cdylib`/`staticlib`, where the host
+// platform's prefix/extension applies; getting that right would need a
+// per-crate `rustc --print file-names` subprocess. We don't pay it because
+// none of those crate-types can be pipelined on: a dependent of a
+// dylib/cdylib/staticlib needs the linked artifact (or, for cdylib/staticlib,
+// isn't `--extern`-linkable at all), so it waits for `install` and reads the
+// scanned copy. The provisional value here is never observed in the cross
+// case.
+#[cfg(target_os = "macos")]
+const DLL_PREFIX: &str = "lib";
+#[cfg(target_os = "macos")]
+const DLL_EXTENSION: &str = "dylib";
+#[cfg(target_os = "windows")]
+const DLL_PREFIX: &str = "";
+#[cfg(target_os = "windows")]
+const DLL_EXTENSION: &str = "dll";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const DLL_PREFIX: &str = "lib";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const DLL_EXTENSION: &str = "so";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

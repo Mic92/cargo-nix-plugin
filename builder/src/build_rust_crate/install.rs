@@ -66,20 +66,14 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         fs::write(format!("{lib_out}/env"), lines.join("\n"))?;
     }
 
-    let cm = CrateMetadata {
-        lib_name: config.lib_name_normalized(),
-        metadata: metadata.clone(),
-        crate_types: config.crate_type.clone(),
-        proc_macro: config.crate_type.iter().any(|t| t == "proc-macro"),
+    // Overwrite the provisional copy from `build` with the scanned artifact
+    // set and remapped links_vars.
+    CrateMetadata {
         artifacts,
-        links: config.crate_links.clone(),
         links_vars,
-    };
-    fs::create_dir_all(lib_out)?;
-    fs::write(
-        format!("{lib_out}/crate-metadata.json"),
-        serde_json::to_string_pretty(&cm)?,
-    )?;
+        ..CrateMetadata::provisional(config)
+    }
+    .write(lib_out)?;
 
     // Copy lib artifacts + create un-hashed symlinks for .so/.dylib
     if dir_has_files("target/lib") {
