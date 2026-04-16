@@ -221,9 +221,8 @@ lib.makeOverridable
             ++ lib.concatMap (dep: (dep.completeBuildDeps or [ ]) ++ (dep.completeDeps or [ ])) bdeps
           );
 
-        crateFeatures = lib.optionals (crate ? features) (
-          builtins.filter (f: !(lib.hasInfix "/" f || lib.hasPrefix "dep:" f)) (crate.features ++ features)
-        );
+        crateFeaturesRaw = lib.optionals (crate ? features) (crate.features ++ features);
+        crateFeatures = builtins.filter (f: !(lib.hasInfix "/" f || lib.hasPrefix "dep:" f)) crateFeaturesRaw;
 
         libName = if crate ? libName then crate.libName else crate.crateName;
         libPath = lib.optionalString (crate ? libPath) crate.libPath;

@@ -38,6 +38,8 @@ pub struct BuildConfig {
     pub crate_type: Vec<String>,
     #[serde(default)]
     pub crate_features: Vec<String>,
+    #[serde(default)]
+    pub crate_features_raw: Vec<String>,
     #[serde(default = "default_true")]
     pub release: bool,
     #[serde(default = "default_true")]

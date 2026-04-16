@@ -287,7 +287,7 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
                 && !bin
                     .required_features
                     .iter()
-                    .all(|f| config.crate_features.contains(f))
+                    .all(|f| config.crate_features_raw.contains(f))
             {
                 eprintln!(
                     "Binary {name} not compiled: missing required features {:?}",
