@@ -214,6 +214,12 @@ let
             inherit url rev;
             # The locked rev may not be reachable from the default ref.
             allRefs = true;
+            # Cargo unconditionally recurses submodules for git deps
+            # (src/cargo/sources/git/utils.rs, no opt-out —
+            # rust-lang/cargo#4247). Match that so build-time sources
+            # agree with what `cargo build` would have unpacked.
+            # Override via `gitSources` to opt out per-repo.
+            submodules = true;
           };
         }
     ) gitSourceLines
@@ -322,6 +328,7 @@ let
         url = crateInfo.source.url;
         rev = crateInfo.source.rev;
         allRefs = true;
+        submodules = true;
       })
     else
       src;

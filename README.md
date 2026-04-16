@@ -123,14 +123,16 @@ cache pinned by hash rather than checked in.
 ### Git dependencies
 
 `git+…` entries in `Cargo.lock` are fetched at eval time with
-`builtins.fetchGit { url; rev; allRefs = true; }` so the resolver can read
-each crate's `Cargo.toml` (the registry index has no record of them). When
-the upstream repo is a Cargo workspace, the resolver locates the right
-member and passes its sub-directory to `buildRustCrate` as
-`workspace_member`.
+`builtins.fetchGit { url; rev; allRefs = true; submodules = true; }` so the
+resolver can read each crate's `Cargo.toml` (the registry index has no
+record of them). Submodules are pulled to match cargo, which always
+recurses them for git deps. When the upstream repo is a Cargo workspace,
+the resolver locates the right member and passes its sub-directory to
+`buildRustCrate` as `workspace_member`.
 
-Override `gitSources` when `fetchGit` can't reach the repo (private,
-vendored fixture) or you need `submodules = true`:
+Override `gitSources` when `fetchGit` can't reach the repo (private auth,
+vendored fixture), to pin a `narHash`/use a FOD fetcher, or to skip
+submodules for a repo that doesn't need them:
 
 ```nix
 cargoNix = cargo-nix-plugin.lib {
@@ -139,11 +141,10 @@ cargoNix = cargo-nix-plugin.lib {
   gitSources = {
     # key = "${url}#${rev}" with git+ and ?query stripped — exactly what
     # appears in Cargo.lock after `git+` and before `?`, plus `#REV`.
-    "https://github.com/Byron/gitoxide#abcdef…" = builtins.fetchGit {
+    "https://github.com/Byron/gitoxide#abcdef…" = pkgs.fetchgit {
       url = "git@github.com:Byron/gitoxide";
       rev = "abcdef…";
-      allRefs = true;
-      submodules = true;
+      hash = "sha256-…";
     };
   };
 };
