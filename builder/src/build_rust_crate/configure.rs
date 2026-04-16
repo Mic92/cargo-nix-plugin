@@ -658,6 +658,19 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     let pkg = doc.get("package");
     let pkg_str = |key: &str| pkg.and_then(|p| p.get(key)).and_then(|v| v.as_str());
 
+    // package.autobins / autotests / autolib (default true). Read before bin
+    // discovery so resolve_bins/resolve_lib_path can honour them.
+    let pkg_bool = |key: &str| pkg.and_then(|p| p.get(key)).and_then(|v| v.as_bool());
+    if let Some(b) = pkg_bool("autobins") {
+        config.autobins = b;
+    }
+    if let Some(b) = pkg_bool("autotests") {
+        config.autotests = b;
+    }
+    if let Some(b) = pkg_bool("autolib") {
+        config.autolib = b;
+    }
+
     // Auto-detect edition
     let has_edition =
         |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
@@ -805,6 +818,32 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
             }
         }
     }
+}
+
+/// Cargo's autobins inference: src/main.rs → crate_name, src/bin/*.rs → stem,
+/// src/bin/*/main.rs → dirname. Dotfiles skipped.
+pub fn inferred_bins(crate_name: &str) -> Vec<(String, String)> {
+    let mut bins = Vec::new();
+    if Path::new("src/main.rs").exists() {
+        bins.push((crate_name.to_string(), "src/main.rs".into()));
+    }
+    if let Ok(entries) = fs::read_dir("src/bin") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = entry.file_name();
+            let fname = fname.to_string_lossy();
+            if fname.starts_with('.') {
+                continue;
+            }
+            if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                let name = path.file_stem().unwrap().to_string_lossy().to_string();
+                bins.push((name, path.to_string_lossy().into_owned()));
+            } else if path.is_dir() && path.join("main.rs").exists() {
+                bins.push((fname.into_owned(), path.join("main.rs").to_string_lossy().into_owned()));
+            }
+        }
+    }
+    bins
 }
 
 fn find_workspace_name(cargo_toml: &Path) -> Option<String> {

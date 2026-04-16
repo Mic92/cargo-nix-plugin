@@ -82,9 +82,13 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Build integration tests from tests/
-    if config.build_tests && Path::new("tests").is_dir() {
+    if config.build_tests && config.autotests && Path::new("tests").is_dir() {
         for entry in fs::read_dir("tests")?.flatten() {
             let p = entry.path();
+            let fname = entry.file_name();
+            if fname.to_string_lossy().starts_with('.') {
+                continue;
+            }
             if p.extension().map(|e| e == "rs").unwrap_or(false) && (p.is_file() || p.is_symlink())
             {
                 let name = p.file_stem().unwrap().to_string_lossy().to_string();
@@ -224,7 +228,7 @@ fn build_bin(
 fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
     if !config.lib_path.is_empty() && Path::new(&config.lib_path).exists() {
         Some(config.lib_path.clone())
-    } else if Path::new("src/lib.rs").exists() {
+    } else if config.autolib && Path::new("src/lib.rs").exists() {
         Some("src/lib.rs".into())
     } else {
         None
@@ -268,22 +272,11 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
                 std::process::exit(1);
             }
         }
-    } else if !config.has_crate_bin {
-        if Path::new("src/main.rs").exists() {
-            bins.push((config.crate_name.clone(), "src/main.rs".into()));
-        }
-        if let Ok(entries) = fs::read_dir("src/bin") {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                    let name = path.file_stem().unwrap().to_string_lossy().to_string();
-                    bins.push((name, path.to_string_lossy().into_owned()));
-                } else if path.is_dir() && path.join("main.rs").exists() {
-                    let name = path.file_name().unwrap().to_string_lossy().to_string();
-                    bins.push((name, path.join("main.rs").to_string_lossy().into_owned()));
-                }
-            }
-        }
+    } else if !config.has_crate_bin && config.autobins {
+        // No explicit [[bin]] and no `crateBin` from Nix: pure inference.
+        // (When [[bin]] is present detect_cargo_toml_info already merged the
+        // inferred set into config.crate_bin, so we don't reach this branch.)
+        bins.extend(super::configure::inferred_bins(&config.crate_name));
     }
     bins
 }

@@ -26,6 +26,14 @@ pub struct BuildConfig {
     pub crate_bin: Vec<CrateBin>,
     #[serde(default)]
     pub has_crate_bin: bool,
+    // Cargo's auto-target-discovery toggles. Not passed from Nix; learned
+    // from Cargo.toml in detect_cargo_toml_info, default true (2018+).
+    #[serde(skip, default = "default_true")]
+    pub autobins: bool,
+    #[serde(skip, default = "default_true")]
+    pub autotests: bool,
+    #[serde(skip, default = "default_true")]
+    pub autolib: bool,
     #[serde(default)]
     pub crate_type: Vec<String>,
     #[serde(default)]
