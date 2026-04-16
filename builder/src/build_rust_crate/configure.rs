@@ -105,6 +105,10 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     let mut hook_out_dir = String::new();
     let mut hook_bso_envs: BTreeMap<String, String> = BTreeMap::new();
 
+    // Computed once (spawns `rustc --print=cfg`); only OUT_DIR varies between
+    // the build-script env and the hook-env snapshot below.
+    let base_env = build_env(config, "");
+
     if let Some(script) = build_script {
         echo_colored(&format!("Building {script} ({})", config.lib_name));
 
@@ -113,7 +117,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir_all(&build_dir)?;
         fs::create_dir_all(&out_dir)?;
         let abs_out_dir = fs::canonicalize(&out_dir)?.to_string_lossy().into_owned();
-        let env = build_env(config, &abs_out_dir);
+        let mut env = base_env.clone();
+        env.insert("OUT_DIR".into(), abs_out_dir.clone());
 
         // Compile build script. CARGO_PKG_* / CARGO_MANIFEST_DIR are needed at
         // *compile* time too: build.rs commonly does `env!("CARGO_PKG_NAME")`.
@@ -217,9 +222,11 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // build-script rustc-env) so stdenv hooks can `source target/hook-env`.
     // The old shell builder exported these in the phase shell; the binary's
     // env is process-local.
-    let mut hook_env = build_env(config, &hook_out_dir);
+    let mut hook_env = base_env;
     if hook_out_dir.is_empty() {
         hook_env.remove("OUT_DIR");
+    } else {
+        hook_env.insert("OUT_DIR".into(), hook_out_dir);
     }
     write_hook_env("target/hook-env", &hook_env, &hook_bso_envs)?;
 
@@ -363,24 +370,22 @@ fn parse_version(v: &str) -> (String, String, String, String) {
 /// avoids second-guessing target_env/target_family from Nix's `parsed.abi`
 /// (which yields "unknown" on Darwin/wasm where rustc reports "").
 fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
-    use std::sync::OnceLock;
-    static CFG: OnceLock<String> = OnceLock::new();
-    let out = CFG.get_or_init(|| {
-        let o = Command::new("rustc")
-            .arg("--print=cfg")
-            .arg("--target")
-            .arg(&config.host_platform.rustc_target_spec)
-            .output()
-            .expect("failed to spawn `rustc --print=cfg`");
-        if !o.status.success() {
-            panic!(
-                "`rustc --print=cfg --target {}` failed: {}",
-                config.host_platform.rustc_target_spec,
-                String::from_utf8_lossy(&o.stderr)
-            );
-        }
-        String::from_utf8_lossy(&o.stdout).into_owned()
-    });
+    // Called at most twice per process (always with the same triple), so no
+    // caching — a static OnceLock would be wrong if the triple ever differed.
+    let o = Command::new("rustc")
+        .arg("--print=cfg")
+        .arg("--target")
+        .arg(&config.host_platform.rustc_target_spec)
+        .output()
+        .expect("failed to spawn `rustc --print=cfg`");
+    if !o.status.success() {
+        panic!(
+            "`rustc --print=cfg --target {}` failed: {}",
+            config.host_platform.rustc_target_spec,
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
     let mut cfg: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for line in out.lines() {
         match line.split_once('=') {
@@ -425,7 +430,36 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
         let d = d.trim_end();
 
         if let Some(v) = d.strip_prefix("rustc-flags=") {
-            rustc_flags.push(v.to_string());
+            // Mirror cargo's parse_rustc_flags: only -L/-l are accepted and are
+            // routed to link_search/link_libs so they propagate to dependents
+            // via $lib/lib/link. Anything else cargo rejects; we keep it in
+            // rustc_flags for back-compat.
+            let mut iter = v.split_whitespace();
+            while let Some(tok) = iter.next() {
+                let (flag, val) = if tok == "-L" || tok == "-l" {
+                    match iter.next() {
+                        Some(v) => (tok, v.to_string()),
+                        None => {
+                            rustc_flags.push(tok.to_string());
+                            continue;
+                        }
+                    }
+                } else if let Some(v) = tok.strip_prefix("-L") {
+                    ("-L", v.to_string())
+                } else if let Some(v) = tok.strip_prefix("-l") {
+                    ("-l", v.to_string())
+                } else {
+                    rustc_flags.push(tok.to_string());
+                    continue;
+                };
+                if flag == "-L" {
+                    if !link_search.contains(&val) {
+                        link_search.push(val);
+                    }
+                } else {
+                    bso.link_libs.push(val);
+                }
+            }
         } else if let Some(v) = d.strip_prefix("rustc-check-cfg=") {
             bso.check_cfgs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-cfg=") {
@@ -1037,9 +1071,19 @@ cargo:rustc-link-search=native=/out\n\
 cargo:rustc-link-search=native=/out\n\
 cargo:warning=heads up\n";
         let bso = parse_build_script_output(stdout, "/out");
-        assert_eq!(bso.rustc_flags, "-l foo -L /a -l bar");
+        assert_eq!(bso.rustc_flags, "");
+        assert_eq!(bso.link_libs, vec!["foo", "bar"]);
         assert_eq!(bso.check_cfgs, vec!["cfg(has_foo)"]);
-        assert_eq!(bso.link_search, vec!["native=/out"]); // de-duped, order kept
+        assert_eq!(bso.link_search, vec!["/a", "native=/out"]); // de-duped, order kept
+    }
+
+    #[test]
+    fn build_script_output_rustc_flags_routes_to_link_fields() {
+        let bso =
+            parse_build_script_output("cargo:rustc-flags=-L /a -lfoo -L native=/b\n", "/out");
+        assert_eq!(bso.link_search, vec!["/a", "native=/b"]);
+        assert_eq!(bso.link_libs, vec!["foo"]);
+        assert_eq!(bso.rustc_flags, "");
     }
 
     #[test]
