@@ -51,9 +51,14 @@
   # compiles too — `extraCfgs` only affects resolution.
   extraCfgs ? [],
   # Optional: function from workspace-relative path (string) to src for
-  # local crates. Default slices into the monolithic `src`. Override to
-  # provide narrow per-crate sources (avoids hashing the full workspace).
-  localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
+  # local crates. Default passes the full workspace `src` with
+  # `workspace_member` pointing at the member subdir, so the builder can
+  # walk up to the root Cargo.toml for `field.workspace = true` resolution.
+  # Override to provide narrow per-crate sources (avoids hashing the full
+  # workspace) — return either a path (legacy: builder sees only that dir,
+  # so `*.workspace = true` for CARGO_PKG_* falls back to empty) or
+  # `{ src, workspace_member }` to keep ws-inherit working.
+  localSrc ? relPath: { inherit src; workspace_member = if relPath == "" then "." else relPath; },
   # Optional: alternative registry configuration. Maps the index URL
   # (as cargo metadata / Cargo.lock reports it, including the `sparse+`
   # or `registry+` scheme prefix) to { dl, fetchurl? }.
@@ -285,6 +290,9 @@ let
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl
+  # Returns { src, workspace_member ? null }. workspace_member is the subdir
+  # the builder should cd into after unpack (`build-rust-crate locate`), so
+  # find_workspace_package can walk up from there to the root Cargo.toml.
   resolveSrc =
     crateInfo:
     let
@@ -297,15 +305,19 @@ let
       # Strip workspace root prefix to get relative path (e.g. "harmonia-client")
       relPath = lib.removePrefix (workspaceRoot + "/") sourcePath;
       isSubdir = relPath != sourcePath && relPath != "";
+      ls = localSrc (if isSubdir then relPath else "");
     in
     if sourceType == "local" then
-      localSrc (if isSubdir then relPath else "")
+      # Accept legacy `localSrc` overrides that return a bare path/derivation.
+      if lib.isAttrs ls && !lib.isDerivation ls && ls ? src
+      then ls
+      else { src = ls; workspace_member = "."; }
     else if sourceType == "crates-io" then
-      pkgs.fetchurl {
+      { workspace_member = null; src = pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
         url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
         sha256 = crateInfo.sha256;
-      }
+      }; }
     else if sourceType == "registry" then
       let
         index = crateInfo.source.index;
@@ -317,21 +329,24 @@ let
           '');
         fetch = reg.fetchurl or pkgs.fetchurl;
       in
-      fetch {
+      { workspace_member = null; src = fetch {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
         url = "${reg.dl}/${crateInfo.crateName}/${crateInfo.version}/download";
         sha256 = crateInfo.sha256;
-      }
+      }; }
     else if sourceType == "git" then
-      # Reuse the prefetched checkout (same fetchGit args → same store path).
-      gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
-        url = crateInfo.source.url;
-        rev = crateInfo.source.rev;
-        allRefs = true;
-        submodules = true;
-      })
+      {
+        # Reuse the prefetched checkout (same fetchGit args → same store path).
+        src = gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
+          url = crateInfo.source.url;
+          rev = crateInfo.source.rev;
+          allRefs = true;
+          submodules = true;
+        });
+        workspace_member = crateInfo.source.subPath or null;
+      }
     else
-      src;
+      { inherit src; workspace_member = null; };
 
   # Build a crate using buildRustCrate
   # Memoization via the `self` pattern (builtByPackageId)
@@ -435,7 +450,7 @@ let
         crateName = crateInfo.crateName;
         version = crateInfo.version;
         sha256 = crateInfo.sha256 or "";
-        src = crateSrc;
+        inherit (crateSrc) src;
         authors = crateInfo.authors or [ ];
         inherit dependencies devDependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
@@ -453,11 +468,13 @@ let
       // lib.optionalAttrs libOnly {
         crateBin = [ ];
       }
-      // lib.optionalAttrs ((crateInfo.source.type or "") == "git") {
-        # The git checkout may be a workspace; tell build-rust-crate which
-        # subdir holds this crate. When the resolver couldn't determine it
-        # (older resolver / metadata mode) fall back to its auto-scan.
-        workspace_member = crateInfo.source.subPath or null;
+      // lib.optionalAttrs ((crateSrc.workspace_member or null) != null) {
+        # Local workspace members: unpack the full workspace src and cd into
+        # this subdir, so find_workspace_package can resolve
+        # `field.workspace = true` against the root [workspace.package].
+        # Git deps: the checkout may be a workspace; when the resolver
+        # couldn't determine the subdir fall back to the builder's auto-scan.
+        inherit (crateSrc) workspace_member;
       }
       // lib.optionalAttrs ((crateInfo.edition or "") != "") {
         edition = crateInfo.edition;
