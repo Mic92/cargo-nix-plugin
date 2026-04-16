@@ -246,6 +246,68 @@ workspace members only. Non-workspace dependencies use the normal `rustc` and
 resolve to the **exact same Nix store paths** as a regular build — no redundant
 compilation.
 
+## Tests
+
+`buildTests = true` compiles unit tests, `[[bin]]` tests and integration
+tests under `tests/` into `$out/tests/` (one executable per target).
+`[dev-dependencies]` are pulled in automatically; the regular `.build`
+derivation is unchanged.
+
+```nix
+let
+  cargoNix = cargo-nix-plugin.lib { inherit pkgs; src = ./.; };
+  testsDrv = cargoNix.workspaceMembers.my-crate.build.override {
+    buildTests = true;
+  };
+in
+pkgs.runCommand "my-crate-tests" { } ''
+  for t in ${testsDrv}/tests/*; do
+    echo "--- $(basename "$t")"
+    "$t"
+  done
+  touch $out
+''
+```
+
+As a flake check:
+
+```nix
+checks.x86_64-linux.my-crate-tests = pkgs.runCommand "my-crate-tests" { } ''
+  for t in ${cargoNix.workspaceMembers.my-crate.build.override { buildTests = true; }}/tests/*; do
+    "$t"
+  done
+  touch $out
+'';
+```
+
+Integration tests can locate the crate's binaries the same way they do under
+`cargo test`:
+
+```rust
+// tests/cli.rs
+#[test]
+fn smoke() {
+    let exe = env!("CARGO_BIN_EXE_my-crate");
+    let status = std::process::Command::new(exe).arg("--version").status().unwrap();
+    assert!(status.success());
+}
+```
+
+Tests that need native inputs at runtime get them via the `runCommand`
+wrapper, not via `crateOverrides`:
+
+```nix
+pkgs.runCommand "my-crate-tests" {
+  nativeBuildInputs = [ pkgs.sqlite ];  # for tests that shell out to sqlite3
+} ''
+  for t in ${testsDrv}/tests/*; do "$t"; done
+  touch $out
+''
+```
+
+Known limitations: doctests are not built, and tests under `examples/` /
+`benches/` are not discovered.
+
 ## How It Works
 
 1. **Nix plugin**: Adds a `builtins.resolveCargoWorkspace` primop to Nix. When
