@@ -230,6 +230,10 @@ impl RustcFlags {
         test: bool,
     ) -> Command {
         let mut cmd = Command::new("rustc");
+        // Per-target env that cargo sets on every rustc invocation. We only
+        // ever build the package itself, so CARGO_PRIMARY_PACKAGE is always 1.
+        cmd.env("CARGO_CRATE_NAME", crate_name);
+        cmd.env("CARGO_PRIMARY_PACKAGE", "1");
         cmd.arg("--crate-name")
             .arg(crate_name)
             .arg(source)

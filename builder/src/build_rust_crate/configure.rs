@@ -119,6 +119,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         // *compile* time too: build.rs commonly does `env!("CARGO_PKG_NAME")`.
         let mut cmd = Command::new("rustc");
         cmd.envs(&env);
+        cmd.env("CARGO_CRATE_NAME", "build_script_build");
+        cmd.env("CARGO_PRIMARY_PACKAGE", "1");
         cmd.arg("--crate-name")
             .arg("build_script_build")
             .arg(&script)
