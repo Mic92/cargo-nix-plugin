@@ -1,0 +1,11 @@
+[package]
+name = "foo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bar = { workspace = true }
+
+[features]
+default = ["loud"]
+loud = []

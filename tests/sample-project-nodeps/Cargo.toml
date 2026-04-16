@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["lib", "bin"]
+members = ["lib", "bin", "mixed"]
+
+[workspace.package]
+edition = "2021"
+description = "ws-inherited"

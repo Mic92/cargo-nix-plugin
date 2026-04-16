@@ -95,6 +95,11 @@
             sampleProject = ./tests/sample-project;
           };
 
+          git-source-test = pkgs.callPackage ./tests/git-source-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+          };
+
         }
         # `nix build --store local?root=…` needs the bind-mount-based
         # chroot store, which only exists on Linux.
@@ -145,9 +150,7 @@
         {
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
-          read-crate-info = pkgs.callPackage ./nix/read-crate-info.nix { };
           cargo-nix-prefetch = pkgs.callPackage ./nix/cargo-nix-prefetch.nix { };
-
           # Optional: helper for generating metadata JSON explicitly.
           # Not needed when using the automatic subprocess mode (just pass src).
           # Useful for offline/pure evaluation workflows.
@@ -161,6 +164,7 @@
           # Exercises cargo-nix-prefetch (the standalone binary), not the
           # nix plugin, so it isn't per-nix-version.
           cargo-compat-test = pkgs.callPackage ./tests/cargo-compat-test.nix { };
+          build-rust-crate-bin = pkgs.callPackage ./nix/build-rust-crate-bin.nix { };
         }
         // perVersionPackages pkgs
       );

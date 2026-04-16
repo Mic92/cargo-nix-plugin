@@ -51,9 +51,14 @@
   # compiles too — `extraCfgs` only affects resolution.
   extraCfgs ? [],
   # Optional: function from workspace-relative path (string) to src for
-  # local crates. Default slices into the monolithic `src`. Override to
-  # provide narrow per-crate sources (avoids hashing the full workspace).
-  localSrc ? relPath: if relPath == "" then src else src + "/${relPath}",
+  # local crates. Default passes the full workspace `src` with
+  # `workspace_member` pointing at the member subdir, so the builder can
+  # walk up to the root Cargo.toml for `field.workspace = true` resolution.
+  # Override to provide narrow per-crate sources (avoids hashing the full
+  # workspace) — return either a path (legacy: builder sees only that dir,
+  # so `*.workspace = true` for CARGO_PKG_* falls back to empty) or
+  # `{ src, workspace_member }` to keep ws-inherit working.
+  localSrc ? relPath: { inherit src; workspace_member = if relPath == "" then "." else relPath; },
   # Optional: alternative registry configuration. Maps the index URL
   # (as cargo metadata / Cargo.lock reports it, including the `sparse+`
   # or `registry+` scheme prefix) to { dl, fetchurl? }.
@@ -78,7 +83,7 @@
   # a working-tree Cargo.toml without copying it into the store.
   manifestPath ? null,
   # Optional: override for buildRustCrate. When provided, receives the
-  # vendored buildRustCrate (with cargoTomlInfo auto-detection) as its
+  # vendored buildRustCrate (with build-rust-crate binary) as its
   # second argument so callers can customize on top rather than replace:
   #
   #   buildRustCrateForPkgs = cratePkgs: base: args:
@@ -89,9 +94,21 @@
   # Optional: path to CARGO_HOME for registry index lookup in lockfile
   # resolve mode. Defaults to $CARGO_HOME or ~/.cargo.
   cargoHome ? null,
+  # Optional: pre-fetched git checkouts for `git+` deps, keyed by
+  # `"${url}#${rev}"` (url without `git+`/`?query`). Auto-derived from
+  # Cargo.lock via builtins.fetchGit when null. Override to supply a
+  # checkout fetchGit can't reach (private repo, vendored fixture) or to
+  # set `submodules = true` per-source.
+  gitSources ? null,
 }:
 
 let
+  # Contract version between this Nix wrapper and the Rust resolver
+  # output it consumes (`builtins.resolveCargoWorkspace` /
+  # `WorkspaceResult`). Must match `API_LEVEL` in rust/src/resolve.rs.
+  # Bump both together when the result shape changes incompatibly.
+  apiLevel = 2;
+
   # Build the target description from stdenv if not provided
   defaultTarget = makeDefaultTarget stdenv.hostPlatform;
 
@@ -157,11 +174,71 @@ let
   resolvedTarget =
     (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
 
-  # Build-time binary for auto-detecting edition/proc-macro from Cargo.toml.
-  cargoTomlInfo = pkgs.callPackage ../nix/read-crate-info.nix { };
+  # --- git source prefetch ---
+  # The resolver needs to read each git crate's Cargo.toml to learn its
+  # dependency edges / feature table / sub-directory, but it runs at eval
+  # time and can't fetch. So pre-fetch every distinct `git+URL#REV` from
+  # Cargo.lock here and hand the store paths in. Keyed by `"${url}#${rev}"`
+  # with `git+` and `?query` stripped — matches what resolve_pkg_source()
+  # extracts on the Rust side.
+  lockfileText =
+    if cargoLock != null then
+      cargoLock
+    else if manifestPath != null then
+      builtins.readFile (builtins.dirOf manifestPath + "/Cargo.lock")
+    else if src != null then
+      builtins.readFile (src + "/Cargo.lock")
+    else
+      "";
+  # Cheap regex scan — the full TOML parse happens on the Rust side; here
+  # we only need the set of (url, rev) pairs to fetch. Cargo.lock always
+  # pins a `#rev` for git deps; error out clearly if one is missing.
+  gitSourceLines = lib.unique (
+    builtins.filter (s: s != null) (
+      map (builtins.match ''source = "git\+([^"]+)"'') (
+        lib.splitString "\n" lockfileText
+      )
+    )
+  );
+  autoGitSources = lib.listToAttrs (
+    map (
+      m:
+      let
+        raw = builtins.elemAt m 0;
+        # Split off `#rev` first, then drop any `?branch=…` from the URL.
+        hashSplit = builtins.match "(.*)#([^#]+)" raw;
+        url = builtins.head (lib.splitString "?" (builtins.elemAt hashSplit 0));
+        rev = builtins.elemAt hashSplit 1;
+      in
+      if hashSplit == null then
+        throw "cargo-nix-plugin: git source '${raw}' in Cargo.lock has no #rev"
+      else
+        {
+          name = "${url}#${rev}";
+          value = builtins.fetchGit {
+            inherit url rev;
+            # The locked rev may not be reachable from the default ref.
+            allRefs = true;
+            # Cargo unconditionally recurses submodules for git deps
+            # (src/cargo/sources/git/utils.rs, no opt-out —
+            # rust-lang/cargo#4247). Match that so build-time sources
+            # agree with what `cargo build` would have unpacked.
+            # Override via `gitSources` to opt out per-repo.
+            submodules = true;
+          };
+        }
+    ) gitSourceLines
+  );
+  gitSources' = if gitSources != null then gitSources else autoGitSources;
+
+  # Rust binary that replaces bash configure/build/install phases. It runs on
+  # the build machine for both host- and build-platform crate derivations, so
+  # build→build is the only universally correct slice; passing it explicitly
+  # below means callPackage splicing will not rewrite it for us.
+  buildRustCrateBin = pkgs.pkgsBuildBuild.callPackage ../nix/build-rust-crate-bin.nix { };
 
   defaultBuildRustCrateForPkgs =
-    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit cargoTomlInfo; };
+    cratePkgs: cratePkgs.callPackage ../nix/build-rust-crate { inherit buildRustCrateBin; };
 
   effectiveBuildRustCrateForPkgs =
     if buildRustCrateForPkgs != null then
@@ -170,7 +247,7 @@ let
       defaultBuildRustCrateForPkgs;
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
-  resolved = builtins.resolveCargoWorkspace (
+  rawResolved = builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
       inherit rootFeatures noDefaultFeatures;
@@ -186,10 +263,36 @@ let
         }
         // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
     )
+    // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
   );
+
+  # Guard against skew between this checkout's lib/ and the resolver
+  # statically linked into the running nix. `or 0` covers nix binaries
+  # predating the field. Gating `resolved` itself (rather than checking
+  # at the leaves) makes the message surface ahead of attribute-missing
+  # failures deep in buildRustCrate.
+  #
+  # Warn-only for now: no incompatible change has shipped yet, so skew
+  # is benign. Promote to `throw` on the first real bump.
+  resolvedApiLevel = rawResolved.apiLevel or 0;
+  resolved =
+    if resolvedApiLevel == apiLevel then
+      rawResolved
+    else
+      lib.warn ''
+        cargo-nix-plugin: API level mismatch.
+          nix builtin resolver = ${toString resolvedApiLevel}
+          lib/default.nix      = ${toString apiLevel}
+        Your nix was built against a different cargo-nix-plugin revision
+        than the lib/ you are evaluating. Rebuild/reload the plugin
+        against this checkout.
+      '' rawResolved;
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl
+  # Returns { src, workspace_member ? null }. workspace_member is the subdir
+  # the builder should cd into after unpack (`build-rust-crate locate`), so
+  # find_workspace_package can walk up from there to the root Cargo.toml.
   resolveSrc =
     crateInfo:
     let
@@ -202,15 +305,19 @@ let
       # Strip workspace root prefix to get relative path (e.g. "harmonia-client")
       relPath = lib.removePrefix (workspaceRoot + "/") sourcePath;
       isSubdir = relPath != sourcePath && relPath != "";
+      ls = localSrc (if isSubdir then relPath else "");
     in
     if sourceType == "local" then
-      localSrc (if isSubdir then relPath else "")
+      # Accept legacy `localSrc` overrides that return a bare path/derivation.
+      if lib.isAttrs ls && !lib.isDerivation ls && ls ? src
+      then ls
+      else { src = ls; workspace_member = "."; }
     else if sourceType == "crates-io" then
-      pkgs.fetchurl {
+      { workspace_member = null; src = pkgs.fetchurl {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
         url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
         sha256 = crateInfo.sha256;
-      }
+      }; }
     else if sourceType == "registry" then
       let
         index = crateInfo.source.index;
@@ -222,18 +329,24 @@ let
           '');
         fetch = reg.fetchurl or pkgs.fetchurl;
       in
-      fetch {
+      { workspace_member = null; src = fetch {
         name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
         url = "${reg.dl}/${crateInfo.crateName}/${crateInfo.version}/download";
         sha256 = crateInfo.sha256;
-      }
+      }; }
     else if sourceType == "git" then
-      builtins.fetchGit {
-        url = crateInfo.source.url;
-        rev = crateInfo.source.rev;
+      {
+        # Reuse the prefetched checkout (same fetchGit args → same store path).
+        src = gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
+          url = crateInfo.source.url;
+          rev = crateInfo.source.rev;
+          allRefs = true;
+          submodules = true;
+        });
+        workspace_member = crateInfo.source.subPath or null;
       }
     else
-      src;
+      { inherit src; workspace_member = null; };
 
   # Build a crate using buildRustCrate
   # Memoization via the `self` pattern (builtByPackageId)
@@ -249,7 +362,7 @@ let
       mkCrates =
         libOnly:
         lib.mapAttrs (
-          packageId: _: buildCrate { inherit libOnly; } self cratePkgs buildRustCrate packageId
+          packageId: _: buildCrate libOnly self cratePkgs buildRustCrate packageId
         ) resolved.crates;
 
       self = {
@@ -270,8 +383,7 @@ let
     self;
 
   buildCrate =
-    { libOnly }:
-    self: cratePkgs: buildRustCrate: packageId:
+    libOnly: self: cratePkgs: buildRustCrate: packageId:
     let
       crateInfo = resolved.crates.${packageId};
 
@@ -299,14 +411,22 @@ let
       # platform, so all their dependencies must be built for that platform.
       buildDepDrv = dep: self.build.cratesLibOnly.${dep.packageId};
 
-      # Dependencies are already filtered by the Rust resolver:
-      # platform-incompatible and inactive optional deps are excluded.
-      dependencies = map depDrv (crateInfo.dependencies or [ ]);
+      # The resolver has already filtered platform / inactive-optional deps.
+      # Dev-deps share the DepInfo shape so reuse depDrv; buildRustCrate
+      # only folds them into --extern when buildTests=true so `.build`
+      # stays byte-identical to a no-dev-deps build.
+      normalDeps = crateInfo.dependencies or [ ];
+      devDeps = crateInfo.devDependencies or [ ];
+      dependencies = map depDrv normalDeps;
+      # Only the with-bins root ever has buildTests flipped on; lib-only
+      # is the dep-edge variant where tests are never built, so don't
+      # drag dev-dep drvs into its closure even lazily.
+      devDependencies = if libOnly then [ ] else map depDrv devDeps;
       buildDependencies = map buildDepDrv (crateInfo.buildDependencies or [ ]);
 
       # Renames: { crate_name = [{ version = "x.y.z"; rename = "alias"; }]; }
       renamedDeps = lib.filter (d: d ? rename && d.rename != null) (
-        (crateInfo.dependencies or [ ]) ++ (crateInfo.buildDependencies or [ ])
+        normalDeps ++ devDeps ++ (crateInfo.buildDependencies or [ ])
       );
       crateRenames =
         let
@@ -322,20 +442,27 @@ let
     in
     buildRustCrate (
       {
-        crateName = crateInfo.crateName;
-        version = crateInfo.version;
+        inherit (crateInfo) crateName version;
         sha256 = crateInfo.sha256 or "";
-        src = crateSrc;
+        inherit (crateSrc) src;
         authors = crateInfo.authors or [ ];
-        inherit dependencies buildDependencies crateRenames;
+        inherit dependencies devDependencies buildDependencies crateRenames;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
       }
-      # Only pass crateBin when we need to: lib-only (to suppress bins) or
-      # when metadata provides explicit bin targets. When omitted,
-      # buildRustCrate auto-detects from src/main.rs and src/bin/*.
-      // lib.optionalAttrs (libOnly || (crateInfo ? crateBin && crateInfo.crateBin != [ ])) {
-        crateBin = if libOnly then [ ] else crateInfo.crateBin;
+      # Only ever pass crateBin to *suppress* bins on the lib-only variant.
+      # Never forward crateInfo.crateBin: that is only the explicit [[bin]]
+      # entries, and passing it sets has_crate_bin=true which short-circuits
+      # the builder's [[bin]]+autobins merge. crateOverrides.<name>.crateBin
+      # still wins via buildRustCrate's `crate_ // override`.
+      // lib.optionalAttrs libOnly {
+        crateBin = [ ];
+      }
+      // lib.optionalAttrs ((crateSrc.workspace_member or null) != null) {
+        # Subdir to cd into after unpack so `field.workspace = true` resolves
+        # against the root [workspace.package]. Omitted (→ builder auto-scan)
+        # for git checkouts where the resolver couldn't locate the crate.
+        inherit (crateSrc) workspace_member;
       }
       // lib.optionalAttrs ((crateInfo.edition or "") != "") {
         edition = crateInfo.edition;
@@ -371,8 +498,7 @@ let
 
   clippyRustcWrapper =
     let
-      clippy = pkgs.clippy;
-      rustc = pkgs.rustc;
+      inherit (pkgs) clippy rustc;
       extraArgs = lib.concatMapStringsSep " " lib.escapeShellArg clippyArgs;
     in
     pkgs.runCommand "clippy-as-rustc"
@@ -412,8 +538,14 @@ let
         in
         if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
 
-      # Clippy buildRustCrate: use clippy-driver as the compiler
-      clippyBuildRustCrate = args: (normalBuildRustCrate args).override { rust = clippyRustcWrapper; };
+      # Clippy buildRustCrate: use clippy-driver as the compiler. The default
+      # cap-lints=allow neutralises every lint (including -D warnings from
+      # clippyArgs); workspace members get the cargo behaviour of no cap.
+      clippyBuildRustCrate = args:
+        (normalBuildRustCrate args).override {
+          rust = clippyRustcWrapper;
+          capLints = "warn";
+        };
 
       workspaceMemberIds = lib.attrValues resolved.workspaceMembers;
 
@@ -428,7 +560,7 @@ let
             isWorkspaceMember = lib.elem packageId workspaceMemberIds;
           in
           if isWorkspaceMember then
-            buildCrate { libOnly = false; } self cratePkgs clippyBuildRustCrate packageId
+            buildCrate false self cratePkgs clippyBuildRustCrate packageId
           else
             normalBuilt.cratesLibOnly.${packageId}
         ) resolved.crates;
@@ -446,10 +578,40 @@ let
 in
 {
   # Public interface matching crate2nix
-  workspaceMembers = lib.mapAttrs (name: packageId: {
-    inherit packageId;
-    build = builtCrates.crates.${packageId};
-  }) resolved.workspaceMembers;
+  workspaceMembers = lib.mapAttrs (
+    name: packageId:
+    let
+      testsDrv = builtCrates.crates.${packageId}.override { buildTests = true; };
+    in
+    {
+      inherit packageId;
+      build = builtCrates.crates.${packageId};
+      # Compile tests with dev-dependencies wired in. Equivalent to
+      # `.build.override { buildTests = true; }` — buildRustCrate folds
+      # devDependencies into the --extern set only when buildTests is set.
+      buildTests = testsDrv;
+      # Batteries-included runner: sequential across test binaries (matches
+      # `cargo test`), libtest parallelism inside each. nativeCheckInputs
+      # set via crateOverrides are forwarded so tests that shell out to
+      # external tools find them on PATH at runtime too.
+      runTests =
+        pkgs.runCommand "${name}-tests"
+          {
+            nativeBuildInputs = testsDrv.nativeCheckInputs;
+            passthru = { inherit testsDrv; };
+          }
+          ''
+          export CARGO_TARGET_TMPDIR="$(mktemp -d)"
+          export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
+          shopt -s nullglob
+          for t in ${testsDrv}/tests/*; do
+            echo "── running $(basename "$t")"
+            "$t"
+          done
+          touch $out
+        '';
+    }
+  ) resolved.workspaceMembers;
 
   rootCrate =
     if resolved.root != null then
@@ -487,4 +649,5 @@ in
   # Expose internals for debugging
   inherit resolved;
   inherit builtCrates;
+  inherit apiLevel;
 }

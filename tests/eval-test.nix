@@ -40,6 +40,11 @@ let
 
   assertions = [
     {
+      name = "api-level";
+      ok = (result.apiLevel or 0) >= 1;
+      msg = "Expected apiLevel >= 1, got ${toString (result.apiLevel or 0)}";
+    }
+    {
       name = "crate-count";
       ok = crateCount >= 1700;
       msg = "Expected >= 1700 crates, got ${toString crateCount}";

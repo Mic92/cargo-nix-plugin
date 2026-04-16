@@ -1,6 +1,6 @@
 //! Feature resolution: merge, expand, and propagate features across the dependency graph.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A simplified view of a package for feature resolution purposes.
 #[derive(Debug, Clone)]
@@ -20,16 +20,20 @@ pub struct DepFeatureInfo {
     pub package_id: String,
     pub uses_default_features: bool,
     pub features: Vec<String>,
+    /// Per-edge optionality (cargo `FeatureResolver::activate_pkg` checks
+    /// `dep.is_optional()` per edge). NOT `optional_deps.contains(name)`:
+    /// the same name can be optional in `[dependencies]` and required in
+    /// `[dev-dependencies]`. Feature *rules* (`dep:foo`, `foo/feat`) still
+    /// key on the name-set.
+    pub optional: bool,
 }
 
-/// Resolve features for all packages in the graph.
-///
 /// Result of feature resolution: resolved features and active optional deps.
 pub struct FeatureResolution {
     /// package_id -> set of resolved features
     pub features: HashMap<String, BTreeSet<String>>,
     /// (package_id, local_dep_name) pairs for activated optional deps
-    pub active_optional_deps: std::collections::HashSet<(String, String)>,
+    pub active_optional_deps: HashSet<(String, String)>,
 }
 
 /// `root_packages` are the workspace members with their initially requested features.
@@ -39,22 +43,12 @@ pub fn resolve_features(
     root_packages: &[(String, Vec<String>)],
 ) -> FeatureResolution {
     let mut resolved: HashMap<String, BTreeSet<String>> = HashMap::new();
+    // (package_id, local_dep_name). Distinct from `resolved`: `dep:foo`
+    // activates the dep without creating a feature named "foo".
+    let mut active_optional: HashSet<(String, String)> = HashSet::new();
 
-    // Which optional deps are active, keyed by (package_id, local_dep_name).
-    // This is *not* the same as the feature set: `dep:foo` activates the
-    // dep without creating a feature named "foo", whereas legacy `["foo"]`
-    // does both. Cargo reference: "Using dep: [...] does not implicitly
-    // create a feature of the same name".
-    let mut active_optional: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
-
-    // Queue of (package_id, features_to_add)
-    let mut queue: Vec<(String, Vec<String>)> = Vec::new();
-
-    // Seed the queue with root packages
-    for (pkg_id, features) in root_packages {
-        queue.push((pkg_id.clone(), features.clone()));
-    }
+    // Queue of (package_id, features_to_add), seeded with roots.
+    let mut queue: Vec<(String, Vec<String>)> = root_packages.to_vec();
 
     while let Some((pkg_id, new_features)) = queue.pop() {
         let Some(pkg) = packages.get(&pkg_id) else {
@@ -65,12 +59,10 @@ pub fn resolve_features(
         let (expanded, activated_deps) =
             expand_features(&pkg.features, &new_features, &pkg.optional_deps);
 
-        // Merge both state stores. Track first visit separately from
-        // "no delta": a crate with zero features (everything dropped by
-        // is_valid_feature, e.g. seeded with ["default"] when no default
-        // exists) still needs its deps propagated once. The old code
-        // masked this by letting expand_features keep the spurious
-        // "default", which made added_new true on every first visit.
+        // Merge into both state stores. `first_visit` is tracked separately
+        // from `added_new`: a crate that resolves to zero features (e.g.
+        // seeded with ["default"] but has none) still needs its deps
+        // propagated once.
         let first_visit = !resolved.contains_key(&pkg_id);
         let entry = resolved.entry(pkg_id.clone()).or_default();
         let mut added_new = false;
@@ -86,12 +78,11 @@ pub fn resolve_features(
         }
 
         // Propagate to dependencies.
-        let current_features = resolved.get(&pkg_id).cloned().unwrap_or_default();
+        let current_features = &resolved[&pkg_id];
         for dep in &pkg.dependencies {
-            // Skip optional deps nothing activated.
-            if pkg.optional_deps.contains(&dep.name)
-                && !active_optional.contains(&(pkg_id.clone(), dep.name.clone()))
-            {
+            // Per-edge gate (cargo `activate_pkg`): a non-optional edge with
+            // the same name as an inactive optional one still propagates.
+            if dep.optional && !active_optional.contains(&(pkg_id.clone(), dep.name.clone())) {
                 continue;
             }
 
@@ -100,20 +91,20 @@ pub fn resolve_features(
                 dep_features.push("default".to_string());
             }
 
-            // dep/feat forwarding. Weak `dep?/feat` is safe to match here:
-            // the gate above already ensured dep is enabled.
+            // `dep/feat` forwarding. Weak `dep?/feat` is safe to match here:
+            // the gate above already ensured the dep is enabled.
             let strong = format!("{}/", dep.name);
             let weak = format!("{}?/", dep.name);
-            for feat in &current_features {
-                if let Some(rules) = pkg.features.get(feat.as_str()) {
-                    for rule in rules {
-                        if let Some(rest) = rule
-                            .strip_prefix(&strong)
-                            .or_else(|| rule.strip_prefix(&weak))
-                        {
-                            dep_features.push(rest.to_string());
-                        }
-                    }
+            for rule in current_features
+                .iter()
+                .filter_map(|f| pkg.features.get(f))
+                .flatten()
+            {
+                if let Some(rest) = rule
+                    .strip_prefix(&strong)
+                    .or_else(|| rule.strip_prefix(&weak))
+                {
+                    dep_features.push(rest.to_string());
                 }
             }
 
@@ -139,24 +130,10 @@ fn expand_features(
     initial: &[String],
     optional_deps: &BTreeSet<String>,
 ) -> (BTreeSet<String>, BTreeSet<String>) {
-    // Cargo semantics for optional dep X and the name "X" as a feature:
-    //
-    // If `dep:X` appears ANYWHERE in the features map, cargo suppresses
-    // the implicit feature — `X` is then ONLY a valid feature name if
-    // the manifest explicitly defines `X = [...]`. Otherwise (legacy),
-    // `X` is always a valid feature that both activates the dep and
-    // sets `--cfg feature="X"`.
-    //
-    // Concretely: whether "X" appears in the resolved feature set depends
-    // entirely on whether "X" is a *valid feature name* (either legacy
-    // implicit or explicit key in the map). Non-weak `X/feat` always
-    // pushes "X" to expand; if it's not a valid feature it's just dropped.
-    //
-    //   legacy (no dep:X anywhere):     X is implicit feature → valid
-    //   dep:X present, no `X = [..]`:   X is NOT a valid feature
-    //   dep:X present, `X = [..]` too:  X is the explicit feature → valid
-    //
-    // Verified empirically against cargo; see tests below for each case.
+    // For optional dep X, the *feature name* "X" is valid iff either it's an
+    // explicit key in `features_map`, or it's the legacy implicit feature
+    // (`dep:X` appears nowhere). See cargo reference § "Optional dependencies";
+    // each case has a test below.
     let dep_prefix_used: BTreeSet<&str> = features_map
         .values()
         .flatten()
@@ -184,13 +161,10 @@ fn expand_features(
         }
 
         // `X/feat` (non-weak) on an optional dep activates the dep and
-        // pushes "X" to expand as a feature — whether it sticks depends
-        // on is_valid_feature above. `X?/feat` activates nothing here.
+        // pushes "X" to expand as a feature (sticks iff `is_valid_feature`).
+        // `X?/feat` activates nothing here.
         if let Some((lhs, _)) = item.split_once('/') {
-            let (dep, weak) = match lhs.strip_suffix('?') {
-                Some(d) => (d, true),
-                None => (lhs, false),
-            };
+            let (dep, weak) = lhs.strip_suffix('?').map_or((lhs, false), |d| (d, true));
             if !weak && optional_deps.contains(dep) {
                 active_deps.insert(dep.to_string());
                 work.push(dep.to_string());
@@ -198,8 +172,8 @@ fn expand_features(
             continue;
         }
 
-        // Plain feature name. Only sticks if valid; otherwise it was a
-        // dangling reference to a suppressed implicit feature.
+        // Plain feature name. Drop dangling references to suppressed
+        // implicit features.
         if !is_valid_feature(&item) {
             continue;
         }
@@ -240,6 +214,7 @@ mod tests {
                     package_id: pkg_id.to_string(),
                     uses_default_features: *default_feats,
                     features: feats.iter().map(|s| s.to_string()).collect(),
+                    optional: optional.contains(name),
                 })
                 .collect(),
             optional_deps: optional.iter().map(|s| s.to_string()).collect(),
@@ -471,6 +446,61 @@ mod tests {
         );
         // opt-pkg should not even be in the graph.
         assert!(!result_raw.features.contains_key("opt-pkg"));
+    }
+
+    /// Same dep name, two edges: optional in `[dependencies]`, required
+    /// in `[dev-dependencies]`. The required edge must propagate even
+    /// though the optional one is inactive. Regression: gating on the
+    /// name-set `optional_deps` skipped BOTH edges.
+    ///
+    /// Ground truth: tests/fixtures/feature-dev-shadows-optional —
+    /// `cargo metadata` resolves leaf to ["d","default","extra"].
+    #[test]
+    fn required_edge_not_shadowed_by_optional_same_name() {
+        let mut packages = HashMap::new();
+        packages.insert(
+            "root".to_string(),
+            PackageFeatureInfo {
+                features: [("with-leaf".to_string(), vec!["dep:leaf".to_string()])]
+                    .into_iter()
+                    .collect(),
+                dependencies: vec![
+                    DepFeatureInfo {
+                        name: "leaf".into(),
+                        package_id: "leaf".into(),
+                        uses_default_features: false,
+                        features: vec![],
+                        optional: true,
+                    },
+                    DepFeatureInfo {
+                        name: "leaf".into(),
+                        package_id: "leaf".into(),
+                        uses_default_features: true,
+                        features: vec!["extra".into()],
+                        optional: false,
+                    },
+                ],
+                optional_deps: ["leaf".to_string()].into_iter().collect(),
+            },
+        );
+        packages.insert(
+            "leaf".to_string(),
+            make_package(&[("default", &["d"]), ("d", &[]), ("extra", &[])], &[], &[]),
+        );
+
+        let result = resolve_features(&packages, &[("root".into(), vec!["default".into()])]);
+        let leaf = result
+            .features
+            .get("leaf")
+            .expect("leaf reached via dev-dep");
+        for f in ["default", "d", "extra"] {
+            assert!(leaf.contains(f), "leaf missing {f}: {leaf:?}");
+        }
+        // with-leaf was NOT enabled, so the optional normal-dep edge stays
+        // inactive — the build-time filter must still drop it.
+        assert!(!result
+            .active_optional_deps
+            .contains(&("root".into(), "leaf".into())));
     }
 
     /// Regression: rustls `[dependencies.webpki] package = "rustls-webpki"`.

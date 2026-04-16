@@ -120,6 +120,39 @@ cargoNix = cargo-nix-plugin.lib {
 The same shape works wrapped in a fixed-output derivation if you want the
 cache pinned by hash rather than checked in.
 
+### Git dependencies
+
+`git+…` entries in `Cargo.lock` are fetched at eval time with
+`builtins.fetchGit { url; rev; allRefs = true; submodules = true; }` so the
+resolver can read each crate's `Cargo.toml` (the registry index has no
+record of them). Submodules are pulled to match cargo, which always
+recurses them for git deps. When the upstream repo is a Cargo workspace,
+the resolver locates the right member and passes its sub-directory to
+`buildRustCrate` as `workspace_member`.
+
+Override `gitSources` when `fetchGit` can't reach the repo (private auth,
+vendored fixture), to pin a `narHash`/use a FOD fetcher, or to skip
+submodules for a repo that doesn't need them:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  gitSources = {
+    # key = "${url}#${rev}" with git+ and ?query stripped — exactly what
+    # appears in Cargo.lock after `git+` and before `?`, plus `#REV`.
+    "https://github.com/Byron/gitoxide#abcdef…" = pkgs.fetchgit {
+      url = "git@github.com:Byron/gitoxide";
+      rev = "abcdef…";
+      hash = "sha256-…";
+    };
+  };
+};
+```
+
+A `git+` source without a pinned `#rev` is rejected; `Cargo.lock` always
+pins one.
+
 ### Debug logging
 
 The resolver stays quiet on the happy path so eval output isn't drowned in
@@ -213,6 +246,40 @@ workspace members only. Non-workspace dependencies use the normal `rustc` and
 resolve to the **exact same Nix store paths** as a regular build — no redundant
 compilation.
 
+## Tests
+
+```nix
+checks.x86_64-linux.my-crate-tests =
+  cargoNix.workspaceMembers.my-crate.runTests;
+```
+
+`runTests` compiles lib unit tests and integration tests under `tests/`
+(with `[dev-dependencies]` wired in) and runs them sequentially. The regular
+`.build` derivation is unchanged. Integration tests can spawn the crate's
+binaries via `env!("CARGO_BIN_EXE_<name>")` exactly as under `cargo test`.
+
+Tests that shell out to external tools at runtime declare them via
+`nativeCheckInputs` in `crateOverrides`; `runTests` puts them on PATH:
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  crateOverrides = pkgs.defaultCrateOverrides // {
+    my-crate = _: { nativeCheckInputs = [ pkgs.sqlite ]; };
+  };
+};
+```
+
+The runner sets `RUST_BACKTRACE=1` and points `CARGO_TARGET_TMPDIR` at a
+fresh temp dir. If you need different behaviour (test filters, `--nocapture`,
+a custom harness), the compiled artefacts are at `.buildTests` —
+`$out/tests/*` are the test executables, `$out/bin/*` the real binaries —
+and `runTests.passthru.testsDrv` points there too.
+
+Known limitations: doctests are not built, per-`[[bin]]` unit tests are not
+compiled, and tests under `examples/` / `benches/` are not discovered.
+
 ## How It Works
 
 1. **Nix plugin**: Adds a `builtins.resolveCargoWorkspace` primop to Nix. When
@@ -273,6 +340,15 @@ compiles too — `extraCfgs` only affects dependency resolution.
 
 - **Platforms**: `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
   Cross-compilation to other target platforms is supported.
+
+- **API level**: `builtins.resolveCargoWorkspace` returns an integer
+  `apiLevel` field describing the resolver-output / `lib/` contract.
+  `lib/default.nix` checks it against its own constant and throws a clear
+  error on mismatch. This guards setups that statically link the resolver
+  into Nix (so the binary may lag the `lib/` checkout). Bump
+  `API_LEVEL` in `rust/src/resolve.rs` and `apiLevel` in
+  `lib/default.nix` together whenever the result shape changes
+  incompatibly.
 
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`

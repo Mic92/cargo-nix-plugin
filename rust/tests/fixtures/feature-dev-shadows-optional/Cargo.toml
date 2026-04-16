@@ -1,0 +1,19 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+# leaf is an optional normal dep (no default features) AND a required
+# dev-dep (with defaults + extra). cargo's resolver activates leaf via
+# the dev-dep edge regardless of whether `with-leaf` is enabled.
+#
+# Regression: feature_resolve treated `optional` as a per-name property,
+# so the non-optional dev-dep edge was also skipped → leaf never reached.
+[dependencies]
+leaf = { path = "leaf", optional = true, default-features = false }
+
+[dev-dependencies]
+leaf = { path = "leaf", features = ["extra"] }
+
+[features]
+with-leaf = ["dep:leaf"]

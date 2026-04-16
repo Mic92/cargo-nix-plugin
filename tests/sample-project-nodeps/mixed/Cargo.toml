@@ -1,0 +1,13 @@
+[package]
+name = "nodeps-mixed"
+version = "0.1.0"
+# Exercises workspace inheritance in detect_cargo_toml_info: without
+# resolving {workspace=true} this falls back to edition 2015 and
+# `dyn Fn()` below fails to parse.
+edition.workspace = true
+description.workspace = true
+
+# One explicit [[bin]] must not suppress inference of src/main.rs.
+[[bin]]
+name = "explicit"
+path = "src/bin/explicit.rs"
