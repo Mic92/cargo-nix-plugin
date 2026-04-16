@@ -71,6 +71,7 @@ lib.makeOverridable
         "src"
         "nativeBuildInputs"
         "buildInputs"
+        "nativeCheckInputs"
         "crateBin"
         "crateLib"
         "libName"
@@ -169,7 +170,12 @@ lib.makeOverridable
         ++ lib.optionals stdenv.hasCC [ stdenv.cc ]
         ++ lib.optionals stdenv.buildPlatform.isDarwin [ libiconv ]
         ++ (crate.nativeBuildInputs or [ ])
-        ++ nativeBuildInputs_;
+        ++ nativeBuildInputs_
+        # Tools tests shell out to (git, sqlite3, ...). Folded into
+        # nativeBuildInputs only for the buildTests variant so the regular
+        # build's closure stays clean; also exposed via passthru for the
+        # runTests wrapper.
+        ++ lib.optionals buildTests_ (crate.nativeCheckInputs or [ ]);
         buildInputs =
           lib.optionals stdenv.hostPlatform.isDarwin [ libiconv ]
           ++ (crate.buildInputs or [ ])
@@ -351,6 +357,7 @@ lib.makeOverridable
         passthru = {
           dependencies = dependencies_;
           buildDependencies = buildDependencies_;
+          nativeCheckInputs = crate.nativeCheckInputs or [ ];
         };
 
         meta = {

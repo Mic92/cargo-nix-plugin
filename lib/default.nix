@@ -581,10 +581,16 @@ in
       # devDependencies into the --extern set only when buildTests is set.
       buildTests = testsDrv;
       # Batteries-included runner: sequential across test binaries (matches
-      # `cargo test`), libtest parallelism inside each. Override
-      # nativeBuildInputs via .overrideAttrs for tests that shell out.
+      # `cargo test`), libtest parallelism inside each. nativeCheckInputs
+      # set via crateOverrides are forwarded so tests that shell out to
+      # external tools find them on PATH at runtime too.
       runTests =
-        pkgs.runCommand "${name}-tests" { passthru = { inherit testsDrv; }; } ''
+        pkgs.runCommand "${name}-tests"
+          {
+            nativeBuildInputs = testsDrv.nativeCheckInputs;
+            passthru = { inherit testsDrv; };
+          }
+          ''
           export CARGO_TARGET_TMPDIR="$(mktemp -d)"
           export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
           shopt -s nullglob

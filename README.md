@@ -258,13 +258,17 @@ checks.x86_64-linux.my-crate-tests =
 `.build` derivation is unchanged. Integration tests can spawn the crate's
 binaries via `env!("CARGO_BIN_EXE_<name>")` exactly as under `cargo test`.
 
-Tests that shell out to external tools at runtime get them via
-`.overrideAttrs`, not `crateOverrides`:
+Tests that shell out to external tools at runtime declare them via
+`nativeCheckInputs` in `crateOverrides`; `runTests` puts them on PATH:
 
 ```nix
-cargoNix.workspaceMembers.my-crate.runTests.overrideAttrs (_: {
-  nativeBuildInputs = [ pkgs.sqlite ];
-})
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  crateOverrides = pkgs.defaultCrateOverrides // {
+    my-crate = _: { nativeCheckInputs = [ pkgs.sqlite ]; };
+  };
+};
 ```
 
 The runner sets `RUST_BACKTRACE=1` and points `CARGO_TARGET_TMPDIR` at a
