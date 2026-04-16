@@ -483,6 +483,14 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
         } else if let Some(v) = d.strip_prefix("rustc-link-arg-tests=") {
             bso.link_args_tests
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
+        } else if d.starts_with("rustc-link-arg-examples=")
+            || d.starts_with("rustc-link-arg-benches=")
+            || d.starts_with("rerun-if-")
+        {
+            // Accepted but inert: this builder never compiles example/bench
+            // targets, and rerun-if-* is meaningless in a content-addressed
+            // sandbox. Listed explicitly so the cargo-parity audit can cite a
+            // line (custom_build.rs RESERVED_PREFIXES).
         } else if let Some(v) = d.strip_prefix("rustc-link-lib=") {
             bso.link_libs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-link-search=") {
@@ -540,16 +548,18 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
                 None => continue,
             }
         } else if let Some(rest) = line.strip_prefix("cargo:") {
+            // Old-syntax: skip cargo's RESERVED_PREFIXES (custom_build.rs:817).
+            // `error=` is *not* reserved there, so `cargo:error=..` is metadata.
+            if rest.starts_with("rustc-")
+                || rest.starts_with("warning=")
+                || rest.starts_with("rerun-if-")
+            {
+                continue;
+            }
             rest
         } else {
             continue;
         };
-        if d.starts_with("rustc-")
-            || d.starts_with("warning=")
-            || d.starts_with("rerun-if-")
-        {
-            continue;
-        }
         if let Some((k, v)) = d.split_once('=') {
             vars.insert(k.into(), v.into());
         }
@@ -1127,6 +1137,66 @@ cargo:rustc-link-arg-tests=-testflag\n";
         let bso = parse_build_script_output("cargo:rustc-link-arg=-x\n", "/out");
         assert_eq!(bso.link_args, vec!["-C", "link-arg=-x"]);
         assert!(bso.link_args_lib.is_empty());
+    }
+
+    #[test]
+    fn build_script_output_noop_directives_are_ignored() {
+        // examples/benches: builder never compiles those targets, so the
+        // directives are accepted and dropped (cargo would error only if the
+        // package lacks such a target). rerun-if-* are pure no-ops in a Nix
+        // sandbox. None of these may leak into rustc_flags or link fields.
+        let stdout = "\
+cargo:rustc-link-arg-examples=-ex\n\
+cargo::rustc-link-arg-benches=-bn\n\
+cargo:rerun-if-changed=build.rs\n\
+cargo::rerun-if-env-changed=CC\n\
+cargo:error=this is metadata, not fatal\n\
+cargo::metadata=include=/out/inc\n";
+        let bso = parse_build_script_output(stdout, "/out");
+        assert_eq!(bso.rustc_flags, "");
+        assert!(bso.link_args.is_empty());
+        assert!(bso.link_args_bins.is_empty());
+        assert!(bso.link_args_bin.is_empty());
+        assert!(bso.envs.is_empty());
+    }
+
+    #[test]
+    fn build_script_output_cdylib_aliases() {
+        let bso = parse_build_script_output(
+            "cargo:rustc-cdylib-link-arg=-a\ncargo::rustc-link-arg-cdylib=-b\n",
+            "/out",
+        );
+        assert_eq!(
+            bso.cdylib_link_args,
+            vec!["-C", "link-arg=-a", "-C", "link-arg=-b"]
+        );
+    }
+
+    #[test]
+    fn links_metadata_parsing() {
+        let stdout = "\
+cargo:include=/a=/b\n\
+cargo::metadata=root=/out\n\
+cargo::metadata=rustc-foo=bar\n\
+cargo::rustc-cfg=x\n\
+cargo::warning=w\n\
+cargo:warning=w2\n\
+cargo:rerun-if-changed=build.rs\n\
+cargo:error=legacy\n\
+cargo::error=fatal\n";
+        let vars = parse_links_metadata(stdout);
+        // `=` in value preserved; new-syntax routed via metadata=; reserved
+        // keys and cargo:: instructions excluded; old-syntax cargo:error= is
+        // plain metadata (not in cargo's RESERVED_PREFIXES).
+        assert_eq!(
+            vars,
+            BTreeMap::from([
+                ("include".into(), "/a=/b".into()),
+                ("root".into(), "/out".into()),
+                ("rustc-foo".into(), "bar".into()),
+                ("error".into(), "legacy".into()),
+            ])
+        );
     }
 
     #[test]
