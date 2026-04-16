@@ -441,11 +441,17 @@ let
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
       }
-      # Only pass crateBin when we need to: lib-only (to suppress bins) or
-      # when metadata provides explicit bin targets. When omitted,
-      # buildRustCrate auto-detects from src/main.rs and src/bin/*.
-      // lib.optionalAttrs (libOnly || (crateInfo ? crateBin && crateInfo.crateBin != [ ])) {
-        crateBin = if libOnly then [ ] else crateInfo.crateBin;
+      # Only pass crateBin to *suppress* bins on the lib-only dep variant.
+      # Never forward the resolver's crateInfo.crateBin: that list is only the
+      # explicit [[bin]] entries from Cargo.toml, and passing it sets
+      # has_crate_bin=true in the builder, which short-circuits the autobins
+      # merge in configure.rs (so an inferred src/main.rs alongside an
+      # explicit [[bin]] is dropped). The builder re-reads the unpacked
+      # Cargo.toml and does [[bin]] + autobins itself. A user-supplied
+      # crateOverrides.<name>.crateBin still wins — it is applied inside
+      # buildRustCrate (crate_ // override) and makes `crate ? crateBin` true.
+      // lib.optionalAttrs libOnly {
+        crateBin = [ ];
       }
       // lib.optionalAttrs ((crateInfo.source.type or "") == "git") {
         # The git checkout may be a workspace; tell build-rust-crate which
