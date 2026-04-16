@@ -3,10 +3,10 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
 use super::config::{BuildConfig, CrateMetadata};
-use super::configure::enter_crate_root;
+use super::configure::detect_cargo_toml_info;
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    enter_crate_root(config)?;
+    detect_cargo_toml_info(config);
 
     let metadata = &config.metadata;
     let out = config.out_path();

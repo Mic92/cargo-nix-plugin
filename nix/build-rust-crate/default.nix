@@ -302,9 +302,18 @@ lib.makeOverridable
         };
         buildPlatform.rustcTargetSpec = stdenv.buildPlatform.rust.rustcTargetSpec;
 
+        # Hooks must observe the crate-root cwd and CARGO_*/OUT_DIR/rustc-env
+        # that the old shell builder exported. `locate` resolves
+        # workspace_member (or auto-discovers it) and prints the absolute dir;
+        # we cd there once. `configure` writes target/hook-env with the cargo
+        # env snapshot, sourced once here. genericBuild runs all phases in one
+        # shell, so cwd and exports carry into buildPhase/installPhase just as
+        # in the old configure-crate.nix.
         configurePhase = ''
+          cd "$(build-rust-crate locate)"
           runHook preConfigure
           build-rust-crate configure
+          source target/hook-env
           runHook postConfigure
         '';
         buildPhase = ''

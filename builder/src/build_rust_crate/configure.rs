@@ -30,31 +30,28 @@ pub struct BuildScriptOutputs {
     pub build_out_dir: String,
 }
 
-/// Change cwd into the crate's source root and patch `config` from the
-/// unpacked Cargo.toml. Runs at the top of every phase: each phase is a
-/// separate `build-rust-crate <phase>` process, so the configure phase's
-/// chdir/detect does not survive.
-pub fn enter_crate_root(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    match &config.workspace_member {
-        Some(m) if m != "." && !m.is_empty() => {
-            echo_colored(&format!("Changing directory to {m}"));
-            std::env::set_current_dir(m)?;
-        }
+/// Resolve the crate's source root from `workspace_member` (or by scanning
+/// for a matching Cargo.toml when unset) and print its absolute path. The
+/// stdenv shell cd's there once before `runHook preConfigure`; genericBuild
+/// runs all phases in one shell, so every later `build-rust-crate` invocation
+/// starts in the crate root.
+pub fn locate(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = match &config.workspace_member {
+        Some(m) => PathBuf::from(m),
         None => {
             echo_colored(&format!(
                 "Searching for matching Cargo.toml ({})",
                 config.crate_name
             ));
-            std::env::set_current_dir(find_matching_cargo_toml(&config.crate_name)?)?;
+            find_matching_cargo_toml(&config.crate_name)?.into()
         }
-        _ => {}
-    }
-    detect_cargo_toml_info(config);
+    };
+    println!("{}", fs::canonicalize(dir)?.display());
     Ok(())
 }
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    enter_crate_root(config)?;
+    detect_cargo_toml_info(config);
 
     for dir in &["target/deps", "target/lib", "target/build", "target/buildDeps"] {
         fs::create_dir_all(dir)?;
@@ -104,6 +101,9 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         "" => None,
         path => Some(path.to_string()),
     };
+
+    let mut hook_out_dir = String::new();
+    let mut hook_bso_envs: BTreeMap<String, String> = BTreeMap::new();
 
     if let Some(script) = build_script {
         echo_colored(&format!("Building {script} ({})", config.lib_name));
@@ -195,6 +195,8 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         print!("{stdout}");
 
         let bso = parse_build_script_output(&stdout, &abs_out_dir);
+        hook_out_dir = abs_out_dir.clone();
+        hook_bso_envs = bso.envs.clone();
         fs::write(
             "target/build-script-outputs.json",
             serde_json::to_string_pretty(&bso)?,
@@ -211,7 +213,51 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Snapshot the cargo env (CARGO_*, OUT_DIR, TARGET/HOST/PROFILE, plus
+    // build-script rustc-env) so stdenv hooks can `source target/hook-env`.
+    // The old shell builder exported these in the phase shell; the binary's
+    // env is process-local.
+    let mut hook_env = build_env(config, &hook_out_dir);
+    if hook_out_dir.is_empty() {
+        hook_env.remove("OUT_DIR");
+    }
+    write_hook_env("target/hook-env", &hook_env, &hook_bso_envs)?;
+
     Ok(())
+}
+
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn is_shell_ident(k: &str) -> bool {
+    let mut it = k.chars();
+    matches!(it.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && it.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn write_hook_env(
+    path: &str,
+    base: &BTreeMap<String, String>,
+    bso_envs: &BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    let mut s = String::new();
+    for (k, v) in base.iter().chain(bso_envs) {
+        if is_shell_ident(k) {
+            s.push_str(&format!("export {k}={}\n", shell_quote(v)));
+        }
+    }
+    fs::write(path, s)
 }
 
 pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String> {
@@ -648,8 +694,10 @@ fn walk_files(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
 /// their derivation defaults. Those defaults are wrong for crates like fnv
 /// (`path = "lib.rs"`), new_debug_unreachable (`name = "debug_unreachable"`)
 /// or anything with `crate-type = ["cdylib","rlib"]`. We learn the truth here
-/// from the unpacked source and overwrite the config in place so every phase
-/// sees consistent values.
+/// from the unpacked source and overwrite the config in place.
+///
+/// Runs at the top of every phase (each is a separate process). cwd is
+/// already the crate root, set once by the shell from `locate`'s output.
 pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     if !Path::new("Cargo.toml").exists() {
         return;
@@ -1034,5 +1082,22 @@ cargo:rustc-link-arg-tests=-testflag\n";
         let bso = parse_build_script_output("cargo:rustc-link-arg=-x\n", "/out");
         assert_eq!(bso.link_args, vec!["-C", "link-arg=-x"]);
         assert!(bso.link_args_lib.is_empty());
+    }
+
+    #[test]
+    fn hook_env_is_shell_sourceable() {
+        let mut base = BTreeMap::new();
+        base.insert("CARGO_PKG_NAME".into(), "it's a name".into());
+        base.insert("OUT_DIR".into(), "/build/out".into());
+        let mut extra = BTreeMap::new();
+        extra.insert("MY_VAR".into(), "a\nb".into());
+        extra.insert("bad key".into(), "x".into());
+        let tmp = std::env::temp_dir().join("hook-env-test");
+        write_hook_env(tmp.to_str().unwrap(), &base, &extra).unwrap();
+        let s = fs::read_to_string(&tmp).unwrap();
+        assert!(s.contains("export CARGO_PKG_NAME='it'\\''s a name'\n"));
+        assert!(s.contains("export OUT_DIR='/build/out'\n"));
+        assert!(s.contains("export MY_VAR='a\nb'\n"));
+        assert!(!s.contains("bad key"));
     }
 }

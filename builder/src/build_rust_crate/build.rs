@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use super::config::BuildConfig;
-use super::configure::{BuildScriptOutputs, build_env, enter_crate_root};
+use super::configure::{BuildScriptOutputs, build_env, detect_cargo_toml_info};
 use super::rustc::RustcFlags;
 use super::util::{echo_colored, remove_object_files, run_cmd};
 
@@ -30,7 +30,7 @@ fn setup_build(config: &BuildConfig) -> Result<RustcFlags, Box<dyn std::error::E
 }
 
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
-    enter_crate_root(config)?;
+    detect_cargo_toml_info(config);
 
     let flags = setup_build(config)?;
     let crate_name = config.lib_name_normalized();
