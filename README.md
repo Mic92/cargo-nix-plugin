@@ -248,60 +248,30 @@ compilation.
 
 ## Tests
 
-`workspaceMembers.<name>.runTests` compiles lib unit tests and integration
-tests under `tests/` and runs them. `[dev-dependencies]` are pulled in
-automatically; the regular `.build` derivation is unchanged.
-
-```nix
-let cargoNix = cargo-nix-plugin.lib { inherit pkgs; src = ./.; };
-in cargoNix.workspaceMembers.my-crate.runTests
-```
-
-As a flake check:
-
 ```nix
 checks.x86_64-linux.my-crate-tests =
   cargoNix.workspaceMembers.my-crate.runTests;
 ```
 
-The underlying derivation (test executables in `$out/tests/`, real `[[bin]]`
-executables in `$out/bin/` so `env!("CARGO_BIN_EXE_<name>")` resolves) is
-exposed as `.buildTests` if you need a custom runner:
+`runTests` compiles lib unit tests and integration tests under `tests/`
+(with `[dev-dependencies]` wired in) and runs them sequentially. The regular
+`.build` derivation is unchanged. Integration tests can spawn the crate's
+binaries via `env!("CARGO_BIN_EXE_<name>")` exactly as under `cargo test`.
 
-```nix
-let testsDrv = cargoNix.workspaceMembers.my-crate.buildTests;
-in pkgs.runCommand "my-crate-tests" { } ''
-  export CARGO_TARGET_TMPDIR="$(mktemp -d)"
-  for t in ${testsDrv}/tests/*; do "$t"; done
-  touch $out
-''
-```
-
-Integration tests can locate the crate's binaries the same way they do under
-`cargo test`:
-
-```rust
-// tests/cli.rs
-#[test]
-fn smoke() {
-    let exe = env!("CARGO_BIN_EXE_my-crate");
-    let status = std::process::Command::new(exe).arg("--version").status().unwrap();
-    assert!(status.success());
-}
-```
-
-Tests that need native inputs at runtime get them via `.overrideAttrs` on
-the runner, not via `crateOverrides`:
+Tests that shell out to external tools at runtime get them via
+`.overrideAttrs`, not `crateOverrides`:
 
 ```nix
 cargoNix.workspaceMembers.my-crate.runTests.overrideAttrs (_: {
-  nativeBuildInputs = [ pkgs.sqlite ];  # for tests that shell out to sqlite3
+  nativeBuildInputs = [ pkgs.sqlite ];
 })
 ```
 
-`runTests` exports `CARGO_TARGET_TMPDIR` to a fresh temp dir; the
-compile-time `env!()` value points at the build sandbox and is only useful
-for making `env!()` resolve.
+The runner sets `RUST_BACKTRACE=1` and points `CARGO_TARGET_TMPDIR` at a
+fresh temp dir. If you need different behaviour (test filters, `--nocapture`,
+a custom harness), the compiled artefacts are at `.buildTests` —
+`$out/tests/*` are the test executables, `$out/bin/*` the real binaries —
+and `runTests.passthru.testsDrv` points there too.
 
 Known limitations: doctests are not built, per-`[[bin]]` unit tests are not
 compiled, and tests under `examples/` / `benches/` are not discovered.
