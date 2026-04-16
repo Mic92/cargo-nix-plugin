@@ -16,6 +16,8 @@ pub struct BuildScriptOutputs {
     #[serde(default)]
     pub check_cfgs: Vec<String>,
     pub link_args: Vec<String>,
+    #[serde(default)]
+    pub link_args_lib: Vec<String>,
     pub link_args_bins: Vec<String>,
     pub link_libs: Vec<String>,
     pub link_search: Vec<String>,
@@ -373,6 +375,10 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
             bso.cfgs.push(v.into());
         } else if let Some(v) = d.strip_prefix("rustc-link-arg=") {
             bso.link_args
+                .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
+        } else if let Some(v) = d.strip_prefix("rustc-link-arg-lib=") {
+            // nixpkgs extension (not in cargo): link arg for the lib target only.
+            bso.link_args_lib
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-link-arg-bins=") {
             bso.link_args_bins
