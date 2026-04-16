@@ -104,6 +104,37 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     }
     echo "PASS: src/bin/<name>/main.rs autodiscovered"
 
+    # Target-discovery parity: nodeps-mixed has one explicit [[bin]] plus an
+    # inferred src/main.rs, edition.workspace=true, and a dotfile in src/bin/.
+    ${nix}/bin/nix build \
+      --store "$CHROOT" \
+      --substituters "" \
+      --option plugin-files "${plugin}/lib/nix/plugins" \
+      --impure --no-link --print-out-paths \
+      --expr '
+        let
+          pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
+          pinnedBuildRustCrate = pkgs.callPackage (builtins.storePath ${pluginSrc}/nix/build-rust-crate) {
+            rustc = builtins.storePath ${pkgs.rustc};
+            cargo = builtins.storePath ${pkgs.cargo};
+            mold = builtins.storePath ${pkgs.mold};
+            buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
+          };
+        in (import ${pluginSrc}/lib {
+          inherit pkgs;
+          src = ${sampleProject};
+          buildRustCrateForPkgs = _: _: pinnedBuildRustCrate;
+        }).workspaceMembers.nodeps-mixed.build
+      ' > mixed-out
+    mixed_out=$(cat mixed-out)
+    [[ "$($CHROOT$mixed_out/bin/nodeps-mixed)" == "mixed-main ok" ]] || {
+      echo "FAIL: inferred src/main.rs lost when [[bin]] present"; exit 1;
+    }
+    [[ "$($CHROOT$mixed_out/bin/explicit)" == "explicit ok (ws-inherited)" ]] || {
+      echo "FAIL: explicit [[bin]] or workspace-inherited description broken"; exit 1;
+    }
+    echo "PASS: [[bin]]+autobins merge, edition.workspace=true, dotfile skipped"
+
     # Regression for the lib_path-shadowing bug: buildTests=true compiles the
     # lib with --test (unit tests) and an integration test under tests/, both
     # linked against the just-built rlib.

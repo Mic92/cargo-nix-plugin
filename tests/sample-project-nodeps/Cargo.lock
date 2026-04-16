@@ -12,3 +12,7 @@ dependencies = [
 [[package]]
 name = "nodeps-lib"
 version = "0.1.0"
+
+[[package]]
+name = "nodeps-mixed"
+version = "0.1.0"
