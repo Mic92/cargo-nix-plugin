@@ -656,7 +656,33 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     };
 
     let pkg = doc.get("package");
-    let pkg_str = |key: &str| pkg.and_then(|p| p.get(key)).and_then(|v| v.as_str());
+
+    // Resolve `key = { workspace = true }` against the nearest ancestor
+    // [workspace.package] table. Registry tarballs are normalised so this only
+    // matters for path/git deps, but those are exactly the ones we now reach
+    // via find_matching_cargo_toml.
+    let ws_pkg: Option<toml::Value> = pkg
+        .map(|p| {
+            p.as_table()
+                .map(|t| t.values().any(is_ws_inherit))
+                .unwrap_or(false)
+        })
+        .filter(|&any| any)
+        .and_then(|_| find_workspace_package(Path::new("Cargo.toml")));
+    let pkg_str = |key: &str| -> Option<String> {
+        let v = pkg.and_then(|p| p.get(key))?;
+        if let Some(s) = v.as_str() {
+            return Some(s.to_string());
+        }
+        if is_ws_inherit(v) {
+            return ws_pkg
+                .as_ref()
+                .and_then(|w| w.get(key))
+                .and_then(|w| w.as_str())
+                .map(String::from);
+        }
+        None
+    };
 
     // package.autobins / autotests / autolib (default true). Read before bin
     // discovery so resolve_bins/resolve_lib_path can honour them.
@@ -674,10 +700,16 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     // Auto-detect edition
     let has_edition =
         |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
-    if let Some(ed) = pkg
-        .and_then(|p| p.get("edition"))
-        .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_integer().map(|i| i.to_string())))
-    {
+    if let Some(ed) = pkg.and_then(|p| p.get("edition")).and_then(|v| {
+        v.as_str()
+            .map(String::from)
+            .or_else(|| v.as_integer().map(|i| i.to_string()))
+            .or_else(|| {
+                is_ws_inherit(v)
+                    .then_some(())
+                    .and_then(|_| ws_pkg.as_ref()?.get("edition")?.as_str().map(String::from))
+            })
+    }) {
         if !has_edition(&config.extra_rustc_opts) {
             config
                 .extra_rustc_opts
@@ -695,7 +727,7 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     let fill = |dst: &mut String, key: &str| {
         if dst.is_empty() {
             if let Some(v) = pkg_str(key) {
-                *dst = v.to_string();
+                *dst = v;
             }
         }
     };
@@ -707,7 +739,14 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     fill(&mut config.crate_repository, "repository");
     fill(&mut config.crate_rust_version, "rust-version");
     if config.crate_authors.is_empty() {
-        if let Some(a) = pkg.and_then(|p| p.get("authors")).and_then(|v| v.as_array()) {
+        let a = pkg.and_then(|p| p.get("authors")).and_then(|v| {
+            v.as_array().cloned().or_else(|| {
+                is_ws_inherit(v)
+                    .then_some(())
+                    .and_then(|_| ws_pkg.as_ref()?.get("authors")?.as_array().cloned())
+            })
+        });
+        if let Some(a) = a {
             config.crate_authors =
                 a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
         }
@@ -839,6 +878,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
     }
 }
 
+fn is_ws_inherit(v: &toml::Value) -> bool {
+    v.get("workspace").and_then(|w| w.as_bool()) == Some(true)
+}
+
 /// Cargo's autobins inference: src/main.rs → crate_name, src/bin/*.rs → stem,
 /// src/bin/*/main.rs → dirname. Dotfiles skipped.
 pub fn inferred_bins(crate_name: &str) -> Vec<(String, String)> {
@@ -863,6 +906,28 @@ pub fn inferred_bins(crate_name: &str) -> Vec<(String, String)> {
         }
     }
     bins
+}
+
+/// Walk up from `cargo_toml` to find the workspace root and return its
+/// `[workspace.package]` table for `*.workspace = true` inheritance.
+fn find_workspace_package(cargo_toml: &Path) -> Option<toml::Value> {
+    // The member manifest may itself be the workspace root.
+    let mut dir = std::env::current_dir()
+        .ok()?
+        .join(cargo_toml)
+        .parent()?
+        .to_path_buf();
+    loop {
+        let ws = dir.join("Cargo.toml");
+        if ws.exists() {
+            if let Ok(doc) = toml::from_str::<toml::Value>(&fs::read_to_string(&ws).ok()?) {
+                if let Some(wp) = doc.get("workspace").and_then(|w| w.get("package")) {
+                    return Some(wp.clone());
+                }
+            }
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
 }
 
 fn find_workspace_name(cargo_toml: &Path) -> Option<String> {
