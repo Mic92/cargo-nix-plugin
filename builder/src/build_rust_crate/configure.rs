@@ -813,9 +813,28 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
                     required_features,
                 });
             }
-            if !config.crate_bin.is_empty() {
-                config.has_crate_bin = true;
+        }
+        // Cargo merges explicit [[bin]] with the inferred set (autobins) and
+        // dedupes by name *or* path. We do the same so a crate that declares
+        // one [[bin]] (e.g. for required-features) still gets src/main.rs and
+        // the rest of src/bin/* built.
+        if config.autobins {
+            for (name, path) in inferred_bins(&config.crate_name) {
+                let taken = config.crate_bin.iter().any(|b| {
+                    b.name.as_deref() == Some(name.as_str())
+                        || b.path.as_deref() == Some(path.as_str())
+                });
+                if !taken {
+                    config.crate_bin.push(super::config::CrateBin {
+                        name: Some(name),
+                        path: Some(path),
+                        required_features: Vec::new(),
+                    });
+                }
             }
+        }
+        if !config.crate_bin.is_empty() {
+            config.has_crate_bin = true;
         }
     }
 }
