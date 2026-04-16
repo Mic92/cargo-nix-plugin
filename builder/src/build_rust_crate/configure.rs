@@ -64,12 +64,12 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // already in our environment and will be inherited by build_script_build.
     for path in &config.complete_deps {
         let lib = format!("{path}/lib");
-        symlink_libs(&lib, "target/deps")?;
+        symlink_libs(path, "target/deps")?;
         collect_link_flags(&lib, &mut link, &mut link_final)?;
     }
     for path in &config.complete_build_deps {
         let lib = format!("{path}/lib");
-        symlink_libs(&lib, "target/buildDeps")?;
+        symlink_libs(path, "target/buildDeps")?;
         if let Ok(c) = fs::read_to_string(format!("{lib}/link")) {
             build_link.extend(c.lines().filter(|l| !l.is_empty()).map(String::from));
         }
@@ -512,19 +512,19 @@ fn dep_links_env(config: &BuildConfig) -> BTreeMap<String, String> {
     env
 }
 
-fn symlink_libs(lib_dir: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = Path::new(lib_dir);
-    if !dir.exists() {
+fn symlink_libs(dep_out: &str, target: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // crate-metadata.json lists every rustc artifact the dep installed
+    // (filtered by `-{metadata}.` at install time), so this is
+    // extension-agnostic: .rlib/.so/.dylib/.dll and anything rustc invents
+    // next all link. Every dep is built by this same builder, so the file
+    // is authoritative — no need to scan `$lib/lib`.
+    let Some(m) = super::config::CrateMetadata::load(dep_out) else {
         return Ok(());
-    }
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        let name = path.file_name().unwrap().to_string_lossy();
-        if name.ends_with(".rlib") || name.ends_with(".so") || name.ends_with(".dylib") {
-            let dst = Path::new(target).join(path.file_name().unwrap());
-            let _ = fs::remove_file(&dst);
-            symlink(&path, &dst)?;
-        }
+    };
+    for art in &m.artifacts {
+        let dst = Path::new(target).join(art);
+        let _ = fs::remove_file(&dst);
+        symlink(Path::new(dep_out).join("lib").join(art), &dst)?;
     }
     Ok(())
 }
