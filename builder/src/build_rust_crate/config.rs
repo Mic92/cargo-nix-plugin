@@ -32,6 +32,9 @@ pub struct BuildConfig {
     pub autobins: bool,
     #[serde(skip, default = "default_true")]
     pub autotests: bool,
+    /// [[test]] targets parsed from Cargo.toml (never passed from Nix).
+    #[serde(skip)]
+    pub crate_tests: Vec<CrateTest>,
     #[serde(skip, default = "default_true")]
     pub autolib: bool,
     #[serde(default)]
@@ -129,6 +132,20 @@ pub struct CrateBin {
     pub path: Option<String>,
     #[serde(default)]
     pub required_features: Vec<String>,
+}
+
+/// `[[test]]` target from Cargo.toml. Unlike CrateBin this is never supplied
+/// from Nix, only discovered by `detect_cargo_toml_info` and merged with the
+/// autotests-inferred set in `resolve_tests`.
+#[derive(Debug, Clone)]
+pub struct CrateTest {
+    pub name: String,
+    pub path: Option<String>,
+    pub required_features: Vec<String>,
+    /// `harness = false` → build with `--cfg test` instead of `--test`
+    /// (cargo's build_base_args: no libtest harness, target supplies its
+    /// own `main`).
+    pub harness: bool,
 }
 
 /// Per-crate metadata installed to `$lib/crate-metadata.json`. This is the

@@ -220,6 +220,7 @@ impl RustcFlags {
     }
 
     /// Build a rustc Command with all common flags.
+    #[allow(clippy::too_many_arguments)] // flat arg list mirrors rustc's own
     pub fn cmd(
         &self,
         crate_name: &str,
@@ -228,6 +229,7 @@ impl RustcFlags {
         crate_types: &[&str],
         extra_flags: &[String],
         test: bool,
+        harness: bool,
     ) -> Command {
         let mut cmd = Command::new("rustc");
         // Per-target env that cargo sets on every rustc invocation. We only
@@ -248,7 +250,13 @@ impl RustcFlags {
             cmd.arg("--crate-type").arg(*ct);
         }
         if test {
-            cmd.arg("--test");
+            // cargo build_base_args: harnessed test targets get `--test`
+            // (libtest main); harness=false targets only get `--cfg test`.
+            if harness {
+                cmd.arg("--test");
+            } else {
+                cmd.arg("--cfg").arg("test");
+            }
         }
 
         cmd.args(&self.base)

@@ -965,6 +965,29 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
             config.has_crate_bin = true;
         }
     }
+
+    // [[test]] targets: name/path/required-features/harness. resolve_tests()
+    // merges with the inferred tests/*.rs set and honours autotests=false.
+    if let Some(tests) = doc.get("test").and_then(|v| v.as_array()) {
+        for t in tests {
+            let Some(name) = t.get("name").and_then(|v| v.as_str()).map(String::from) else {
+                continue;
+            };
+            let path = t.get("path").and_then(|v| v.as_str()).map(String::from);
+            let required_features = t
+                .get("required-features")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let harness = t.get("harness").and_then(|v| v.as_bool()).unwrap_or(true);
+            config.crate_tests.push(super::config::CrateTest {
+                name,
+                path,
+                required_features,
+                harness,
+            });
+        }
+    }
 }
 
 fn is_ws_inherit(v: &toml::Value) -> bool {

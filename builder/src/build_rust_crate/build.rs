@@ -49,7 +49,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         run_cmd(
-            &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, false),
+            &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, false, true),
             config.verbose,
         )?;
 
@@ -62,7 +62,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
             let mut cmd =
-                flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true);
+                flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true, true);
             let tmp = fs::canonicalize({
                 fs::create_dir_all("target/tmp")?;
                 "target/tmp"
@@ -110,40 +110,20 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
 
-    // Build integration tests from tests/
-    if config.build_tests && config.autotests && Path::new("tests").is_dir() {
-        for entry in fs::read_dir("tests")?.flatten() {
-            let p = entry.path();
-            let fname = entry.file_name();
-            if fname.to_string_lossy().starts_with('.') {
-                continue;
-            }
-            if p.extension().map(|e| e == "rs").unwrap_or(false) && (p.is_file() || p.is_symlink())
-            {
-                let name = p.file_stem().unwrap().to_string_lossy().to_string();
-                build_bin(
-                    config,
-                    &flags,
-                    &lib_extern,
-                    &name,
-                    &p.to_string_lossy(),
-                    BinKind::Test,
-                    true,
-                    &test_env,
-                )?;
-            } else if p.is_dir() && p.join("main.rs").exists() {
-                let name = p.file_name().unwrap().to_string_lossy().to_string();
-                build_bin(
-                    config,
-                    &flags,
-                    &lib_extern,
-                    &name,
-                    &p.join("main.rs").to_string_lossy(),
-                    BinKind::Test,
-                    true,
-                    &test_env,
-                )?;
-            }
+    // Build integration tests: explicit [[test]] merged with inferred
+    // tests/*.rs (autotests), required-features filtered, harness honoured.
+    if config.build_tests {
+        for (name, path, harness) in resolve_tests(config) {
+            build_bin(
+                config,
+                &flags,
+                &lib_extern,
+                &name,
+                &path,
+                BinKind::Test { harness },
+                true,
+                &test_env,
+            )?;
         }
     }
 
@@ -205,7 +185,7 @@ fn persist_bso_link_flags(
 #[derive(Clone, Copy)]
 enum BinKind {
     Bin,
-    Test,
+    Test { harness: bool },
 }
 
 #[allow(clippy::too_many_arguments)] // two parallel branches each added one
@@ -236,11 +216,14 @@ fn build_bin(
             }
             v
         }
-        BinKind::Test => flags.bso_tests.clone(),
+        BinKind::Test { .. } => flags.bso_tests.clone(),
     };
     extra.extend_from_slice(lib_extern);
     let crate_name_ = name.replace('-', "_");
-    let mut cmd = flags.cmd(&crate_name_, path, "target/bin", &["bin"], &extra, test);
+    // harness=false test targets supply their own main(); cargo passes
+    // `--cfg test` instead of `--test` (build_base_args).
+    let harness = !matches!(kind, BinKind::Test { harness: false });
+    let mut cmd = flags.cmd(&crate_name_, path, "target/bin", &["bin"], &extra, test, harness);
     cmd.env("CARGO_BIN_NAME", name);
     if test {
         for (k, v) in test_env {
@@ -316,6 +299,84 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
         bins.extend(super::configure::inferred_bins(&config.crate_name));
     }
     bins
+}
+
+/// Mirror of resolve_bins for integration tests: merge explicit `[[test]]`
+/// entries with the autotests-inferred set (tests/*.rs, tests/*/main.rs),
+/// dedupe by name or path, drop targets whose required-features aren't all
+/// enabled, and carry the per-target `harness` flag through.
+fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
+    let mut tests: Vec<(String, String, bool)> = Vec::new();
+    for t in &config.crate_tests {
+        if !t.required_features.is_empty()
+            && !t
+                .required_features
+                .iter()
+                .all(|f| config.crate_features_raw.contains(f))
+        {
+            eprintln!(
+                "Test {name} not compiled: missing required features {:?}",
+                t.required_features,
+                name = t.name
+            );
+            continue;
+        }
+        let path = t
+            .path
+            .clone()
+            .or_else(|| {
+                let flat = format!("tests/{}.rs", t.name);
+                let dir = format!("tests/{}/main.rs", t.name);
+                if Path::new(&flat).exists() {
+                    Some(flat)
+                } else if Path::new(&dir).exists() {
+                    Some(dir)
+                } else {
+                    None
+                }
+            });
+        let Some(path) = path else {
+            eprintln!(
+                "\x1b[0;1;31mERROR: failed to find file for test target: {}\x1b[0m",
+                t.name
+            );
+            std::process::exit(1);
+        };
+        tests.push((t.name.clone(), path, t.harness));
+    }
+    if config.autotests {
+        for (name, path) in inferred_tests() {
+            let taken = tests.iter().any(|(n, p, _)| *n == name || *p == path);
+            if !taken {
+                tests.push((name, path, true));
+            }
+        }
+    }
+    tests
+}
+
+/// Cargo's autotests inference: tests/*.rs → stem, tests/*/main.rs → dirname.
+/// Dotfiles skipped.
+fn inferred_tests() -> Vec<(String, String)> {
+    let mut tests = Vec::new();
+    let Ok(entries) = fs::read_dir("tests") else {
+        return tests;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let fname = entry.file_name();
+        if fname.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if p.extension().map(|e| e == "rs").unwrap_or(false) && (p.is_file() || p.is_symlink()) {
+            let name = p.file_stem().unwrap().to_string_lossy().to_string();
+            tests.push((name, p.to_string_lossy().into_owned()));
+        } else if p.is_dir() && p.join("main.rs").exists() {
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            tests.push((name, p.join("main.rs").to_string_lossy().into_owned()));
+        }
+    }
+    tests
 }
 
 fn search_bin_path(bin_name: &str, lib_path: &str, lib_name: &str) -> Option<String> {
