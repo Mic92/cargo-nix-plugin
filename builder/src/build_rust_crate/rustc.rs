@@ -78,10 +78,8 @@ fn find_rustc_prefix_on_path() -> Option<String> {
         .and_then(|bin| Some(bin.parent()?.to_string_lossy().into_owned()))
 }
 
-/// Compute base rustc flags: opt level, codegen-units, remap, linker,
-/// cross-compilation target, and extra user opts. Independent of deps
-/// and build script output.
-pub fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
+/// Base rustc flags: opt level, codegen-units, remap, linker, --target, user opts.
+fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
     let mut flags = Vec::new();
 
     if config.release {

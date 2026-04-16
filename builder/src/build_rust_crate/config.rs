@@ -68,11 +68,9 @@ pub struct BuildConfig {
     /// Pre-computed metadata hash (deterministic, from Nix).
     pub metadata: String,
 
-    /// Per-dependency extern info (extern name with renames applied,
-    /// metadata hash) computed at Nix eval time.
+    /// Per-dependency extern info computed at Nix eval time.
     #[serde(default)]
     pub dep_externs: Vec<DepExtern>,
-    /// Per-build-dependency extern info.
     #[serde(default)]
     pub build_dep_externs: Vec<DepExtern>,
 
@@ -114,7 +112,7 @@ fn default_colors() -> String {
     "always".into()
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CrateBin {
     #[serde(default)]
@@ -128,7 +126,7 @@ pub struct CrateBin {
 /// `[[test]]` target from Cargo.toml. Unlike CrateBin this is never supplied
 /// from Nix, only discovered by `detect_cargo_toml_info` and merged with the
 /// autotests-inferred set in `resolve_tests`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CrateTest {
     pub name: String,
     pub path: Option<String>,
@@ -165,7 +163,7 @@ impl CrateMetadata {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DepExtern {
     pub extern_name: String,
@@ -178,7 +176,7 @@ pub struct DepExtern {
     pub lib_out: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformInfo {
     pub rustc_target_spec: String,
