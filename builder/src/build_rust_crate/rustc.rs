@@ -132,6 +132,8 @@ pub struct RustcFlags {
     pub link: Vec<String>,
     pub bso_lib: Vec<String>,
     pub bso_bins: Vec<String>,
+    pub bso_bin: std::collections::BTreeMap<String, Vec<String>>,
+    pub bso_tests: Vec<String>,
     pub bso_cdylib: Vec<String>,
     pub out_dir: Vec<String>,
     pub cap_lints: String,
@@ -201,6 +203,13 @@ impl RustcFlags {
                 .link_args
                 .iter()
                 .chain(&bso.link_args_bins)
+                .cloned()
+                .collect(),
+            bso_bin: bso.link_args_bin.clone(),
+            bso_tests: bso
+                .link_args
+                .iter()
+                .chain(&bso.link_args_tests)
                 .cloned()
                 .collect(),
             bso_cdylib: bso.cdylib_link_args.clone(),

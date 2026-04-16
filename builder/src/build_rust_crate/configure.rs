@@ -19,6 +19,10 @@ pub struct BuildScriptOutputs {
     #[serde(default)]
     pub link_args_lib: Vec<String>,
     pub link_args_bins: Vec<String>,
+    #[serde(default)]
+    pub link_args_bin: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub link_args_tests: Vec<String>,
     pub link_libs: Vec<String>,
     pub link_search: Vec<String>,
     pub cdylib_link_args: Vec<String>,
@@ -382,6 +386,16 @@ fn parse_build_script_output(stdout: &str, out_dir: &str) -> BuildScriptOutputs 
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-link-arg-bins=") {
             bso.link_args_bins
+                .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
+        } else if let Some(v) = d.strip_prefix("rustc-link-arg-bin=") {
+            if let Some((bin, arg)) = v.split_once('=') {
+                bso.link_args_bin
+                    .entry(bin.into())
+                    .or_default()
+                    .extend_from_slice(&["-C".into(), format!("link-arg={arg}")]);
+            }
+        } else if let Some(v) = d.strip_prefix("rustc-link-arg-tests=") {
+            bso.link_args_tests
                 .extend_from_slice(&["-C".into(), format!("link-arg={v}")]);
         } else if let Some(v) = d.strip_prefix("rustc-link-lib=") {
             bso.link_libs.push(v.into());
@@ -848,5 +862,47 @@ cargo:warning=heads up\n";
         assert_eq!(bso.rustc_flags, "-l foo -L /a -l bar");
         assert_eq!(bso.check_cfgs, vec!["cfg(has_foo)"]);
         assert_eq!(bso.link_search, vec!["native=/out"]); // de-duped, order kept
+    }
+
+    #[test]
+    fn build_script_output_per_target_link_args() {
+        let stdout = "\
+cargo:rustc-link-arg=-all\n\
+cargo:rustc-link-arg-lib=-libonly\n\
+cargo:rustc-link-arg-bins=-allbins\n\
+cargo:rustc-link-arg-bin=foo=-Tlink.x\n\
+cargo:rustc-link-arg-bin=foo=-Map=foo.map\n\
+cargo::rustc-link-arg-bin=bar=-barflag\n\
+cargo:rustc-link-arg-tests=-testflag\n";
+        let bso = parse_build_script_output(stdout, "/out");
+        assert_eq!(bso.link_args, vec!["-C", "link-arg=-all"]);
+        assert_eq!(bso.link_args_lib, vec!["-C", "link-arg=-libonly"]);
+        assert_eq!(bso.link_args_bins, vec!["-C", "link-arg=-allbins"]);
+        assert_eq!(
+            bso.link_args_bin.get("foo").unwrap(),
+            &vec![
+                "-C".to_string(),
+                "link-arg=-Tlink.x".into(),
+                "-C".into(),
+                "link-arg=-Map=foo.map".into()
+            ]
+        );
+        assert_eq!(
+            bso.link_args_bin.get("bar").unwrap(),
+            &vec!["-C".to_string(), "link-arg=-barflag".into()]
+        );
+        assert_eq!(bso.link_args_tests, vec!["-C", "link-arg=-testflag"]);
+    }
+
+    #[test]
+    fn build_script_output_link_arg_prefix_disambiguation() {
+        // `rustc-link-arg-bins=` must not be eaten by the `rustc-link-arg-bin=` branch.
+        let bso = parse_build_script_output("cargo:rustc-link-arg-bins=-x\n", "/out");
+        assert_eq!(bso.link_args_bins, vec!["-C", "link-arg=-x"]);
+        assert!(bso.link_args_bin.is_empty());
+        // `rustc-link-arg=` must not be eaten by `rustc-link-arg-lib=`.
+        let bso = parse_build_script_output("cargo:rustc-link-arg=-x\n", "/out");
+        assert_eq!(bso.link_args, vec!["-C", "link-arg=-x"]);
+        assert!(bso.link_args_lib.is_empty());
     }
 }

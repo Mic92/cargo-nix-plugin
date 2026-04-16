@@ -70,7 +70,15 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     // Build binaries
     for (name, path) in resolve_bins(config) {
-        build_bin(config, &flags, &lib_extern, &name, &path, config.build_tests)?;
+        build_bin(
+            config,
+            &flags,
+            &lib_extern,
+            &name,
+            &path,
+            BinKind::Bin,
+            config.build_tests,
+        )?;
     }
 
     // Build integration tests from tests/
@@ -80,7 +88,15 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
             if p.extension().map(|e| e == "rs").unwrap_or(false) && (p.is_file() || p.is_symlink())
             {
                 let name = p.file_stem().unwrap().to_string_lossy().to_string();
-                build_bin(config, &flags, &lib_extern, &name, &p.to_string_lossy(), true)?;
+                build_bin(
+                    config,
+                    &flags,
+                    &lib_extern,
+                    &name,
+                    &p.to_string_lossy(),
+                    BinKind::Test,
+                    true,
+                )?;
             } else if p.is_dir() && p.join("main.rs").exists() {
                 let name = p.file_name().unwrap().to_string_lossy().to_string();
                 build_bin(
@@ -89,6 +105,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
                     &lib_extern,
                     &name,
                     &p.join("main.rs").to_string_lossy(),
+                    BinKind::Test,
                     true,
                 )?;
             }
@@ -150,12 +167,19 @@ fn persist_bso_link_flags(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum BinKind {
+    Bin,
+    Test,
+}
+
 fn build_bin(
     config: &BuildConfig,
     flags: &RustcFlags,
     lib_extern: &[String],
     name: &str,
     path: &str,
+    kind: BinKind,
     test: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     echo_colored(&format!(
@@ -164,7 +188,19 @@ fn build_bin(
     ));
     fs::create_dir_all("target/bin")?;
 
-    let mut extra = flags.bso_bins.clone();
+    // Route build-script link-args by target kind: rustc-link-arg-bins / -bin=NAME
+    // apply only to real [[bin]] targets, rustc-link-arg-tests only to integration
+    // tests; rustc-link-arg (folded into both) applies everywhere.
+    let mut extra = match kind {
+        BinKind::Bin => {
+            let mut v = flags.bso_bins.clone();
+            if let Some(per) = flags.bso_bin.get(name) {
+                v.extend_from_slice(per);
+            }
+            v
+        }
+        BinKind::Test => flags.bso_tests.clone(),
+    };
     extra.extend_from_slice(lib_extern);
     let crate_name_ = name.replace('-', "_");
     run_cmd(
