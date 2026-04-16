@@ -81,9 +81,8 @@ struct ManifestDep {
     default_features: bool,
     features: Vec<String>,
     target: Option<String>,
-    /// `path = "..."` from the manifest, relative to that manifest's dir.
-    /// Only used to discover non-member local crates; the lockfile alone
-    /// doesn't record where a path dep lives.
+    /// `path = "..."` relative to the manifest's dir. Used to discover
+    /// non-member local crates (the lockfile doesn't record their path).
     path: Option<String>,
 }
 
@@ -123,17 +122,13 @@ pub fn resolve_from_lockfile(
     let canonical_ws_root = std::fs::canonicalize(workspace_root)
         .unwrap_or_else(|_| workspace_root.to_path_buf());
 
-    // Map a lockfile source string to the sparse index URL we'd fetch
-    // from. None for local/git sources (no index involved). crates.io
-    // is redirected through `crates_io_index` so network-restricted
-    // environments can point at a mirror (#20).
+    // Lockfile source string → sparse index URL (None for local/git).
+    // crates.io is redirected through `crates_io_index` for mirrors (#20).
     let source_to_index_url =
         |source: Option<&str>| registry::source_to_index_url(source, crates_io_index);
 
-    // Prefetch: the lockfile lists every (registry, name) pair we'll
-    // ever need, so warm the cache concurrently before the serial
-    // resolve loop. Cold-cache eval goes from O(n·RTT) serial
-    // handshakes to ~O(n/workers·RTT) with connection keep-alive.
+    // Prefetch every (registry, name) the lockfile mentions before the
+    // serial loop — cold-cache eval goes from O(n·RTT) to ~O(n/workers·RTT).
     let prefetch_jobs: Vec<registry::PrefetchJob> = lock_packages
         .iter()
         .filter(|p| !workspace_member_names.contains(&p.name))
@@ -205,24 +200,19 @@ pub fn resolve_from_lockfile(
 
             let index_url = source_to_index_url(pkg.source.as_deref());
 
-            // Look up in the registry index via tame-index. Hard-fail
-            // the whole resolution rather than silently continuing with
-            // empty dependencies — the previous eprintln!+continue path
-            // produced derivations with no --extern flags that compiled
-            // with E0433 errors deep inside the build sandbox.
-            let index_version = match index_url.as_deref() {
-                None => None, // local/git source — no index lookup needed
-                Some(url) => Some(
-                    registry::lookup_version(cargo_home, url, &pkg.name, &pkg.version).map_err(
-                        |e| {
-                            format!(
-                                "failed to look up {} {} in index '{}': {e}",
-                                pkg.name, pkg.version, url
-                            )
-                        },
-                    )?,
-                ),
-            };
+            // Hard-fail on index lookup errors: silently continuing with
+            // empty deps yields derivations that E0433 deep in the sandbox.
+            let index_version = index_url
+                .as_deref()
+                .map(|url| {
+                    registry::lookup_version(cargo_home, url, &pkg.name, &pkg.version).map_err(|e| {
+                        format!(
+                            "failed to look up {} {} in index '{}': {e}",
+                            pkg.name, pkg.version, url
+                        )
+                    })
+                })
+                .transpose()?;
 
             let (dependencies, build_dependencies, features_btree, links) =
                 if let Some(ref version) = index_version {
@@ -248,11 +238,10 @@ pub fn resolve_from_lockfile(
                             pkg.name, pkg.version,
                         )
                     })?;
-                    let checkout = match git_checkouts.get(checkout_path) {
-                        Some(c) => c,
-                        None => {
-                            let c = GitCheckout::scan(checkout_path)?;
-                            git_checkouts.entry(checkout_path.clone()).or_insert(c)
+                    let checkout = match git_checkouts.entry(checkout_path.clone()) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(GitCheckout::scan(checkout_path)?)
                         }
                     };
                     let member = checkout.find(&pkg.name).ok_or_else(|| {
@@ -285,10 +274,8 @@ pub fn resolve_from_lockfile(
                     (deps, build_deps, member.features.clone(), member.links.clone())
                 } else if pkg.source.is_none() {
                     // Local path dependency that is NOT a [workspace] member.
-                    // Cargo.lock omits `source` for these exactly as it does
-                    // for members, but we have no manifest_dir from the
-                    // members walk. parse_workspace() discovered it by
-                    // following `path = "..."` edges from referrers.
+                    // `parse_workspace` discovered it by following `path = "..."`
+                    // edges; the lockfile records no path for it.
                     let member = workspace.path_deps.get(&pkg.name).ok_or_else(|| {
                         format!(
                             "package {} {} has no `source` in Cargo.lock and is not a \
@@ -333,15 +320,13 @@ pub fn resolve_from_lockfile(
                     (Vec::new(), Vec::new(), BTreeMap::new(), None)
                 };
 
-            // For path deps we parsed the manifest ourselves, so we know
-            // edition/proc_macro/lib_path etc. — don't leave them for
-            // build-time auto-detect (which would look in the wrong dir
-            // before the workspace_member cd).
-            let path_member = if pkg.source.is_none() {
-                workspace.path_deps.get(&pkg.name)
-            } else {
-                None
-            };
+            // For path deps we parsed the manifest ourselves — don't leave
+            // edition/proc_macro/lib_path for build-time auto-detect.
+            let path_member = pkg
+                .source
+                .is_none()
+                .then(|| workspace.path_deps.get(&pkg.name))
+                .flatten();
 
             crates.insert(
                 sid,
@@ -376,22 +361,10 @@ pub fn resolve_from_lockfile(
     // Build PackageFeatureInfo for every crate from its CrateInfo.
     let mut feature_packages: HashMap<String, PackageFeatureInfo> = HashMap::new();
     for (pkg_id, info) in &crates {
-        // Optional deps keyed by their local name (raw, dash-preserved) —
-        // that's what `dep:X` and `X/feat` in feature rules reference.
-        // Cannot derive from `dep:` scan alone: legacy optional=true deps
-        // have no explicit `dep:` anywhere and implicitly create a
-        // self-named feature (aws-smithy-types's http-body-1-0).
-        // Feature rules in Cargo.toml reference the *local* dep key
-        // (e.g. rustls says `webpki/ring`, not `rustls-webpki/ring`;
-        // `pki-types/std` with a dash, not the rustc-normalized form).
-        //
-        // Dev-deps participate in feature unification too (cargo's
-        // resolver v2 only splits host/target, not dev/normal within
-        // one unit). They're empty for everything but workspace
-        // members, so this only widens the graph at the roots — but
-        // that's exactly where it matters: a dev-only dep like
-        // ripgrep's serde_derive is otherwise unreachable, leaving its
-        // syn/proc-macro2 with zero features and 400+ compile errors.
+        // Keyed by *local* dep name (raw, dash-preserved) — what `dep:X` and
+        // `X/feat` rules reference. Dev-deps included: resolver v2 unifies
+        // dev/normal within a unit, and a dev-only edge (e.g. ripgrep →
+        // serde_derive) is otherwise unreachable.
         let deps_iter = info
             .dependencies
             .iter()
@@ -443,20 +416,14 @@ pub fn resolve_from_lockfile(
         }
     }
 
-    // Filter out optional deps that weren't activated by feature resolution.
-    // With resolver v2, optional deps only become real dependencies when
-    // their activating feature (dep:X or legacy implicit) is enabled.
-    // The lockfile includes all possible deps for version pinning, but
-    // buildRustCrate expects only active deps.
+    // Drop inactive optional deps — the lockfile lists all of them for
+    // version pinning, but buildRustCrate expects only active edges.
     //
-    // KNOWN LIMITATION: cargo's resolver=2 also splits feature sets by
-    // host/target (build-deps vs normal deps get independent feature
-    // resolution and the crate is built twice). We unify them — same as
-    // `cargo metadata`'s `.resolve` output, and the conservative
-    // superset, so builds succeed; the cost is occasional over-enabling
-    // of features in the build-dep instance. Fixing this requires
-    // duplicating package nodes by FeaturesFor, which buildRustCrate
-    // can't express today.
+    // KNOWN LIMITATION: resolver=2 splits feature sets by host/target
+    // (FeaturesFor); we unify them (same as `cargo metadata`'s `.resolve`).
+    // Conservative superset, so builds succeed; cost is occasional feature
+    // over-enabling on build-dep instances. buildRustCrate can't express
+    // duplicated nodes today.
     for (pkg_id, info) in crates.iter_mut() {
         let keep = |dep: &DepInfo| {
             !dep.optional
@@ -519,25 +486,18 @@ fn parse_lock_packages(cargo_lock: &str) -> Result<Vec<LockPackage>, String> {
     Ok(lock.package)
 }
 
-/// Parse the workspace root Cargo.toml and all member Cargo.toml files.
-fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
-    let root_manifest_path = workspace_root.join("Cargo.toml");
-    let root_toml_str = std::fs::read_to_string(&root_manifest_path)
-        .map_err(|e| format!("Failed to read {}: {e}", root_manifest_path.display()))?;
-    let root_toml: toml::Value =
-        toml::from_str(&root_toml_str).map_err(|e| format!("Failed to parse Cargo.toml: {e}"))?;
+/// Read and parse a TOML file with a path-contextual error.
+fn read_toml(path: &Path) -> Result<toml::Value, String> {
+    let s = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    toml::from_str(&s).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
 
-    let mut members = Vec::new();
-    let mut root_package = None;
-
-    let workspace_table = root_toml.get("workspace");
-
-    // [workspace.dependencies] — the table that `foo = { workspace = true }`
-    // in a member manifest inherits from. A member can add features on top
-    // of the inherited list but cannot flip default-features from false to
-    // true (cargo errors). We don't enforce that, but we do honor the
-    // inherited values.
-    let workspace_deps: HashMap<String, ManifestDep> = workspace_table
+/// Parse `[workspace.dependencies]` and `[workspace.package]`.
+fn parse_workspace_tables(
+    workspace_table: Option<&toml::Value>,
+) -> (HashMap<String, ManifestDep>, WorkspacePackage) {
+    let workspace_deps = workspace_table
         .and_then(|w| w.get("dependencies"))
         .map(|d| {
             parse_manifest_deps(Some(d), &HashMap::new())
@@ -546,21 +506,32 @@ fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
                 .collect()
         })
         .unwrap_or_default();
-
-    // [workspace.package] — fields that `edition.workspace = true` etc.
-    // inherit. Unlike deps, these are simple key-value strings with no
-    // member-side merging: the member either inherits or sets its own.
     let ws_pkg_table = workspace_table.and_then(|w| w.get("package"));
-    let ws_pkg = WorkspacePackage {
-        edition: ws_pkg_table
-            .and_then(|p| p.get("edition"))
+    let toml_str = |key| {
+        ws_pkg_table
+            .and_then(|p| p.get(key))
             .and_then(|v| v.as_str())
-            .map(String::from),
-        version: ws_pkg_table
-            .and_then(|p| p.get("version"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
+            .map(String::from)
     };
+    let ws_pkg = WorkspacePackage {
+        edition: toml_str("edition"),
+        version: toml_str("version"),
+    };
+    (workspace_deps, ws_pkg)
+}
+
+/// Parse the workspace root Cargo.toml and all member Cargo.toml files.
+fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
+    let root_toml = read_toml(&workspace_root.join("Cargo.toml"))?;
+
+    let mut members = Vec::new();
+    let mut root_package = None;
+
+    let workspace_table = root_toml.get("workspace");
+
+    // [workspace.dependencies] / [workspace.package] — inheritance sources
+    // for `foo = { workspace = true }` and `edition.workspace = true`.
+    let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
 
     // Check if root is a package
     if let Some(pkg) = root_toml.get("package") {
@@ -570,53 +541,35 @@ fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
         members.push(member);
     }
 
-    // Check for workspace members
-    if let Some(workspace) = root_toml.get("workspace") {
-        if let Some(member_globs) = workspace.get("members").and_then(|m| m.as_array()) {
-            for glob_val in member_globs {
-                if let Some(glob_str) = glob_val.as_str() {
-                    let member_dirs = expand_glob(workspace_root, glob_str);
-                    for member_dir in member_dirs {
-                        let member_manifest = member_dir.join("Cargo.toml");
-                        if !member_manifest.exists() {
-                            continue;
-                        }
-                        let member_toml_str =
-                            std::fs::read_to_string(&member_manifest).map_err(|e| {
-                                format!("Failed to read {}: {e}", member_manifest.display())
-                            })?;
-                        let member_toml: toml::Value =
-                            toml::from_str(&member_toml_str).map_err(|e| {
-                                format!("Failed to parse {}: {e}", member_manifest.display())
-                            })?;
-                        if let Some(pkg) = member_toml.get("package") {
-                            let member = parse_member_manifest(
-                                &member_toml,
-                                pkg,
-                                &member_dir,
-                                &workspace_deps,
-                                &ws_pkg,
-                            )?;
-                            // Don't duplicate the root package
-                            if root_package
-                                .as_ref()
-                                .map(|rp| rp.name != member.name)
-                                .unwrap_or(true)
-                            {
-                                members.push(member);
-                            }
-                        }
-                    }
-                }
+    // Workspace members
+    let member_globs = workspace_table
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array());
+    for glob_str in member_globs
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+    {
+        for member_dir in expand_glob(workspace_root, glob_str) {
+            let member_manifest = member_dir.join("Cargo.toml");
+            if !member_manifest.exists() {
+                continue;
+            }
+            let member_toml = read_toml(&member_manifest)?;
+            let Some(pkg) = member_toml.get("package") else {
+                continue;
+            };
+            let member =
+                parse_member_manifest(&member_toml, pkg, &member_dir, &workspace_deps, &ws_pkg)?;
+            // Don't duplicate the root package.
+            if root_package.as_ref().is_none_or(|rp| rp.name != member.name) {
+                members.push(member);
             }
         }
     }
 
-    // --- Discover non-member path dependencies ---
-    // Cargo.lock gives them `source = None` and no path. The only place
-    // the subdir is recorded is the referring manifest's `path = "..."`
-    // field, so walk outward from every member (and transitively from
-    // each discovered path dep) collecting them.
+    // Discover non-member path dependencies by walking `path = "..."` edges
+    // outward from members; Cargo.lock records no path for them.
     let mut path_deps: HashMap<String, WorkspaceMember> = HashMap::new();
     let member_names: HashSet<&str> = members.iter().map(|m| m.name.as_str()).collect();
     // Queue of (referrer_dir, dep_path) edges to visit.
@@ -637,17 +590,14 @@ fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
         enqueue(&mut queue, m);
     }
     while let Some((referrer_dir, rel)) = queue.pop() {
-        // Lexically normalize (collapse `..`/`.`) rather than canonicalize:
-        // `manifest_dir` must share a textual prefix with `workspace_root`
-        // so lib/default.nix's removePrefix yields the relPath. The
-        // out-of-tree check in the main loop canonicalizes separately.
+        // Lexical normalize (not canonicalize): `manifest_dir` must share a
+        // textual prefix with `workspace_root` for lib/default.nix's
+        // removePrefix. The out-of-tree check canonicalizes separately.
         let dir = normalize_path(&referrer_dir.join(&rel));
         let manifest = dir.join("Cargo.toml");
-        let toml_str = match std::fs::read_to_string(&manifest) {
-            Ok(s) => s,
-            // Missing manifest: leave it for the main loop to produce a
-            // pointed error when the lockfile references this package.
-            Err(_) => continue,
+        // Missing manifest: leave for the main loop to error if referenced.
+        let Ok(toml_str) = std::fs::read_to_string(&manifest) else {
+            continue;
         };
         let toml: toml::Value = toml::from_str(&toml_str)
             .map_err(|e| format!("Failed to parse {}: {e}", manifest.display()))?;
@@ -671,15 +621,9 @@ fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest, String> {
 
 /// Read a string-valued package field, honoring `field.workspace = true`.
 ///
-/// In TOML, `edition.workspace = true` is not a string — it's a table with
-/// one key. `.as_str()` returns None and we used to fall through to the
-/// default, dropping the workspace value on the floor. That broke ant-jeprof
-/// which uses edition-2024 let-chains while inheriting edition from the
-/// workspace root (which is not in the build sandbox, so this must be
-/// resolved at eval time).
-///
-/// Returns `Some(value)` for either a direct string or a workspace inherit,
-/// `None` if the field is absent (caller picks the default).
+/// `edition.workspace = true` is a table in TOML, not a string. Must be
+/// resolved at eval time — the workspace root Cargo.toml is not in the
+/// build sandbox (broke ant-jeprof's edition-2024 let-chains).
 fn inherit_pkg_str<'a>(
     pkg: &'a toml::Value,
     key: &str,
@@ -864,33 +808,19 @@ fn parse_manifest_deps(
                 let member_features = toml_str_array(t.get("features"));
 
                 // `workspace = true` — inherit from root. Per cargo's
-                // inner_dependency_inherit_with (src/cargo/util/toml/mod.rs):
-                //   - version/package: workspace only (member CANNOT set)
-                //   - features: workspace's ++ member's (appended)
-                //   - optional: member only (workspace.deps can't set it;
-                //     cargo bails at parse time if it tries)
-                //   - default-features: see the match below
+                // `inner_dependency_inherit_with` (src/cargo/util/toml/mod.rs):
+                // version/package from workspace only; features appended;
+                // optional from member only; default-features merged below.
                 if t.get("workspace").and_then(|v| v.as_bool()) == Some(true) {
                     if let Some(ws) = workspace_deps.get(name) {
                         let mut features = ws.features.clone();
                         features.extend(member_features);
 
-                        // Cargo's merge table (member, workspace) → result:
-                        //   (Some(true),  false) → true   member re-enables
-                        //   (Some(false), true)  → true   member ignored (warn)
-                        //   (Some(false), None)  → true   member ignored (warn)
-                        //   (None,        x)     → x      workspace sticks
-                        //   (Some(true),  true)  → true
-                        // The "member ignored" cases become hard errors in
-                        // edition 2024, but we don't enforce that — cargo
-                        // already did when it wrote the lockfile.
-                        //
-                        // Practical upshot: member can only WIDEN defaults,
-                        // never narrow. The workspace's `false` survives
-                        // unless the member explicitly says `true`.
+                        // Member can only WIDEN defaults, never narrow
+                        // (`inner_dependency_inherit_with`): member=false is
+                        // ignored (warn; hard error in edition 2024).
                         let default_features = match member_default_features {
                             Some(true) => true,
-                            // false is ignored: workspace wins (warn/error in cargo)
                             Some(false) | None => ws.default_features,
                         };
 
@@ -964,37 +894,10 @@ struct GitCheckout {
 
 impl GitCheckout {
     fn scan(root: &Path) -> Result<Self, String> {
-        let root_manifest_path = root.join("Cargo.toml");
-        let root_toml_str = std::fs::read_to_string(&root_manifest_path).map_err(|e| {
-            format!(
-                "git checkout {}: failed to read Cargo.toml: {e}",
-                root.display()
-            )
-        })?;
-        let root_toml: toml::Value = toml::from_str(&root_toml_str)
-            .map_err(|e| format!("git checkout {}: parse Cargo.toml: {e}", root.display()))?;
-
+        let root_toml = read_toml(&root.join("Cargo.toml"))
+            .map_err(|e| format!("git checkout {}: {e}", root.display()))?;
         let workspace_table = root_toml.get("workspace");
-        let workspace_deps: HashMap<String, ManifestDep> = workspace_table
-            .and_then(|w| w.get("dependencies"))
-            .map(|d| {
-                parse_manifest_deps(Some(d), &HashMap::new())
-                    .into_iter()
-                    .map(|dep| (dep.name.clone(), dep))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let ws_pkg_table = workspace_table.and_then(|w| w.get("package"));
-        let ws_pkg = WorkspacePackage {
-            edition: ws_pkg_table
-                .and_then(|p| p.get("edition"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-            version: ws_pkg_table
-                .and_then(|p| p.get("version"))
-                .and_then(|v| v.as_str())
-                .map(String::from),
-        };
+        let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
 
         let mut members = HashMap::new();
         let mut push = |toml: &toml::Value, dir: &Path| -> Result<(), String> {
@@ -1009,23 +912,22 @@ impl GitCheckout {
         // workspace at all).
         push(&root_toml, root)?;
 
-        if let Some(ws) = workspace_table {
-            if let Some(member_globs) = ws.get("members").and_then(|m| m.as_array()) {
-                for glob_val in member_globs {
-                    let Some(glob_str) = glob_val.as_str() else {
-                        continue;
-                    };
-                    for member_dir in expand_glob(root, glob_str) {
-                        let manifest = member_dir.join("Cargo.toml");
-                        let Ok(s) = std::fs::read_to_string(&manifest) else {
-                            continue;
-                        };
-                        let toml: toml::Value = toml::from_str(&s).map_err(|e| {
-                            format!("git checkout: parse {}: {e}", manifest.display())
-                        })?;
-                        push(&toml, &member_dir)?;
-                    }
-                }
+        let member_globs = workspace_table
+            .and_then(|w| w.get("members"))
+            .and_then(|m| m.as_array());
+        for glob_str in member_globs
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+        {
+            for member_dir in expand_glob(root, glob_str) {
+                let manifest = member_dir.join("Cargo.toml");
+                let Ok(s) = std::fs::read_to_string(&manifest) else {
+                    continue;
+                };
+                let toml: toml::Value = toml::from_str(&s)
+                    .map_err(|e| format!("git checkout: parse {}: {e}", manifest.display()))?;
+                push(&toml, &member_dir)?;
             }
         }
 
@@ -1178,27 +1080,18 @@ fn resolve_index_deps(
 
 /// Find a package in the lockfile by name AND semver requirement.
 ///
-/// Name alone is ambiguous when a crate depends on multiple major
-/// versions of the same package under different renames. The lockfile
-/// lists both as "name version"; only the req disambiguates.
+/// Name alone is ambiguous when a crate depends on multiple majors of one
+/// package under different renames; only the req disambiguates.
 fn find_lock_dep_by_name_and_req<'a>(
     name: &str,
     req: &semver::VersionReq,
     dep_refs: &[String],
     all_packages: &'a [LockPackage],
 ) -> Option<&'a LockPackage> {
-    // Collect all candidates first — there may be more than one dep_ref
-    // with this name, and we need the one matching req.
-    //
-    // Fallback is only for unparseable versions. A parseable version that
-    // doesn't satisfy req means this index dep is NOT the one the lockfile
-    // resolved — cargo dropped it. Real case: aws-smithy-http-client has
-    // both `hyper` (req ^1.6) and `hyper-0-14` (req ^0.14) pointing at the
-    // same package. Lockfile only has hyper@1.8.1 (0.14 was never
-    // activated). If we fall back on the name match, hyper-0-14 also
-    // resolves to 1.8.1 — emitting a spurious DepInfo with rename
-    // "hyper-0-14", which becomes `--extern hyper_0_14=.../libhyper.rlib`
-    // and the plain `--extern hyper=` never appears.
+    // A parseable version that doesn't satisfy `req` must NOT fall back to a
+    // name match: it means cargo dropped this edge entirely (see test
+    // `find_lock_dep_rejects_unsatisfiable_req` for the hyper-0-14 case).
+    // Fallback is only for unparseable versions.
     let mut unparseable_fallback = None;
     for dep_ref in dep_refs {
         let mut parts = dep_ref.splitn(2, ' ');
@@ -1213,24 +1106,15 @@ fn find_lock_dep_by_name_and_req<'a>(
         };
         let Some(pkg) = pkg else { continue };
 
-        match semver::Version::parse(&pkg.version) {
-            Ok(v) => {
-                // Pre-release handling: semver::VersionReq doesn't match
-                // pre-releases unless the req itself names one, but cargo
-                // does lock to them (tokio 1.49.0+anthropic.1 vs ^1.49).
-                // Strip pre/build metadata for the secondary check.
-                let stripped = semver::Version::new(v.major, v.minor, v.patch);
-                if req.matches(&v) || req.matches(&stripped) {
-                    return Some(pkg);
-                }
-                // Parseable but doesn't match → cargo didn't pick this
-                // index dep. Don't fall back; return None if nothing
-                // else matches.
-            }
-            Err(_) => {
-                // Genuinely unparseable — rare; keep as last resort.
-                unparseable_fallback.get_or_insert(pkg);
-            }
+        let Ok(v) = semver::Version::parse(&pkg.version) else {
+            unparseable_fallback.get_or_insert(pkg);
+            continue;
+        };
+        // semver::VersionReq won't match a pre-release unless the req names
+        // one, but cargo locks to them (tokio 1.49.0+anthropic.1 vs ^1.49).
+        let stripped = semver::Version::new(v.major, v.minor, v.patch);
+        if req.matches(&v) || req.matches(&stripped) {
+            return Some(pkg);
         }
     }
     unparseable_fallback
@@ -1238,28 +1122,23 @@ fn find_lock_dep_by_name_and_req<'a>(
 
 /// Determine the source info for a lockfile package.
 fn resolve_pkg_source(pkg: &LockPackage) -> Option<SourceInfo> {
-    match pkg.source.as_deref() {
-        Some(src) if src.contains("github.com/rust-lang/crates.io-index") => {
-            Some(SourceInfo::CratesIo)
-        }
-        Some(src) if src.starts_with("git+") => {
-            if let Some((url, rev)) = src.strip_prefix("git+").and_then(|s| s.rsplit_once('#')) {
-                let clean_url = url.split('?').next().unwrap_or(url);
-                Some(SourceInfo::Git {
-                    url: clean_url.to_string(),
-                    rev: rev.to_string(),
-                    sub_path: None,
-                })
-            } else {
-                None
-            }
-        }
-        Some(src) if src.starts_with("sparse+") || src.starts_with("registry+") => {
-            Some(SourceInfo::Registry {
-                index: src.to_string(),
-            })
-        }
-        _ => None,
+    let src = pkg.source.as_deref()?;
+    if src.contains("github.com/rust-lang/crates.io-index") {
+        Some(SourceInfo::CratesIo)
+    } else if let Some(rest) = src.strip_prefix("git+") {
+        let (url, rev) = rest.rsplit_once('#')?;
+        let clean_url = url.split('?').next().unwrap_or(url);
+        Some(SourceInfo::Git {
+            url: clean_url.to_string(),
+            rev: rev.to_string(),
+            sub_path: None,
+        })
+    } else if src.starts_with("sparse+") || src.starts_with("registry+") {
+        Some(SourceInfo::Registry {
+            index: src.to_string(),
+        })
+    } else {
+        None
     }
 }
 
@@ -1288,19 +1167,18 @@ fn normalize_path(p: &Path) -> PathBuf {
 
 /// Simple glob expansion for workspace member paths.
 /// Supports trailing `/*` patterns.
-fn expand_glob(base: &Path, pattern: &str) -> Vec<std::path::PathBuf> {
-    if pattern.ends_with("/*") || pattern.ends_with("\\*") {
-        let prefix = &pattern[..pattern.len() - 2];
-        let dir = base.join(prefix);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            entries
-                .flatten()
-                .filter(|e| e.path().join("Cargo.toml").exists())
-                .map(|e| e.path())
-                .collect()
-        } else {
-            Vec::new()
-        }
+fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
+    if let Some(prefix) = pattern
+        .strip_suffix("/*")
+        .or_else(|| pattern.strip_suffix("\\*"))
+    {
+        std::fs::read_dir(base.join(prefix))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join("Cargo.toml").exists())
+            .collect()
     } else {
         // Literal path, or a complex glob we don't support yet — try as-is.
         let path = base.join(pattern);
