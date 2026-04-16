@@ -165,7 +165,9 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         cmd.envs(&env);
         // cargo exposes the target linker to build scripts so cc-rs / probes
         // can link test objects when cross-compiling (custom_build.rs:338).
-        cmd.env("RUSTC_LINKER", &config.host_platform.linker_path);
+        if let Some(l) = &config.host_platform.linker_path {
+            cmd.env("RUSTC_LINKER", l);
+        }
         cmd.envs(dep_links_env(config));
         for f in &config.crate_features {
             cmd.env(

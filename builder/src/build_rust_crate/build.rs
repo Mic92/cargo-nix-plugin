@@ -61,23 +61,52 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
-            run_cmd(
-                &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true),
-                config.verbose,
-            )?;
+            let mut cmd =
+                flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true);
+            let tmp = fs::canonicalize({
+                fs::create_dir_all("target/tmp")?;
+                "target/tmp"
+            })?;
+            cmd.env("CARGO_TARGET_TMPDIR", tmp);
+            run_cmd(&mut cmd, config.verbose)?;
+        }
+    }
+
+    // Per-test-target env: CARGO_TARGET_TMPDIR plus CARGO_BIN_EXE_<name> for
+    // every resolved bin so integration tests can `env!("CARGO_BIN_EXE_foo")`.
+    let bins = resolve_bins(config);
+    let mut test_env: Vec<(String, String)> = Vec::new();
+    if config.build_tests {
+        let tmp = fs::canonicalize({
+            fs::create_dir_all("target/tmp")?;
+            "target/tmp"
+        })?
+        .to_string_lossy()
+        .into_owned();
+        test_env.push(("CARGO_TARGET_TMPDIR".into(), tmp));
+        if !bins.is_empty() {
+            fs::create_dir_all("target/bin")?;
+            let bin_dir = fs::canonicalize("target/bin")?;
+            for (name, _) in &bins {
+                test_env.push((
+                    format!("CARGO_BIN_EXE_{name}"),
+                    bin_dir.join(name).to_string_lossy().into_owned(),
+                ));
+            }
         }
     }
 
     // Build binaries
-    for (name, path) in resolve_bins(config) {
+    for (name, path) in &bins {
         build_bin(
             config,
             &flags,
             &lib_extern,
-            &name,
-            &path,
+            name,
+            path,
             BinKind::Bin,
             config.build_tests,
+            &test_env,
         )?;
     }
 
@@ -100,6 +129,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
                     &p.to_string_lossy(),
                     BinKind::Test,
                     true,
+                    &test_env,
                 )?;
             } else if p.is_dir() && p.join("main.rs").exists() {
                 let name = p.file_name().unwrap().to_string_lossy().to_string();
@@ -111,6 +141,7 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
                     &p.join("main.rs").to_string_lossy(),
                     BinKind::Test,
                     true,
+                    &test_env,
                 )?;
             }
         }
@@ -177,6 +208,7 @@ enum BinKind {
     Test,
 }
 
+#[allow(clippy::too_many_arguments)] // two parallel branches each added one
 fn build_bin(
     config: &BuildConfig,
     flags: &RustcFlags,
@@ -185,6 +217,7 @@ fn build_bin(
     path: &str,
     kind: BinKind,
     test: bool,
+    test_env: &[(String, String)],
 ) -> Result<(), Box<dyn std::error::Error>> {
     echo_colored(&format!(
         "Building {}{name}",
@@ -207,10 +240,14 @@ fn build_bin(
     };
     extra.extend_from_slice(lib_extern);
     let crate_name_ = name.replace('-', "_");
-    run_cmd(
-        &mut flags.cmd(&crate_name_, path, "target/bin", &["bin"], &extra, test),
-        config.verbose,
-    )?;
+    let mut cmd = flags.cmd(&crate_name_, path, "target/bin", &["bin"], &extra, test);
+    cmd.env("CARGO_BIN_NAME", name);
+    if test {
+        for (k, v) in test_env {
+            cmd.env(k, v);
+        }
+    }
+    run_cmd(&mut cmd, config.verbose)?;
 
     // Rename binary if dash vs underscore mismatch
     if crate_name_ != name {
