@@ -103,11 +103,27 @@
 }:
 
 let
-  # Contract version between this Nix wrapper and the Rust resolver
-  # output it consumes (`builtins.resolveCargoWorkspace` /
-  # `WorkspaceResult`). Must match `API_LEVEL` in rust/src/resolve.rs.
-  # Bump both together when the result shape changes incompatibly.
+  # Contract version between this wrapper and the Rust resolver (input
+  # attrset + WorkspaceResult). Must match API_LEVEL in
+  # rust/src/resolve.rs; bump both on incompatible changes.
   apiLevel = 2;
+
+  # Probe the loaded plugin before calling it so skew surfaces as a
+  # clear message, not a serde/attr error. `or 0` covers plugins
+  # predating the primop. Warn-only until the first real bump.
+  resolverApiLevel = builtins.__cargoNixApiLevel or 0;
+  apiLevelGuard =
+    if resolverApiLevel == apiLevel then
+      x: x
+    else
+      lib.warn ''
+        cargo-nix-plugin: API level mismatch.
+          nix builtin resolver = ${toString resolverApiLevel}
+          lib/default.nix      = ${toString apiLevel}
+        Your nix was built against a different cargo-nix-plugin revision
+        than the lib/ you are evaluating. Rebuild/reload the plugin
+        against this checkout.
+      '';
 
   # Build the target description from stdenv if not provided
   defaultTarget = makeDefaultTarget stdenv.hostPlatform;
@@ -247,7 +263,7 @@ let
       defaultBuildRustCrateForPkgs;
 
   # Call the plugin builtin — auto-detect mode based on metadata presence
-  rawResolved = builtins.resolveCargoWorkspace (
+  resolved = apiLevelGuard builtins.resolveCargoWorkspace (
     {
       target = resolvedTarget;
       inherit rootFeatures noDefaultFeatures;
@@ -265,28 +281,6 @@ let
     )
     // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
   );
-
-  # Guard against skew between this checkout's lib/ and the resolver
-  # statically linked into the running nix. `or 0` covers nix binaries
-  # predating the field. Gating `resolved` itself (rather than checking
-  # at the leaves) makes the message surface ahead of attribute-missing
-  # failures deep in buildRustCrate.
-  #
-  # Warn-only for now: no incompatible change has shipped yet, so skew
-  # is benign. Promote to `throw` on the first real bump.
-  resolvedApiLevel = rawResolved.apiLevel or 0;
-  resolved =
-    if resolvedApiLevel == apiLevel then
-      rawResolved
-    else
-      lib.warn ''
-        cargo-nix-plugin: API level mismatch.
-          nix builtin resolver = ${toString resolvedApiLevel}
-          lib/default.nix      = ${toString apiLevel}
-        Your nix was built against a different cargo-nix-plugin revision
-        than the lib/ you are evaluating. Rebuild/reload the plugin
-        against this checkout.
-      '' rawResolved;
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl
@@ -649,5 +643,7 @@ in
   # Expose internals for debugging
   inherit resolved;
   inherit builtCrates;
-  inherit apiLevel;
+  # apiLevel = this lib/, resolverApiLevel = loaded plugin (0 if
+  # unknown). Lets callers hard-assert instead of relying on the warn.
+  inherit apiLevel resolverApiLevel;
 }

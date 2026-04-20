@@ -341,14 +341,19 @@ compiles too — `extraCfgs` only affects dependency resolution.
 - **Platforms**: `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
   Cross-compilation to other target platforms is supported.
 
-- **API level**: `builtins.resolveCargoWorkspace` returns an integer
-  `apiLevel` field describing the resolver-output / `lib/` contract.
-  `lib/default.nix` checks it against its own constant and throws a clear
-  error on mismatch. This guards setups that statically link the resolver
-  into Nix (so the binary may lag the `lib/` checkout). Bump
-  `API_LEVEL` in `rust/src/resolve.rs` and `apiLevel` in
-  `lib/default.nix` together whenever the result shape changes
-  incompatibly.
+- **API level**: `lib/` checks that the loaded plugin speaks the same
+  contract version before resolving and warns on mismatch (e.g. when the
+  plugin baked into your Nix lags the `lib/` checkout). The wrapper
+  result exposes both sides so you can turn that into a hard failure:
+
+  ```nix
+  let cargoNix = import ./lib { inherit pkgs; src = ./.; }; in
+  assert cargoNix.apiLevel == cargoNix.resolverApiLevel;
+  cargoNix.workspaceMembers
+  ```
+
+  `apiLevel` is what this `lib/` speaks; `resolverApiLevel` is what the
+  loaded plugin reports (0 if the plugin predates the check).
 
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`

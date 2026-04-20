@@ -14,6 +14,7 @@ extern "C" {
         char **err_out
     );
     void free_string(char *s);
+    unsigned cargo_nix_api_level(void);
 }
 
 using namespace nix;
@@ -81,6 +82,10 @@ static void prim_resolveCargoWorkspace(EvalState &state, const PosIdx pos,
     parseJSON(state, result, v);
 }
 
+static void prim_cargoNixApiLevel(EvalState &, const PosIdx, Value **, Value &v) {
+    v.mkInt(cargo_nix_api_level());
+}
+
 // Nix >=2.34 renamed PrimOp::fun to PrimOp::impl (see CMakeLists.txt).
 static RegisterPrimOp rp(PrimOp {
     .name = "resolveCargoWorkspace",
@@ -99,5 +104,20 @@ static RegisterPrimOp rp(PrimOp {
     .impl = prim_resolveCargoWorkspace,
 #else
     .fun = prim_resolveCargoWorkspace,
+#endif
+});
+
+// Internal probe so lib/ can detect a skewed .so before calling
+// resolveCargoWorkspace. Not user API; see cargoNix.{apiLevel,
+// resolverApiLevel}.
+static RegisterPrimOp rpApiLevel(PrimOp {
+    .name = "__cargoNixApiLevel",
+    .args = {},
+    .arity = 0,
+    .doc = "Internal: contract version of the loaded cargo-nix-plugin resolver.",
+#ifdef NIX_PRIMOP_HAS_IMPL
+    .impl = prim_cargoNixApiLevel,
+#else
+    .fun = prim_cargoNixApiLevel,
 #endif
 });

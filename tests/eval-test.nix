@@ -45,6 +45,15 @@ let
       msg = "Expected apiLevel >= 1, got ${toString (result.apiLevel or 0)}";
     }
     {
+      # Primop and embedded result.apiLevel both read API_LEVEL; a
+      # mismatch means the C++ shim links a stale symbol.
+      name = "api-level-primop";
+      ok = (builtins.__cargoNixApiLevel or (-1)) == (result.apiLevel or 0);
+      msg = "builtins.__cargoNixApiLevel (${
+        toString (builtins.__cargoNixApiLevel or (-1))
+      }) != result.apiLevel (${toString (result.apiLevel or 0)})";
+    }
+    {
       name = "crate-count";
       ok = crateCount >= 1700;
       msg = "Expected >= 1700 crates, got ${toString crateCount}";

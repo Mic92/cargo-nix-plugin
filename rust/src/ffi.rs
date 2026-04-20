@@ -4,7 +4,14 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
 use crate::cfg_eval::TargetDescription;
-use crate::resolve::resolve_workspace;
+use crate::resolve::{resolve_workspace, API_LEVEL};
+
+/// Expose [`API_LEVEL`] to the C++ shim for `builtins.__cargoNixApiLevel`,
+/// so lib/ can detect a skewed .so before calling the resolver.
+#[no_mangle]
+pub extern "C" fn cargo_nix_api_level() -> u32 {
+    API_LEVEL
+}
 
 /// Input from the Nix side — the entire attrset serialized as JSON.
 ///
@@ -159,6 +166,11 @@ pub unsafe extern "C" fn free_string(s: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ffi_api_level_matches_constant() {
+        assert_eq!(cargo_nix_api_level(), API_LEVEL);
+    }
 
     fn linux_x86_64() -> TargetDescription {
         TargetDescription {
