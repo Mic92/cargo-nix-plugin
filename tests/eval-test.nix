@@ -1,9 +1,11 @@
-# Test the plugin by evaluating it against the torture workspace fixtures.
-# Run with:
-#   nix eval --raw --option plugin-files /path/to/libcargo_nix_plugin.so -f tests/eval-test.nix
+# Plugin assertions against the torture fixtures. CI: nix/eval-test.nix.
+# Manual: nix eval --raw --option plugin-files … --expr 'import ./tests/eval-test.nix {}'
+{
+  fixtures ? ../rust/tests/fixtures,
+}:
 let
-  metadata = builtins.readFile ../rust/tests/fixtures/metadata.json;
-  cargoLock = builtins.readFile ../rust/tests/fixtures/Cargo.lock;
+  metadata = builtins.readFile (fixtures + "/metadata.json");
+  cargoLock = builtins.readFile (fixtures + "/Cargo.lock");
   target = {
     name = "x86_64-unknown-linux-gnu";
     os = "linux";
@@ -48,9 +50,9 @@ let
       # Primop and embedded result.apiLevel both read API_LEVEL; a
       # mismatch means the C++ shim links a stale symbol.
       name = "api-level-primop";
-      ok = (builtins.__cargoNixApiLevel or (-1)) == (result.apiLevel or 0);
-      msg = "builtins.__cargoNixApiLevel (${
-        toString (builtins.__cargoNixApiLevel or (-1))
+      ok = (builtins.cargoNixApiLevel or (-1)) == (result.apiLevel or 0);
+      msg = "builtins.cargoNixApiLevel (${
+        toString (builtins.cargoNixApiLevel or (-1))
       }) != result.apiLevel (${toString (result.apiLevel or 0)})";
     }
     {
