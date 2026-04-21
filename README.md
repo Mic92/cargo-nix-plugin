@@ -27,7 +27,7 @@ Or use the flake output:
 
 ```nix
 {
-  inputs.cargo-nix-plugin.url = "github:your-org/cargo-nix-plugin";
+  inputs.cargo-nix-plugin.url = "github:anthropics/cargo-nix-plugin";
 }
 ```
 
@@ -189,7 +189,7 @@ plugin-files = /path/to/cargo-nix-plugin/lib/nix/plugins
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    cargo-nix-plugin.url = "github:your-org/cargo-nix-plugin";
+    cargo-nix-plugin.url = "github:anthropics/cargo-nix-plugin";
   };
 
   outputs = { self, nixpkgs, cargo-nix-plugin }:
