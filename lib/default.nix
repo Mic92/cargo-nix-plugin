@@ -111,7 +111,7 @@ let
   # Probe the loaded plugin before calling it so skew surfaces as a
   # clear message, not a serde/attr error. `or 0` covers plugins
   # predating the primop. Warn-only until the first real bump.
-  resolverApiLevel = builtins.__cargoNixApiLevel or 0;
+  resolverApiLevel = builtins.cargoNixApiLevel or 0;
   apiLevelGuard =
     if resolverApiLevel == apiLevel then
       x: x
