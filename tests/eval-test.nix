@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Plugin assertions against the torture fixtures. CI: nix/eval-test.nix.
 # Manual: nix eval --raw --option plugin-files … --expr 'import ./tests/eval-test.nix {}'
 {

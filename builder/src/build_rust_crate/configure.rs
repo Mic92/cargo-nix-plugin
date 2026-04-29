@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::symlink;

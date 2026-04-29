@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Regression: a plugin prefetch must not poison `~/.cargo` for cargo itself.
 #
 # tame-index's IndexDependency lacks a `registry` field, so re-serializing

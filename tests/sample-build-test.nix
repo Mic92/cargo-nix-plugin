@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # End-to-end build test: resolve, compile, and run a small Rust workspace
 # using the nix plugin + buildRustCrate, all inside a single derivation.
 # The workspace has two members (sample-lib, sample-bin) to exercise

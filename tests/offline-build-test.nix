@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # End-to-end test for offline mode: resolve from Cargo.lock + registry
 # index cache (no cargo metadata), compile, and run the sample workspace.
 #

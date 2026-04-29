@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Verify the plugin's remote sparse index HTTP fallback works when
 # there is no local cargo registry cache.
 #

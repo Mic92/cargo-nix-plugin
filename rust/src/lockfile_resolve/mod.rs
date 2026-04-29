@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Resolve a cargo workspace from Cargo.lock + registry index, without cargo metadata.
 //!
 //! This avoids downloading crate sources at eval time. Fields that require

@@ -358,6 +358,13 @@ compiles too — `extraCfgs` only affects dependency resolution.
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`
 
+## Status
+
+Maintained by Anthropic. Provided AS IS without warranty (see LICENSE).
+We triage issues and review pull requests but do not commit to fixing every
+bug or accepting every feature request. For security issues, see
+`SECURITY.md`.
+
 ## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE).

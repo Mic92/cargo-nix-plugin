@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cargo.toml reading: workspace, member, and git-checkout manifests.
 //!
 //! Everything that turns on-disk TOML into [`WorkspaceMember`] /

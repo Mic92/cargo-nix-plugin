@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Code for buildRustCrate, a Nix function that builds Rust code, just
 # like Cargo, but using Nix instead.
 #

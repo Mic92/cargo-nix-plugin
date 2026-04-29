@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Filter dependencies based on cfg() conditions, optional status, and features.
 
 use cargo_metadata::Dependency;

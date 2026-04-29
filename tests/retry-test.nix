@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Verify the plugin's HTTP retry loop recovers from transient failures.
 #
 # Reuses the fake sparse-index server (./fake-sparse-server.py) with its

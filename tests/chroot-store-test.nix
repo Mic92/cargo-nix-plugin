@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Regression test: building into a chroot store (nix build --store /tmp/...)
 # requires that the plugin remaps logical store paths to real filesystem paths
 # so cargo metadata can find Cargo.toml on the host during eval.

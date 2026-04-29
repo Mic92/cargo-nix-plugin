@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Feature resolution: merge, expand, and propagate features across the dependency graph.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

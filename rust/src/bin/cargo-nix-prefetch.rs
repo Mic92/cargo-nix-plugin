@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Warm the sparse registry index cache for a Cargo workspace.
 //!
 //! Standalone front-end to the same prefetch machinery the plugin uses

@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Look up crate metadata from the cargo registry index using `tame-index`.
 //!
 //! First tries the local cache (`$CARGO_HOME/registry/index/`). On cache miss,

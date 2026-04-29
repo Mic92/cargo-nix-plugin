@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Evaluate cfg() target expressions against a target description.
 
 use cargo_platform::{Cfg, Ident, Platform};

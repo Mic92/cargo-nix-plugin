@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Read cargo's `[source]` replacement configuration so the lockfile
 //! resolver hits the same registry mirror that `cargo` itself would.
 //!
