@@ -4,8 +4,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
-/// Top-level config deserialized from NIX_ATTRS_JSON_FILE (__structuredAttrs).
-/// camelCase to match Nix attribute names.
+/// Top-level config deserialized from NIX_ATTRS_JSON_FILE (a passAsFile
+/// JSON written by the Nix wrapper). camelCase matches Nix attrs.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuildConfig {
@@ -80,6 +80,8 @@ pub struct BuildConfig {
     pub host_platform: PlatformInfo,
     pub build_platform: PlatformInfo,
 
+    /// Populated from `$out`, `$lib`, ... at load time — not in the JSON.
+    #[serde(skip)]
     pub outputs: HashMap<String, String>,
 
     #[serde(default)]
@@ -264,41 +266,17 @@ pub struct PlatformInfo {
 impl BuildConfig {
     pub fn from_json_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self = serde_json::from_str(&content)?;
+        let mut config: Self = serde_json::from_str(&content)?;
 
-        // Export ALL_CAPS attrs as env vars: __structuredAttrs puts them in JSON
-        // but overrides like `OPENSSL_NO_VENDOR = 1;` expect them in the env.
-        // Coercion matches stdenv's non-structured behaviour.
-        if let Some(obj) = serde_json::from_str::<serde_json::Value>(&content)
-            .ok()
-            .as_ref()
-            .and_then(|v| v.as_object())
-        {
-            for (k, v) in obj {
-                if k.is_empty()
-                    || !k.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-                {
-                    continue;
-                }
-                let s = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Bool(b) => if *b { "1".into() } else { String::new() },
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Array(a) => a
-                        .iter()
-                        .filter_map(|e| match e {
-                            serde_json::Value::String(s) => Some(s.clone()),
-                            serde_json::Value::Number(n) => Some(n.to_string()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    _ => continue,
-                };
-                super::util::set_var(k, s);
+        // Output paths come from the env vars stdenv exports per output.
+        for name in ["out", "lib"] {
+            if let Ok(v) = std::env::var(name) {
+                config.outputs.insert(name.into(), v);
             }
         }
-
+        if !config.outputs.contains_key("out") {
+            return Err("$out not set in environment".into());
+        }
         Ok(config)
     }
 
