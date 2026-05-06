@@ -129,12 +129,27 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
     let member_globs = workspace_table
         .and_then(|w| w.get("members"))
         .and_then(|m| m.as_array());
+    // Cargo subtracts `[workspace].exclude` after expanding member globs.
+    // Match cargo's `WorkspaceRootConfig::is_excluded`: a prefix check
+    // against the literal exclude paths, no glob expansion.
+    let exclude_dirs: Vec<PathBuf> = workspace_table
+        .and_then(|w| w.get("exclude"))
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|p| workspace_root.join(p))
+        .collect();
+    let is_excluded = |dir: &Path| exclude_dirs.iter().any(|ex| dir.starts_with(ex));
     for glob_str in member_globs
         .into_iter()
         .flatten()
         .filter_map(|v| v.as_str())
     {
         for member_dir in expand_glob(workspace_root, glob_str) {
+            if is_excluded(&member_dir) {
+                continue;
+            }
             let member_manifest = member_dir.join("Cargo.toml");
             if !member_manifest.exists() {
                 continue;
@@ -649,10 +664,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Cargo's `[workspace].members` accepts general glob patterns (it
-    /// uses the `glob` crate). serde uses `serde_*`, tokio uses
-    /// `tokio-*`, monorepos use `crates/**`. Anything past `prefix/*`
-    /// must not silently produce an empty member set.
+    /// An excluded crate matching `crates/*` must not become a member —
+    /// its Cargo.toml may not even parse (vendored fixtures, generated
+    /// code), and a name collision with a registry dep would misclassify
+    /// the registry dep.
+    #[test]
+    fn parse_workspace_honours_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str, name: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        };
+        mk("crates/a", "a");
+        mk("crates/b", "b");
+        mk("crates/excluded", "excluded");
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+            [workspace]
+            members = ["crates/*"]
+            exclude = ["crates/excluded"]
+            "#,
+        )
+        .unwrap();
+        let ws = parse_workspace(tmp.path()).unwrap();
+        let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"a"), "members = {names:?}");
+        assert!(names.contains(&"b"), "members = {names:?}");
+        assert!(
+            !names.contains(&"excluded"),
+            "[workspace].exclude must drop crates/excluded; members = {names:?}"
+        );
+    }
+
+    /// Patterns past `prefix/*` (`serde_*`, `tokio-*`, `crates/**`) must
+    /// not silently produce an empty member set.
     #[test]
     fn expand_glob_partial_and_recursive() {
         let tmp = tempfile::tempdir().unwrap();
