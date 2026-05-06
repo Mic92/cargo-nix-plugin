@@ -14,6 +14,12 @@ pub struct TargetDescription {
     pub arch: String,
     pub vendor: String,
     pub env: String,
+    /// `target_abi` (e.g. `"eabihf"` for armv7-…-gnueabihf, `""` for most
+    /// targets). rustc has emitted this since 1.78; cargo evaluates it for
+    /// `[target.'cfg(target_abi = …)']`. Defaults to `""` for callers that
+    /// predate the field.
+    #[serde(default)]
+    pub abi: String,
     pub family: Vec<String>,
     pub pointer_width: String,
     pub endian: String,
@@ -44,6 +50,7 @@ pub fn target_cfgs(target: &TargetDescription) -> Vec<Cfg> {
         Cfg::KeyPair(ident("target_env"), target.env.clone()),
         Cfg::KeyPair(ident("target_pointer_width"), target.pointer_width.clone()),
         Cfg::KeyPair(ident("target_endian"), target.endian.clone()),
+        Cfg::KeyPair(ident("target_abi"), target.abi.clone()),
     ];
     for fam in &target.family {
         cfgs.push(Cfg::KeyPair(ident("target_family"), fam.clone()));
@@ -78,6 +85,7 @@ mod tests {
             arch: "x86_64".to_string(),
             vendor: "unknown".to_string(),
             env: "gnu".to_string(),
+            abi: "".to_string(),
             family: vec!["unix".to_string()],
             pointer_width: "64".to_string(),
             endian: "little".to_string(),
@@ -200,5 +208,25 @@ mod tests {
         };
         let platform = Platform::from_str("cfg(all(target_os = \"linux\", my_platform))").unwrap();
         assert!(matches_target(&platform, &target));
+    }
+
+    /// armv7-…-gnueabihf has `target_abi = "eabihf"`. If the cfg is
+    /// never emitted, `cfg(target_abi = …)` deps are silently dropped.
+    #[test]
+    fn cfg_target_abi_eabihf() {
+        let target = TargetDescription {
+            name: "armv7-unknown-linux-gnueabihf".to_string(),
+            arch: "arm".to_string(),
+            abi: "eabihf".to_string(),
+            ..linux_x86_64()
+        };
+        let platform = Platform::from_str("cfg(target_abi = \"eabihf\")").unwrap();
+        assert!(matches_target(&platform, &target));
+    }
+
+    #[test]
+    fn cfg_target_abi_does_not_match_wrong_value() {
+        let platform = Platform::from_str("cfg(target_abi = \"eabihf\")").unwrap();
+        assert!(!matches_target(&platform, &linux_x86_64()));
     }
 }

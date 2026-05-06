@@ -182,6 +182,13 @@ let
         "musl"
       else
         "";
+    # rustc `target_abi`, drives `cfg(target_abi = …)` dep selection.
+    # Only the eabi family is mapped — empty for everything else.
+    abi =
+      if platform.parsed.abi.eabi or false then
+        (if platform.parsed.abi.float or null == "hard" then "eabihf" else "eabi")
+      else
+        "";
     family =
       if platform.isUnix then
         [ "unix" ]

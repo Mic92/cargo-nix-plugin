@@ -572,6 +572,7 @@ mod tests {
             arch: "x86_64".to_string(),
             vendor: "unknown".to_string(),
             env: "gnu".to_string(),
+            abi: "".to_string(),
             family: vec!["unix".to_string()],
             pointer_width: "64".to_string(),
             endian: "little".to_string(),
