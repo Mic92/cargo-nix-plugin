@@ -601,14 +601,24 @@ fn find_lock_dep_by_name_and_req<'a>(
     // Fallback is only for unparseable versions.
     let mut unparseable_fallback = None;
     for dep_ref in dep_refs {
-        let mut parts = dep_ref.splitn(2, ' ');
+        // Cargo.lock dep refs are `"name"`, `"name version"`, or
+        // `"name version (source)"` — every entry in v1 lockfiles, only
+        // ambiguous entries in v2+. The source suffix must not poison
+        // the version comparison; use it as a tiebreaker when present.
+        let mut parts = dep_ref.splitn(3, ' ');
         if parts.next() != Some(name) {
             continue;
         }
-        let pkg = match parts.next() {
-            Some(version) => all_packages
-                .iter()
-                .find(|p| p.name == name && p.version == version),
+        let version = parts.next();
+        let source = parts
+            .next()
+            .map(|s| s.trim_start_matches('(').trim_end_matches(')'));
+        let pkg = match version {
+            Some(version) => all_packages.iter().find(|p| {
+                p.name == name
+                    && p.version == version
+                    && source.is_none_or(|s| p.source.as_deref() == Some(s))
+            }),
             None => all_packages.iter().find(|p| p.name == name),
         };
         let Some(pkg) = pkg else { continue };
@@ -771,6 +781,24 @@ dependencies = [
 
         let got = find_lock_dep_by_name_and_req("tokio", &req, &dep_refs, &packages);
         assert_eq!(got.unwrap().version, "1.49.0+anthropic.1");
+    }
+
+    /// `"name version (source)"` dep refs (every entry in v1 lockfiles)
+    /// must not break the name+version comparison.
+    #[test]
+    fn find_lock_dep_strips_source_suffix() {
+        let packages = vec![LockPackage {
+            name: "serde".into(),
+            version: "1.0.210".into(),
+            source: Some("registry+https://github.com/rust-lang/crates.io-index".into()),
+            dependencies: vec![],
+        }];
+        let dep_refs = vec![
+            "serde 1.0.210 (registry+https://github.com/rust-lang/crates.io-index)".to_string(),
+        ];
+        let req = semver::VersionReq::parse("^1").unwrap();
+        let got = find_lock_dep_by_name_and_req("serde", &req, &dep_refs, &packages);
+        assert_eq!(got.map(|p| p.version.as_str()), Some("1.0.210"));
     }
 
     /// An index dep whose version req doesn't match any lockfile entry
