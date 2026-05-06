@@ -182,8 +182,13 @@ fn expand_features(
         }
         enabled.insert(item.clone());
 
-        // Legacy implicit feature activates the dep.
-        if optional_deps.contains(&item) && !dep_prefix_used.contains(item.as_str()) {
+        // Legacy implicit feature activates the dep. An explicit `[features]`
+        // key with the same name suppresses the implicit one (cargo's
+        // `build_feature_map`: skip when `features.contains_key(&dep_name)`).
+        if optional_deps.contains(&item)
+            && !dep_prefix_used.contains(item.as_str())
+            && !features_map.contains_key(&item)
+        {
             active_deps.insert(item.clone());
         }
 
@@ -344,6 +349,30 @@ mod tests {
         let a = result_raw.features.get("A").unwrap();
         assert!(!a.contains("b"), "suppressed implicit leaked: {a:?}");
         assert!(result_raw.features.get("B").unwrap().contains("std"));
+    }
+
+    /// Enabling a feature that shadows an optional dep must expand its
+    /// rules without pulling in the dep.
+    #[test]
+    fn explicit_feature_shadows_implicit_optional_dep() {
+        let features_map: BTreeMap<String, Vec<String>> = [
+            ("foo".to_string(), vec!["bar".to_string()]),
+            ("bar".to_string(), vec![]),
+            // `foo/feat` keeps the dep mentionable for cargo.
+            ("turbo".to_string(), vec!["foo/feat".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        let optional: BTreeSet<String> = ["foo".to_string()].into_iter().collect();
+        let (enabled, active) = expand_features(&features_map, &["foo".to_string()], &optional);
+        assert!(
+            enabled.contains("bar"),
+            "feature rules must follow: {enabled:?}"
+        );
+        assert!(
+            !active.contains("foo"),
+            "shadowed feature `foo` must not activate dep `foo`: {active:?}"
+        );
     }
 
     #[test]

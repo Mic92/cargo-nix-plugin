@@ -437,8 +437,11 @@ fn activated_optional_deps(
             // Don't continue — still need to follow feature rules below
         }
 
-        // A feature with the same name as an optional dep (effective name) implicitly activates it
-        if optional_dep_effective_names.contains(&feat) {
+        // cargo-metadata always materialises the implicit `feat = ["dep:feat"]`
+        // in `pkg.features`, so the `dep:` rule above already activates it.
+        // An explicit `[features]` key with the same name suppresses that
+        // implicit feature and must not over-activate the dep here.
+        if optional_dep_effective_names.contains(&feat) && !feature_map.contains_key(&feat) {
             activated.insert(feat.clone());
         }
 
@@ -914,6 +917,23 @@ mod tests {
         assert!(
             result.contains(&"serde".to_string()),
             "non-optional serde should always be included"
+        );
+    }
+
+    /// Enabling a feature that shadows an optional dep must not pull in
+    /// the dep — cargo suppresses the implicit `foo = ["dep:foo"]` when
+    /// `foo` is an explicit `[features]` key.
+    #[test]
+    fn explicit_feature_shadows_implicit_optional_dep() {
+        let pkg = make_package(
+            &[("foo", None, true)],
+            // `turbo = ["foo/feat"]` keeps the dep mentionable for cargo.
+            &[("foo", &["bar"]), ("bar", &[]), ("turbo", &["foo/feat"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["foo".into()]);
+        assert!(
+            !result.contains(&"foo".to_string()),
+            "shadowed feature `foo` must not activate optional dep `foo`, got: {result:?}"
         );
     }
 
