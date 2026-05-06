@@ -553,29 +553,82 @@ fn normalize_path(p: &Path) -> PathBuf {
     out
 }
 
-/// Simple glob expansion for workspace member paths.
-/// Supports trailing `/*` patterns.
+/// Expand a `[workspace].members` glob into directories that contain a
+/// `Cargo.toml`.
+///
+/// Cargo accepts arbitrary `glob`-crate patterns; this matches what real
+/// workspaces use — `crates/*`, partial-segment wildcards (`serde_*`),
+/// and recursive `crates/**`. `?`/`[..]` are treated as literals: rare,
+/// and the `Cargo.toml` filter makes a false negative harmless. `/` and
+/// `\` both separate components so Windows-style patterns parse.
 fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
-    if let Some(prefix) = pattern
-        .strip_suffix("/*")
-        .or_else(|| pattern.strip_suffix("\\*"))
-    {
-        std::fs::read_dir(base.join(prefix))
+    fn matches(pat: &str, name: &str) -> bool {
+        if !pat.contains('*') {
+            return pat == name;
+        }
+        // Linear-scan wildcard match: first part is a prefix, last a
+        // suffix, the rest must appear in order.
+        let parts: Vec<&str> = pat.split('*').collect();
+        let (first, rest) = parts.split_first().unwrap();
+        let (last, mids) = rest.split_last().unwrap();
+        let Some(mut s) = name.strip_prefix(first) else {
+            return false;
+        };
+        for m in mids {
+            match s.find(m) {
+                Some(i) => s = &s[i + m.len()..],
+                None => return false,
+            }
+        }
+        s.ends_with(last)
+    }
+
+    fn subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+        std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .map(|e| e.path())
-            .filter(|p| p.join("Cargo.toml").exists())
-            .collect()
-    } else {
-        // Literal path, or a complex glob we don't support yet — try as-is.
-        let path = base.join(pattern);
-        if path.join("Cargo.toml").exists() {
-            vec![path]
-        } else {
-            Vec::new()
+    }
+
+    fn walk(dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>) {
+        match segs {
+            [] => {
+                if dir.join("Cargo.toml").exists() {
+                    out.push(dir.to_path_buf());
+                }
+            }
+            ["**", rest @ ..] => {
+                walk(dir, rest, out); // `**` matches zero segments
+                for sub in subdirs(dir) {
+                    walk(&sub, segs, out); // keep `**` consuming
+                }
+            }
+            [seg, rest @ ..] if seg.contains('*') => {
+                for sub in subdirs(dir) {
+                    if sub
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| matches(seg, n))
+                    {
+                        walk(&sub, rest, out);
+                    }
+                }
+            }
+            [seg, rest @ ..] => walk(&dir.join(seg), rest, out),
         }
     }
+
+    let segs: Vec<&str> = pattern
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    walk(base, &segs, &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -596,11 +649,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Cargo accepts `proc-macro`, the deprecated `proc_macro` underscore
-    /// alias, AND `crate-type = ["proc-macro"]` to mark a lib as a proc
-    /// macro (`TomlTarget::proc_macro()` checks all three). A workspace
-    /// member declaring it via the alias must not silently become a
-    /// regular lib derivation.
+    /// Cargo's `[workspace].members` accepts general glob patterns (it
+    /// uses the `glob` crate). serde uses `serde_*`, tokio uses
+    /// `tokio-*`, monorepos use `crates/**`. Anything past `prefix/*`
+    /// must not silently produce an empty member set.
+    #[test]
+    fn expand_glob_partial_and_recursive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+            dir
+        };
+        let foo_a = mk("crates/foo-a");
+        let foo_b = mk("crates/foo-b");
+        let _bar = mk("crates/bar"); // must NOT match `foo-*`
+        let mut got = expand_glob(tmp.path(), "crates/foo-*");
+        got.sort();
+        assert_eq!(got, vec![foo_a.clone(), foo_b.clone()]);
+
+        let nested = mk("crates/nested/deep");
+        let mut got = expand_glob(tmp.path(), "crates/**");
+        got.sort();
+        assert!(
+            got.contains(&foo_a) && got.contains(&foo_b) && got.contains(&nested),
+            "crates/** must recurse, got {got:?}"
+        );
+    }
+
+    /// Cargo's `TomlTarget::proc_macro()` checks three spellings — a
+    /// member using any of them must not become a regular lib.
     #[test]
     fn parse_member_proc_macro_aliases() {
         let probe = |toml_str: &str| {
