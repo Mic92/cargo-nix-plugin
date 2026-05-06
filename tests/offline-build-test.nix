@@ -23,39 +23,45 @@ let
   # users in network-restricted environments are expected to use
   # (prefetch → ship cache dir → point cargoHome at it), so the offline
   # build is gated on the public tool rather than a bespoke test helper.
-  cargoHome = pkgs.runCommand "sample-project-cargo-home"
-    { nativeBuildInputs = [ cargoNixPrefetch pkgs.python3 ]; }
-    ''
-      set -euo pipefail
-      PORT_FILE=$(mktemp)
-      ACCESS_LOG=$(mktemp)
-      python3 ${./fake-sparse-server.py} \
-        "$PORT_FILE" "$ACCESS_LOG" ${./fake-sparse-index} &
-      SERVER_PID=$!
-      trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
-      while [[ ! -s $PORT_FILE ]]; do kill -0 $SERVER_PID; done
-      PORT=$(<"$PORT_FILE")
+  cargoHome =
+    pkgs.runCommand "sample-project-cargo-home"
+      {
+        nativeBuildInputs = [
+          cargoNixPrefetch
+          pkgs.python3
+        ];
+      }
+      ''
+        set -euo pipefail
+        PORT_FILE=$(mktemp)
+        ACCESS_LOG=$(mktemp)
+        python3 ${./fake-sparse-server.py} \
+          "$PORT_FILE" "$ACCESS_LOG" ${./fake-sparse-index} &
+        SERVER_PID=$!
+        trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+        while [[ ! -s $PORT_FILE ]]; do kill -0 $SERVER_PID; done
+        PORT=$(<"$PORT_FILE")
 
-      cargo-nix-prefetch \
-        --manifest-path ${sampleProject}/Cargo.toml \
-        --index "sparse+http://127.0.0.1:$PORT/" \
-        --output "$out"
+        cargo-nix-prefetch \
+          --manifest-path ${sampleProject}/Cargo.toml \
+          --index "sparse+http://127.0.0.1:$PORT/" \
+          --output "$out"
 
-      cargo-nix-prefetch \
-        --manifest-path ${sampleProject}/Cargo.toml \
-        --index "sparse+http://127.0.0.1:$PORT/" \
-        --output "$out" --check
+        cargo-nix-prefetch \
+          --manifest-path ${sampleProject}/Cargo.toml \
+          --index "sparse+http://127.0.0.1:$PORT/" \
+          --output "$out" --check
 
-      # Normalize the dir name so the eval (which sees Cargo.lock's
-      # crates.io source URLs) finds it: the prefetch wrote it under
-      # 127.0.0.1-<hash>, but find_index_dir computes the exact 1.85+
-      # stable hash for sparse+https://index.crates.io/. Rename rather
-      # than re-prefetch so the cache contents are exactly what the tool
-      # produced. The hash is stable by construction — cargo froze it
-      # in 1.85 (rust-lang/cargo#13684) and tame-index reproduces it.
-      mv "$out"/registry/index/127.0.0.1-* \
-         "$out"/registry/index/index.crates.io-1949cf8c6b5b557f
-    '';
+        # Normalize the dir name so the eval (which sees Cargo.lock's
+        # crates.io source URLs) finds it: the prefetch wrote it under
+        # 127.0.0.1-<hash>, but find_index_dir computes the exact 1.85+
+        # stable hash for sparse+https://index.crates.io/. Rename rather
+        # than re-prefetch so the cache contents are exactly what the tool
+        # produced. The hash is stable by construction — cargo froze it
+        # in 1.85 (rust-lang/cargo#13684) and tame-index reproduces it.
+        mv "$out"/registry/index/127.0.0.1-* \
+           "$out"/registry/index/index.crates.io-1949cf8c6b5b557f
+      '';
 in
 pkgs.runCommand "cargo-nix-plugin-offline-build-test"
   {

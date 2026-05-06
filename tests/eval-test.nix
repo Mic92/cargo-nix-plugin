@@ -40,7 +40,8 @@ let
 
   # Find external crates that have non-empty devDependencies
   externalWithDevDeps = builtins.filter (
-    id: !(builtins.elem id memberIds) && builtins.length (result.crates.${id}.devDependencies or [ ]) > 0
+    id:
+    !(builtins.elem id memberIds) && builtins.length (result.crates.${id}.devDependencies or [ ]) > 0
   ) (builtins.attrNames result.crates);
 
   assertions = [

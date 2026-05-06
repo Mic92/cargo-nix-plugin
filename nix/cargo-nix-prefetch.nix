@@ -10,7 +10,10 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
   src = ../rust;
   cargoLock.lockFile = ../rust/Cargo.lock;
-  cargoBuildFlags = [ "--bin" "cargo-nix-prefetch" ];
+  cargoBuildFlags = [
+    "--bin"
+    "cargo-nix-prefetch"
+  ];
   doCheck = false;
 
   meta.description = "Warm the sparse registry index cache for a Cargo workspace";

@@ -33,7 +33,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
       cargo = pkgs.cargo;
       stdenv = pkgs.stdenv;
       mold = pkgs.mold;
-      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix {};
+      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
       sampleProject = sampleProject;
       pluginSrc = pluginSrc;
       nixpkgs = pkgs.path;
@@ -77,7 +77,9 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
               rustc = builtins.storePath ${pkgs.rustc};
               cargo = builtins.storePath ${pkgs.cargo};
               mold = builtins.storePath ${pkgs.mold};
-              buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
+              buildRustCrateBin = builtins.storePath ${
+                pkgs.callPackage ../nix/build-rust-crate-bin.nix { }
+              };
             };
           in (import ${pluginSrc}/lib {
             inherit pkgs;

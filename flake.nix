@@ -136,28 +136,32 @@
 
       # Build packages/tests for every nix version, suffixed with the version.
       # e.g. eval-test-nix_2_34, torture-test-nix_2_34, etc.
-      perVersionPackages = pkgs: builtins.foldl' (
-        acc: ver:
-        let
-          cfg = nixVersions.${ver};
-          components = pkgs.nixVersions.${cfg.components};
-          nix = pkgs.nixVersions.${cfg.binary};
-          plugin = mkPlugin pkgs components;
-          tests = mkTests pkgs plugin nix;
-          # The UBSan build statically links compiler-rt's minimal
-          # runtime via GNU-ld --whole-archive from lib/linux/; no
-          # darwin equivalent is wired up, so keep it Linux-only.
-          sanitizedTests = nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-            mkTests pkgs (mkPluginSanitized pkgs components) nix
-          );
-        in
-        acc
-        // { "cargo-nix-plugin-nix_${ver}" = plugin; }
-        // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
-        // nixpkgs.lib.mapAttrs' (
-          name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
-        ) sanitizedTests
-      ) { } (builtins.attrNames nixVersions);
+      perVersionPackages =
+        pkgs:
+        builtins.foldl' (
+          acc: ver:
+          let
+            cfg = nixVersions.${ver};
+            components = pkgs.nixVersions.${cfg.components};
+            nix = pkgs.nixVersions.${cfg.binary};
+            plugin = mkPlugin pkgs components;
+            tests = mkTests pkgs plugin nix;
+            # The UBSan build statically links compiler-rt's minimal
+            # runtime via GNU-ld --whole-archive from lib/linux/; no
+            # darwin equivalent is wired up, so keep it Linux-only.
+            sanitizedTests = nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+              mkTests pkgs (mkPluginSanitized pkgs components) nix
+            );
+          in
+          acc
+          // {
+            "cargo-nix-plugin-nix_${ver}" = plugin;
+          }
+          // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
+          // nixpkgs.lib.mapAttrs' (
+            name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
+          ) sanitizedTests
+        ) { } (builtins.attrNames nixVersions);
 
       # The default nix version used for the top-level plugin package.
       # Keep README.md (## Example, ## Compatibility) in sync when bumping.
@@ -206,11 +210,15 @@
       apps = forAllSystems (pkgs: {
         cargo-nix-prefetch = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch}/bin/cargo-nix-prefetch";
+          program = "${
+            self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch
+          }/bin/cargo-nix-prefetch";
         };
         generate-metadata = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.generate-metadata}/bin/generate-metadata";
+          program = "${
+            self.packages.${pkgs.stdenv.hostPlatform.system}.generate-metadata
+          }/bin/generate-metadata";
         };
       });
 
@@ -230,10 +238,7 @@
             plugin = mkPlugin pkgs components;
             tests = mkTests pkgs plugin nix;
           in
-          acc
-          // nixpkgs.lib.mapAttrs' (
-            name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv
-          ) tests
+          acc // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
         ) { } (builtins.attrNames nixVersions)
       );
 
