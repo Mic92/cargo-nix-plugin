@@ -267,10 +267,16 @@ fn parse_member_manifest(
 
     // Parse lib target
     let lib = toml.get("lib");
+    let lib_crate_types =
+        toml_str_array(lib.and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type"))));
+    // Cargo's TomlTarget::proc_macro() falls back through `proc-macro`,
+    // the deprecated `proc_macro` underscore alias, then a "proc-macro"
+    // entry in crate-type. Match that — a proc-macro built as a regular
+    // lib silently fails to compile.
     let proc_macro = lib
-        .and_then(|l| l.get("proc-macro"))
+        .and_then(|l| l.get("proc-macro").or_else(|| l.get("proc_macro")))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or_else(|| lib_crate_types.iter().any(|t| t == "proc-macro"));
     let lib_path = lib
         .and_then(|l| l.get("path"))
         .and_then(|v| v.as_str())
@@ -279,8 +285,6 @@ fn parse_member_manifest(
         .and_then(|l| l.get("name"))
         .and_then(|v| v.as_str())
         .map(|n| n.replace('-', "_"));
-    let lib_crate_types =
-        toml_str_array(lib.and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type"))));
 
     // Parse bin targets
     let bin_targets: Vec<BinTarget> = toml
@@ -590,6 +594,41 @@ mod tests {
         assert_eq!(result[0], member);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Cargo accepts `proc-macro`, the deprecated `proc_macro` underscore
+    /// alias, AND `crate-type = ["proc-macro"]` to mark a lib as a proc
+    /// macro (`TomlTarget::proc_macro()` checks all three). A workspace
+    /// member declaring it via the alias must not silently become a
+    /// regular lib derivation.
+    #[test]
+    fn parse_member_proc_macro_aliases() {
+        let probe = |toml_str: &str| {
+            let toml: toml::Value = toml::from_str(toml_str).unwrap();
+            let pkg = toml.get("package").unwrap();
+            parse_member_manifest(
+                &toml,
+                pkg,
+                Path::new("/nonexistent"),
+                &HashMap::new(),
+                &WorkspacePackage::default(),
+            )
+            .unwrap()
+            .proc_macro
+        };
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\nproc-macro = true\n"
+        ));
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\nproc_macro = true\n"
+        ));
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\ncrate-type = [\"proc-macro\"]\n"
+        ));
+        assert!(!probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\ncrate-type = [\"cdylib\"]\n"
+        ));
+        assert!(!probe("[package]\nname = \"a\"\nversion = \"0.1.0\"\n"));
     }
 
     #[test]
