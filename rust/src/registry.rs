@@ -460,13 +460,13 @@ fn do_fetch_one(
         ));
     }
 
+    // ureq's read_to_vec() can surface BodyExceedsLimit, which won't change
+    // on retry — give body-read errors the same Permanent/Retryable split
+    // as call() errors.
     let body = response
         .body_mut()
         .read_to_vec()
-        .map_err(|e| FetchError::Retryable {
-            msg: format!("failed to read response body for '{name}': {e}"),
-            delay: None,
-        })?;
+        .map_err(|e| classify_ureq_error(e, name, url))?;
 
     // A parse failure here is the asn1-rs case from #349206 — a
     // CDN/proxy returned a truncated or otherwise malformed body. Almost
@@ -675,7 +675,15 @@ fn classify_status(status: u16, headers: &http::HeaderMap, name: &str, url: &str
         )),
         // Other 4xx (400, 401, 403, ...) — permanent client/auth errors.
         400..=499 => FetchError::Permanent(msg),
-        // Anything else (1xx, 3xx that ureq didn't follow): conservative
+        // make_remote_request() injects If-None-Match from the on-disk
+        // cache; we only get here when lookup_version() already found the
+        // cache useless, so a 304 is a stable "version not in registry",
+        // not a transient blip.
+        304 => FetchError::Permanent(format!(
+            "registry has no newer index for '{name}' (HTTP 304 from '{url}'); \
+             the requested version is not in '{url}'"
+        )),
+        // Anything else (1xx, other 3xx ureq didn't follow): conservative
         // retry, since neither side of this loop expects to see them.
         _ => FetchError::Retryable { msg, delay: None },
     }
@@ -733,8 +741,11 @@ fn retry_with_backoff<T>(
 ) -> Result<T, String> {
     let mut total_slept = Duration::ZERO;
     let mut last_msg = String::new();
+    // The budget cap can break out before MAX_ATTEMPTS calls of f().
+    let mut attempts_made: u32 = 0;
 
     for attempt in 0..MAX_ATTEMPTS {
+        attempts_made = attempt + 1;
         match f() {
             Ok(v) => return Ok(v),
             Err(FetchError::Permanent(msg)) => return Err(msg),
@@ -775,7 +786,7 @@ fn retry_with_backoff<T>(
     }
 
     Err(format!(
-        "{last_msg} (gave up after {MAX_ATTEMPTS} attempts, {}ms total)",
+        "{last_msg} (gave up after {attempts_made} attempts, {}ms total)",
         total_slept.as_millis()
     ))
 }
@@ -1284,5 +1295,16 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("always fails"));
         assert!(err.contains("gave up"));
+    }
+
+    /// 304 means the conditional fetch hit a cache lookup_version already
+    /// rejected — retrying can never resolve it.
+    #[test]
+    fn classify_status_304_is_permanent() {
+        let h = http::HeaderMap::new();
+        assert!(matches!(
+            classify_status(304, &h, "serde", "https://example/"),
+            FetchError::Permanent(_)
+        ));
     }
 }
