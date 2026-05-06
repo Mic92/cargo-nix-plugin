@@ -80,13 +80,23 @@ fn read_toml(path: &Path) -> Result<toml::Value, String> {
 /// Parse `[workspace.dependencies]` and `[workspace.package]`.
 fn parse_workspace_tables(
     workspace_table: Option<&toml::Value>,
+    workspace_root: &Path,
 ) -> (HashMap<String, ManifestDep>, WorkspacePackage) {
-    let workspace_deps = workspace_table
+    let workspace_deps: HashMap<String, ManifestDep> = workspace_table
         .and_then(|w| w.get("dependencies"))
         .map(|d| {
             parse_manifest_deps(Some(d), &HashMap::new())
                 .into_iter()
-                .map(|dep| (dep.name.clone(), dep))
+                .map(|mut dep| {
+                    // [workspace.dependencies] paths are workspace-root relative;
+                    // member [dependencies] paths are member-dir relative. Anchor
+                    // these now so the path_deps walk can `referrer_dir.join(p)`
+                    // either kind (Path::join ignores the LHS for an absolute RHS).
+                    if let Some(p) = &dep.path {
+                        dep.path = Some(workspace_root.join(p).to_string_lossy().into_owned());
+                    }
+                    (dep.name.clone(), dep)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -115,7 +125,7 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
 
     // [workspace.dependencies] / [workspace.package] — inheritance sources
     // for `foo = { workspace = true }` and `edition.workspace = true`.
-    let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
+    let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table, workspace_root);
 
     // Check if root is a package
     if let Some(pkg) = root_toml.get("package") {
@@ -438,13 +448,10 @@ fn parse_manifest_deps(
                             default_features,
                             features,
                             target: None,
-                            // [workspace.dependencies] paths are relative to
-                            // the workspace root, but we resolve path deps
-                            // relative to the *member* dir. Members that
-                            // inherit a path dep are normally also workspace
-                            // members themselves, so leave this unset rather
-                            // than carry a wrongly-based path.
-                            path: None,
+                            // Already anchored to the workspace root, so the
+                            // path_deps walk finds vendored crates that aren't
+                            // also [workspace].members.
+                            path: ws.path.clone(),
                         };
                     }
                     // workspace = true but no entry — cargo errors. We
@@ -503,7 +510,7 @@ impl GitCheckout {
         let root_toml = read_toml(&root.join("Cargo.toml"))
             .map_err(|e| format!("git checkout {}: {e}", root.display()))?;
         let workspace_table = root_toml.get("workspace");
-        let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
+        let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table, root);
 
         let mut members = HashMap::new();
         let mut push = |toml: &toml::Value, dir: &Path| -> Result<(), String> {
@@ -699,6 +706,46 @@ mod tests {
         assert!(
             !names.contains(&"excluded"),
             "[workspace].exclude must drop crates/excluded; members = {names:?}"
+        );
+    }
+
+    /// A `[workspace.dependencies]` path dep referenced only via
+    /// `workspace = true` must still be discovered by the path_deps walk
+    /// even if it isn't also a `[workspace].members` entry.
+    #[test]
+    fn parse_workspace_inherits_path_dep_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+            [workspace]
+            members = ["app"]
+            [workspace.dependencies]
+            vendored = { path = "vendor/vendored" }
+            "#,
+        )
+        .unwrap();
+        let mk = |rel: &str, body: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), body).unwrap();
+        };
+        // Member inherits via workspace = true; no direct path edge.
+        mk(
+            "app",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nvendored = { workspace = true }\n",
+        );
+        // Vendored crate is NOT in [workspace].members.
+        mk(
+            "vendor/vendored",
+            "[package]\nname = \"vendored\"\nversion = \"0.1.0\"\n",
+        );
+        let ws = parse_workspace(tmp.path()).unwrap();
+        assert!(
+            ws.path_deps.contains_key("vendored"),
+            "inherited path dep must be discoverable; path_deps = {:?}",
+            ws.path_deps.keys().collect::<Vec<_>>()
         );
     }
 
