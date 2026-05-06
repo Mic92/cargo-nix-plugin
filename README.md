@@ -169,7 +169,7 @@ The plugin must be loaded by the same Nix version it was compiled against
 
 ```bash
 PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
-NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+NIX=$(nix build nixpkgs#nixVersions.nix_2_32 --print-out-paths | grep -v man)
 
 $NIX/bin/nix-instantiate --eval \
   --option plugin-files "$PLUGIN/lib/nix/plugins" \
@@ -326,17 +326,21 @@ compiles too — `extraCfgs` only affects dependency resolution.
 
 - **Nix**: The plugin must be loaded by the **same Nix version** it was compiled
   against — the Nix plugin ABI is not stable across versions. If you see errors
-  like `expected a set but found a set`, you have a version mismatch. The flake
-  currently builds against Nix 2.33, so use Nix 2.33.x to evaluate:
+  like `expected a set but found a set`, you have a version mismatch.
+  `.#cargo-nix-plugin` (the default) is built against Nix 2.32, so use Nix
+  2.32.x to evaluate:
 
   ```bash
   # Get the matching nix
-  NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+  NIX=$(nix build nixpkgs#nixVersions.nix_2_32 --print-out-paths | grep -v man)
   PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
 
   $NIX/bin/nix build .#myPackage \
     --option plugin-files "$PLUGIN/lib/nix/plugins"
   ```
+
+  For other Nix versions, build the matching per-version attribute, e.g.
+  `.#cargo-nix-plugin-nix_2_33` to pair with `nixVersions.nix_2_33`.
 
 - **Platforms**: `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
   Cross-compilation to other target platforms is supported.

@@ -153,6 +153,7 @@
       ) { } (builtins.attrNames nixVersions);
 
       # The default nix version used for the top-level plugin package.
+      # Keep README.md (## Example, ## Compatibility) in sync when bumping.
       defaultNixComponents = "nixComponents_2_32";
     in
     {
