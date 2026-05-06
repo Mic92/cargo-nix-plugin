@@ -507,10 +507,16 @@ fn resolve_dependencies(
             if candidates.len() == 1 {
                 Some(candidates[0].0)
             } else {
-                // Multiple candidates — match by version requirement
+                // semver::VersionReq won't match a pre-release unless the
+                // req names one, but cargo can lock one for a plain req via
+                // [patch]/--precise/git. Fall back to the stripped version
+                // (like find_lock_dep_by_name_and_req) so the edge isn't
+                // silently dropped.
                 candidates.iter().find_map(|(pkg_id, _)| {
                     let candidate_pkg = pkgs_by_id.get(pkg_id)?;
-                    if dep.req.matches(&candidate_pkg.version) {
+                    let v = &candidate_pkg.version;
+                    let stripped = semver::Version::new(v.major, v.minor, v.patch);
+                    if dep.req.matches(v) || dep.req.matches(&stripped) {
                         Some(*pkg_id)
                     } else {
                         None
