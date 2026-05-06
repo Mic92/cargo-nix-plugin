@@ -69,11 +69,22 @@ static void prim_resolveCargoWorkspace(EvalState &state, const PosIdx pos,
     NixStringContext context;
     auto inputJson = printValueAsJSON(state, true, *args[0], pos, context, false);
 
-    // If manifestPath is a store path and we're using a chroot store,
-    // remap it to the real filesystem path before passing to Rust.
-    if (inputJson.contains("manifestPath") && inputJson["manifestPath"].is_string()) {
-        auto manifest = inputJson["manifestPath"].get<std::string>();
-        inputJson["manifestPath"] = remapStorePath(*state.store, manifest);
+    // The Rust side opens these paths with std::fs. Under a chroot store
+    // (`--store local?root=/tmp/foo`) the logical /nix/store/... paths
+    // don't exist on disk — remap them to the real filesystem location.
+    auto remapField = [&](nlohmann::json &v) {
+        if (v.is_string())
+            v = remapStorePath(*state.store, v.get<std::string>());
+    };
+    if (inputJson.contains("manifestPath"))
+        remapField(inputJson["manifestPath"]);
+    // cargoHome can be a store path (e.g. a pre-warmed registry index drv).
+    if (inputJson.contains("cargoHome"))
+        remapField(inputJson["cargoHome"]);
+    // gitSources values are builtins.fetchGit checkouts — always store paths.
+    if (inputJson.contains("gitSources") && inputJson["gitSources"].is_object()) {
+        for (auto &[_, checkout] : inputJson["gitSources"].items())
+            remapField(checkout);
     }
 
     auto inputStr = inputJson.dump();
