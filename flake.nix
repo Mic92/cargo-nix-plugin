@@ -33,19 +33,26 @@
 
       # Nix versions to build the plugin against and test with.
       # Each entry maps a suffix to { components, binary } attribute paths
-      # under pkgs.nixVersions.
+      # under pkgs.nixVersions. Track what the locked nixpkgs still ships;
+      # nixpkgs aggressively removes EOL nix releases.
       nixVersions = {
-        "2_32" = {
-          components = "nixComponents_2_32";
-          binary = "nix_2_32";
+        "2_30" = {
+          components = "nixComponents_2_30";
+          binary = "nix_2_30";
         };
-        "2_33" = {
-          components = "nixComponents_2_33";
-          binary = "nix_2_33";
+        "2_31" = {
+          components = "nixComponents_2_31";
+          binary = "nix_2_31";
         };
         "2_34" = {
           components = "nixComponents_2_34";
           binary = "nix_2_34";
+        };
+        # Pre-release: catches plugin ABI breaks before the next stable
+        # nix release lands. Expected to break occasionally on nixpkgs bumps.
+        "git" = {
+          components = "nixComponents_git";
+          binary = "git";
         };
       };
 
@@ -128,7 +135,7 @@
         };
 
       # Build packages/tests for every nix version, suffixed with the version.
-      # e.g. eval-test-nix_2_32, torture-test-nix_2_33, etc.
+      # e.g. eval-test-nix_2_34, torture-test-nix_2_34, etc.
       perVersionPackages = pkgs: builtins.foldl' (
         acc: ver:
         let
@@ -154,7 +161,7 @@
 
       # The default nix version used for the top-level plugin package.
       # Keep README.md (## Example, ## Compatibility) in sync when bumping.
-      defaultNixComponents = "nixComponents_2_32";
+      defaultNixComponents = "nixComponents_2_34";
     in
     {
       packages = forAllSystems (
