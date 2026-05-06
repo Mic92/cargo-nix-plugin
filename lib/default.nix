@@ -160,8 +160,9 @@ let
         "x86_64"
       else if platform.isAarch64 then
         "aarch64"
+      # rustc uses "x86" for all 32-bit x86 targets (i586/i686/...).
       else if platform.isi686 then
-        "i686"
+        "x86"
       else if platform.isAarch32 then
         "arm"
       else if platform.isRiscV64 then
