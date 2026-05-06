@@ -163,6 +163,11 @@ pub fn resolve_from_lockfile(
                 })
                 .transpose()?;
 
+            // Set when we parsed a Cargo.toml at eval time (git/path deps).
+            // Registry crates stay None — buildRustCrate auto-detects those
+            // fields at build time, but procMacro is needed at eval time for
+            // lib/default.nix's cross-compile routing.
+            let mut manifest_member: Option<WorkspaceMember> = None;
             let (dependencies, build_dependencies, features_btree, links) =
                 if let Some(ref version) = index_version {
                     let (deps, build_deps) = resolve_index_deps(
@@ -218,6 +223,7 @@ pub fn resolve_from_lockfile(
                         rev: rev.clone(),
                         sub_path,
                     });
+                    manifest_member = Some(member.clone());
                     (
                         deps,
                         build_deps,
@@ -267,6 +273,7 @@ pub fn resolve_from_lockfile(
                     source_info = Some(SourceInfo::Local {
                         path: member.manifest_dir.clone(),
                     });
+                    manifest_member = Some(member.clone());
                     (
                         deps,
                         build_deps,
@@ -277,13 +284,9 @@ pub fn resolve_from_lockfile(
                     (Vec::new(), Vec::new(), BTreeMap::new(), None)
                 };
 
-            // For path deps we parsed the manifest ourselves — don't leave
-            // edition/proc_macro/lib_path for build-time auto-detect.
-            let path_member = pkg
-                .source
-                .is_none()
-                .then(|| workspace.path_deps.get(&pkg.name))
-                .flatten();
+            // For git and path deps we parsed the manifest ourselves — don't
+            // leave edition/proc_macro/lib_path for build-time auto-detect.
+            let path_member = manifest_member.as_ref();
 
             crates.insert(
                 sid,
@@ -847,9 +850,19 @@ a = []
 "#,
         )
         .unwrap();
+        // bar is a proc-macro with a build script and non-default edition,
+        // exercising eval-time manifest field forwarding (asserted below).
         std::fs::write(
             checkout.join("crates/bar/Cargo.toml"),
-            "[package]\nname = \"bar\"\nversion = \"0.1.0\"\n",
+            r#"
+[package]
+name = "bar"
+version = "0.1.0"
+edition = "2018"
+build = "build.rs"
+[lib]
+proc-macro = true
+"#,
         )
         .unwrap();
 
@@ -941,6 +954,19 @@ source = "git+https://example.com/repo?branch=main#abc123"
             }
             other => panic!("expected Git source, got {other:?}"),
         }
+        // Manifest fields parsed from the git checkout must reach CrateInfo:
+        // procMacro especially is consumed at eval time by lib/default.nix to
+        // route proc-macro deps to the build platform under cross-compile.
+        assert!(
+            bar.proc_macro,
+            "bar's [lib] proc-macro=true must be forwarded"
+        );
+        assert_eq!(bar.edition, "2018", "bar's edition must be forwarded");
+        assert_eq!(
+            bar.build.as_deref(),
+            Some("build.rs"),
+            "bar's build script must be forwarded"
+        );
 
         // Feature resolution propagated through the git crate: consumer
         // pulls foo's default → "a".
