@@ -74,11 +74,18 @@ pub fn resolve_from_lockfile(
     let source_to_index_url =
         |source: Option<&str>| registry::source_to_index_url(source, crates_io_index);
 
+    // Workspace members never carry a `source` in Cargo.lock; registry/git
+    // crates always do. Cargo.lock can hold both a member and an external
+    // crate with the same name at different versions, so name alone is not
+    // enough.
+    let is_workspace_member =
+        |pkg: &LockPackage| pkg.source.is_none() && workspace_member_names.contains(&pkg.name);
+
     // Prefetch every (registry, name) the lockfile mentions before the
     // serial loop — cold-cache eval goes from O(n·RTT) to ~O(n/workers·RTT).
     let prefetch_jobs: Vec<registry::PrefetchJob> = lock_packages
         .iter()
-        .filter(|p| !workspace_member_names.contains(&p.name))
+        .filter(|p| !is_workspace_member(p))
         .filter_map(|p| {
             Some(registry::PrefetchJob {
                 url: source_to_index_url(p.source.as_deref())?,
@@ -98,9 +105,8 @@ pub fn resolve_from_lockfile(
 
     for pkg in &lock_packages {
         let sid = short_id.get(&pkg.name, &pkg.version);
-        let is_workspace_member = workspace_member_names.contains(&pkg.name);
 
-        if is_workspace_member {
+        if is_workspace_member(pkg) {
             // Use the workspace member info from parsed Cargo.toml
             let member = workspace
                 .members
