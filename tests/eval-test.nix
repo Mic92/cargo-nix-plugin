@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Plugin assertions against the torture fixtures. CI: nix/eval-test.nix.
 # Manual: nix eval --raw --option plugin-files … --expr 'import ./tests/eval-test.nix {}'
 {
@@ -37,7 +40,8 @@ let
 
   # Find external crates that have non-empty devDependencies
   externalWithDevDeps = builtins.filter (
-    id: !(builtins.elem id memberIds) && builtins.length (result.crates.${id}.devDependencies or [ ]) > 0
+    id:
+    !(builtins.elem id memberIds) && builtins.length (result.crates.${id}.devDependencies or [ ]) > 0
   ) (builtins.attrNames result.crates);
 
   assertions = [

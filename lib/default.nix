@@ -1,3 +1,17 @@
+# Copyright 2026 Anthropic, PBC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Nix wrapper that connects the cargo-nix-plugin output to buildRustCrate.
 #
 # Usage (lockfile resolve):
@@ -49,7 +63,7 @@
   # equivalent to `RUSTFLAGS="--cfg foo"` at cargo-metadata time. Pair with
   # passing the same `--cfg` via rustc opts so `#[cfg(foo)]` in source
   # compiles too — `extraCfgs` only affects resolution.
-  extraCfgs ? [],
+  extraCfgs ? [ ],
   # Optional: function from workspace-relative path (string) to src for
   # local crates. Default passes the full workspace `src` with
   # `workspace_member` pointing at the member subdir, so the builder can
@@ -58,7 +72,10 @@
   # workspace) — return either a path (legacy: builder sees only that dir,
   # so `*.workspace = true` for CARGO_PKG_* falls back to empty) or
   # `{ src, workspace_member }` to keep ws-inherit working.
-  localSrc ? relPath: { inherit src; workspace_member = if relPath == "" then "." else relPath; },
+  localSrc ? relPath: {
+    inherit src;
+    workspace_member = if relPath == "" then "." else relPath;
+  },
   # Optional: alternative registry configuration. Maps the index URL
   # (as cargo metadata / Cargo.lock reports it, including the `sparse+`
   # or `registry+` scheme prefix) to { dl, fetchurl? }.
@@ -146,8 +163,9 @@ let
         "x86_64"
       else if platform.isAarch64 then
         "aarch64"
+      # rustc uses "x86" for all 32-bit x86 targets (i586/i686/...).
       else if platform.isi686 then
-        "i686"
+        "x86"
       else if platform.isAarch32 then
         "arm"
       else if platform.isRiscV64 then
@@ -166,6 +184,13 @@ let
         "gnu"
       else if platform.isLinux && platform.isMusl then
         "musl"
+      else
+        "";
+    # rustc `target_abi`, drives `cfg(target_abi = …)` dep selection.
+    # Only the eabi family is mapped — empty for everything else.
+    abi =
+      if platform.parsed.abi.eabi or false then
+        (if platform.parsed.abi.float or null == "hard" then "eabihf" else "eabi")
       else
         "";
     family =
@@ -187,8 +212,9 @@ let
     windows = platform.isWindows;
   };
 
-  resolvedTarget =
-    (if target != null then target else defaultTarget) // { extra_cfgs = extraCfgs; };
+  resolvedTarget = (if target != null then target else defaultTarget) // {
+    extra_cfgs = extraCfgs;
+  };
 
   # --- git source prefetch ---
   # The resolver needs to read each git crate's Cargo.toml to learn its
@@ -211,9 +237,7 @@ let
   # pins a `#rev` for git deps; error out clearly if one is missing.
   gitSourceLines = lib.unique (
     builtins.filter (s: s != null) (
-      map (builtins.match ''source = "git\+([^"]+)"'') (
-        lib.splitString "\n" lockfileText
-      )
+      map (builtins.match ''source = "git\+([^"]+)"'') (lib.splitString "\n" lockfileText)
     )
   );
   autoGitSources = lib.listToAttrs (
@@ -303,15 +327,22 @@ let
     in
     if sourceType == "local" then
       # Accept legacy `localSrc` overrides that return a bare path/derivation.
-      if lib.isAttrs ls && !lib.isDerivation ls && ls ? src
-      then ls
-      else { src = ls; workspace_member = "."; }
+      if lib.isAttrs ls && !lib.isDerivation ls && ls ? src then
+        ls
+      else
+        {
+          src = ls;
+          workspace_member = ".";
+        }
     else if sourceType == "crates-io" then
-      { workspace_member = null; src = pkgs.fetchurl {
-        name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
-        url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
-        sha256 = crateInfo.sha256;
-      }; }
+      {
+        workspace_member = null;
+        src = pkgs.fetchurl {
+          name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
+          url = "https://static.crates.io/crates/${crateInfo.crateName}/${crateInfo.crateName}-${crateInfo.version}.crate";
+          sha256 = crateInfo.sha256;
+        };
+      }
     else if sourceType == "registry" then
       let
         index = crateInfo.source.index;
@@ -323,24 +354,31 @@ let
           '');
         fetch = reg.fetchurl or pkgs.fetchurl;
       in
-      { workspace_member = null; src = fetch {
-        name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
-        url = "${reg.dl}/${crateInfo.crateName}/${crateInfo.version}/download";
-        sha256 = crateInfo.sha256;
-      }; }
+      {
+        workspace_member = null;
+        src = fetch {
+          name = "${crateInfo.crateName}-${crateInfo.version}.tar.gz";
+          url = "${reg.dl}/${crateInfo.crateName}/${crateInfo.version}/download";
+          sha256 = crateInfo.sha256;
+        };
+      }
     else if sourceType == "git" then
       {
         # Reuse the prefetched checkout (same fetchGit args → same store path).
-        src = gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
-          url = crateInfo.source.url;
-          rev = crateInfo.source.rev;
-          allRefs = true;
-          submodules = true;
-        });
+        src =
+          gitSources'."${crateInfo.source.url}#${crateInfo.source.rev}" or (builtins.fetchGit {
+            url = crateInfo.source.url;
+            rev = crateInfo.source.rev;
+            allRefs = true;
+            submodules = true;
+          });
         workspace_member = crateInfo.source.subPath or null;
       }
     else
-      { inherit src; workspace_member = null; };
+      {
+        inherit src;
+        workspace_member = null;
+      };
 
   # Build a crate using buildRustCrate
   # Memoization via the `self` pattern (builtByPackageId)
@@ -440,7 +478,12 @@ let
         sha256 = crateInfo.sha256 or "";
         inherit (crateSrc) src;
         authors = crateInfo.authors or [ ];
-        inherit dependencies devDependencies buildDependencies crateRenames;
+        inherit
+          dependencies
+          devDependencies
+          buildDependencies
+          crateRenames
+          ;
         features = crateInfo.resolvedDefaultFeatures or [ ];
         procMacro = crateInfo.procMacro or false;
       }
@@ -535,7 +578,8 @@ let
       # Clippy buildRustCrate: use clippy-driver as the compiler. The default
       # cap-lints=allow neutralises every lint (including -D warnings from
       # clippyArgs); workspace members get the cargo behaviour of no cap.
-      clippyBuildRustCrate = args:
+      clippyBuildRustCrate =
+        args:
         (normalBuildRustCrate args).override {
           rust = clippyRustcWrapper;
           capLints = "warn";
@@ -595,15 +639,15 @@ in
             passthru = { inherit testsDrv; };
           }
           ''
-          export CARGO_TARGET_TMPDIR="$(mktemp -d)"
-          export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
-          shopt -s nullglob
-          for t in ${testsDrv}/tests/*; do
-            echo "── running $(basename "$t")"
-            "$t"
-          done
-          touch $out
-        '';
+            export CARGO_TARGET_TMPDIR="$(mktemp -d)"
+            export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
+            shopt -s nullglob
+            for t in ${testsDrv}/tests/*; do
+              echo "── running $(basename "$t")"
+              "$t"
+            done
+            touch $out
+          '';
     }
   ) resolved.workspaceMembers;
 

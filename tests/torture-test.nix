@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # End-to-end test: evaluate the wrapper against the torture workspace.
 # This runs as a Nix derivation that calls nix-instantiate with the plugin loaded.
 {

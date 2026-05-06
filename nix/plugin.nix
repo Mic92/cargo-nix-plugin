@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 {
   lib,
   stdenv,
@@ -46,7 +49,8 @@ stdenv.mkDerivation {
 
   cmakeFlags = [
     "-DRUST_LIB_DIR=${rustLib}/lib"
-  ] ++ lib.optionals enableSanitizers [
+  ]
+  ++ lib.optionals enableSanitizers [
     "-DENABLE_SANITIZERS=ON"
     # compiler-rt names the archive after the clang arch token
     # (x86_64, aarch64, …), which matches `parsed.cpu.name`.

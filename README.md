@@ -27,7 +27,7 @@ Or use the flake output:
 
 ```nix
 {
-  inputs.cargo-nix-plugin.url = "github:your-org/cargo-nix-plugin";
+  inputs.cargo-nix-plugin.url = "github:anthropics/cargo-nix-plugin";
 }
 ```
 
@@ -169,7 +169,7 @@ The plugin must be loaded by the same Nix version it was compiled against
 
 ```bash
 PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
-NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+NIX=$(nix build nixpkgs#nixVersions.nix_2_34 --print-out-paths | grep -v man)
 
 $NIX/bin/nix-instantiate --eval \
   --option plugin-files "$PLUGIN/lib/nix/plugins" \
@@ -189,7 +189,7 @@ plugin-files = /path/to/cargo-nix-plugin/lib/nix/plugins
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    cargo-nix-plugin.url = "github:your-org/cargo-nix-plugin";
+    cargo-nix-plugin.url = "github:anthropics/cargo-nix-plugin";
   };
 
   outputs = { self, nixpkgs, cargo-nix-plugin }:
@@ -326,17 +326,23 @@ compiles too — `extraCfgs` only affects dependency resolution.
 
 - **Nix**: The plugin must be loaded by the **same Nix version** it was compiled
   against — the Nix plugin ABI is not stable across versions. If you see errors
-  like `expected a set but found a set`, you have a version mismatch. The flake
-  currently builds against Nix 2.33, so use Nix 2.33.x to evaluate:
+  like `expected a set but found a set`, you have a version mismatch.
+  `.#cargo-nix-plugin` (the default) is built against Nix 2.34, so use Nix
+  2.34.x to evaluate:
 
   ```bash
   # Get the matching nix
-  NIX=$(nix build nixpkgs#nixVersions.nix_2_33 --print-out-paths | grep -v man)
+  NIX=$(nix build nixpkgs#nixVersions.nix_2_34 --print-out-paths | grep -v man)
   PLUGIN=$(nix build .#cargo-nix-plugin --print-out-paths)
 
   $NIX/bin/nix build .#myPackage \
     --option plugin-files "$PLUGIN/lib/nix/plugins"
   ```
+
+  For other Nix versions, build the matching per-version attribute, e.g.
+  `.#cargo-nix-plugin-nix_2_31` to pair with `nixVersions.nix_2_31`. The
+  flake's `nixVersions` set (in `flake.nix`) lists what's currently built;
+  Nix >= 2.30 is required.
 
 - **Platforms**: `x86_64-linux`, `aarch64-linux`, and `aarch64-darwin`.
   Cross-compilation to other target platforms is supported.
@@ -358,6 +364,13 @@ compiles too — `extraCfgs` only affects dependency resolution.
 - **buildRustCrate**: Compatible with nixpkgs `buildRustCrate` and
   `defaultCrateOverrides`
 
+## Status
+
+Maintained by Anthropic. Provided AS IS without warranty (see LICENSE).
+We triage issues and review pull requests but do not commit to fixing every
+bug or accepting every feature request. For security issues, see
+`SECURITY.md`.
+
 ## License
 
-MIT
+Apache License 2.0. See [LICENSE](LICENSE).

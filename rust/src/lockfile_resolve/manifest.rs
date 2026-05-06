@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cargo.toml reading: workspace, member, and git-checkout manifests.
 //!
 //! Everything that turns on-disk TOML into [`WorkspaceMember`] /
@@ -77,13 +80,23 @@ fn read_toml(path: &Path) -> Result<toml::Value, String> {
 /// Parse `[workspace.dependencies]` and `[workspace.package]`.
 fn parse_workspace_tables(
     workspace_table: Option<&toml::Value>,
+    workspace_root: &Path,
 ) -> (HashMap<String, ManifestDep>, WorkspacePackage) {
-    let workspace_deps = workspace_table
+    let workspace_deps: HashMap<String, ManifestDep> = workspace_table
         .and_then(|w| w.get("dependencies"))
         .map(|d| {
             parse_manifest_deps(Some(d), &HashMap::new())
                 .into_iter()
-                .map(|dep| (dep.name.clone(), dep))
+                .map(|mut dep| {
+                    // [workspace.dependencies] paths are workspace-root relative;
+                    // member [dependencies] paths are member-dir relative. Anchor
+                    // these now so the path_deps walk can `referrer_dir.join(p)`
+                    // either kind (Path::join ignores the LHS for an absolute RHS).
+                    if let Some(p) = &dep.path {
+                        dep.path = Some(workspace_root.join(p).to_string_lossy().into_owned());
+                    }
+                    (dep.name.clone(), dep)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -112,7 +125,7 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
 
     // [workspace.dependencies] / [workspace.package] — inheritance sources
     // for `foo = { workspace = true }` and `edition.workspace = true`.
-    let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
+    let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table, workspace_root);
 
     // Check if root is a package
     if let Some(pkg) = root_toml.get("package") {
@@ -126,12 +139,27 @@ pub(super) fn parse_workspace(workspace_root: &Path) -> Result<WorkspaceManifest
     let member_globs = workspace_table
         .and_then(|w| w.get("members"))
         .and_then(|m| m.as_array());
+    // Cargo subtracts `[workspace].exclude` after expanding member globs.
+    // Match cargo's `WorkspaceRootConfig::is_excluded`: a prefix check
+    // against the literal exclude paths, no glob expansion.
+    let exclude_dirs: Vec<PathBuf> = workspace_table
+        .and_then(|w| w.get("exclude"))
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str())
+        .map(|p| workspace_root.join(p))
+        .collect();
+    let is_excluded = |dir: &Path| exclude_dirs.iter().any(|ex| dir.starts_with(ex));
     for glob_str in member_globs
         .into_iter()
         .flatten()
         .filter_map(|v| v.as_str())
     {
         for member_dir in expand_glob(workspace_root, glob_str) {
+            if is_excluded(&member_dir) {
+                continue;
+            }
             let member_manifest = member_dir.join("Cargo.toml");
             if !member_manifest.exists() {
                 continue;
@@ -264,10 +292,16 @@ fn parse_member_manifest(
 
     // Parse lib target
     let lib = toml.get("lib");
+    let lib_crate_types =
+        toml_str_array(lib.and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type"))));
+    // Cargo's TomlTarget::proc_macro() falls back through `proc-macro`,
+    // the deprecated `proc_macro` underscore alias, then a "proc-macro"
+    // entry in crate-type. Match that — a proc-macro built as a regular
+    // lib silently fails to compile.
     let proc_macro = lib
-        .and_then(|l| l.get("proc-macro"))
+        .and_then(|l| l.get("proc-macro").or_else(|| l.get("proc_macro")))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or_else(|| lib_crate_types.iter().any(|t| t == "proc-macro"));
     let lib_path = lib
         .and_then(|l| l.get("path"))
         .and_then(|v| v.as_str())
@@ -276,8 +310,6 @@ fn parse_member_manifest(
         .and_then(|l| l.get("name"))
         .and_then(|v| v.as_str())
         .map(|n| n.replace('-', "_"));
-    let lib_crate_types =
-        toml_str_array(lib.and_then(|l| l.get("crate-type").or_else(|| l.get("crate_type"))));
 
     // Parse bin targets
     let bin_targets: Vec<BinTarget> = toml
@@ -416,13 +448,10 @@ fn parse_manifest_deps(
                             default_features,
                             features,
                             target: None,
-                            // [workspace.dependencies] paths are relative to
-                            // the workspace root, but we resolve path deps
-                            // relative to the *member* dir. Members that
-                            // inherit a path dep are normally also workspace
-                            // members themselves, so leave this unset rather
-                            // than carry a wrongly-based path.
-                            path: None,
+                            // Already anchored to the workspace root, so the
+                            // path_deps walk finds vendored crates that aren't
+                            // also [workspace].members.
+                            path: ws.path.clone(),
                         };
                     }
                     // workspace = true but no entry — cargo errors. We
@@ -481,7 +510,7 @@ impl GitCheckout {
         let root_toml = read_toml(&root.join("Cargo.toml"))
             .map_err(|e| format!("git checkout {}: {e}", root.display()))?;
         let workspace_table = root_toml.get("workspace");
-        let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table);
+        let (workspace_deps, ws_pkg) = parse_workspace_tables(workspace_table, root);
 
         let mut members = HashMap::new();
         let mut push = |toml: &toml::Value, dir: &Path| -> Result<(), String> {
@@ -546,29 +575,82 @@ fn normalize_path(p: &Path) -> PathBuf {
     out
 }
 
-/// Simple glob expansion for workspace member paths.
-/// Supports trailing `/*` patterns.
+/// Expand a `[workspace].members` glob into directories that contain a
+/// `Cargo.toml`.
+///
+/// Cargo accepts arbitrary `glob`-crate patterns; this matches what real
+/// workspaces use — `crates/*`, partial-segment wildcards (`serde_*`),
+/// and recursive `crates/**`. `?`/`[..]` are treated as literals: rare,
+/// and the `Cargo.toml` filter makes a false negative harmless. `/` and
+/// `\` both separate components so Windows-style patterns parse.
 fn expand_glob(base: &Path, pattern: &str) -> Vec<PathBuf> {
-    if let Some(prefix) = pattern
-        .strip_suffix("/*")
-        .or_else(|| pattern.strip_suffix("\\*"))
-    {
-        std::fs::read_dir(base.join(prefix))
+    fn matches(pat: &str, name: &str) -> bool {
+        if !pat.contains('*') {
+            return pat == name;
+        }
+        // Linear-scan wildcard match: first part is a prefix, last a
+        // suffix, the rest must appear in order.
+        let parts: Vec<&str> = pat.split('*').collect();
+        let (first, rest) = parts.split_first().unwrap();
+        let (last, mids) = rest.split_last().unwrap();
+        let Some(mut s) = name.strip_prefix(first) else {
+            return false;
+        };
+        for m in mids {
+            match s.find(m) {
+                Some(i) => s = &s[i + m.len()..],
+                None => return false,
+            }
+        }
+        s.ends_with(last)
+    }
+
+    fn subdirs(dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
+        std::fs::read_dir(dir)
             .into_iter()
             .flatten()
             .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .map(|e| e.path())
-            .filter(|p| p.join("Cargo.toml").exists())
-            .collect()
-    } else {
-        // Literal path, or a complex glob we don't support yet — try as-is.
-        let path = base.join(pattern);
-        if path.join("Cargo.toml").exists() {
-            vec![path]
-        } else {
-            Vec::new()
+    }
+
+    fn walk(dir: &Path, segs: &[&str], out: &mut Vec<PathBuf>) {
+        match segs {
+            [] => {
+                if dir.join("Cargo.toml").exists() {
+                    out.push(dir.to_path_buf());
+                }
+            }
+            ["**", rest @ ..] => {
+                walk(dir, rest, out); // `**` matches zero segments
+                for sub in subdirs(dir) {
+                    walk(&sub, segs, out); // keep `**` consuming
+                }
+            }
+            [seg, rest @ ..] if seg.contains('*') => {
+                for sub in subdirs(dir) {
+                    if sub
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| matches(seg, n))
+                    {
+                        walk(&sub, rest, out);
+                    }
+                }
+            }
+            [seg, rest @ ..] => walk(&dir.join(seg), rest, out),
         }
     }
+
+    let segs: Vec<&str> = pattern
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    walk(base, &segs, &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -587,6 +669,143 @@ mod tests {
         assert_eq!(result[0], member);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An excluded crate matching `crates/*` must not become a member —
+    /// its Cargo.toml may not even parse (vendored fixtures, generated
+    /// code), and a name collision with a registry dep would misclassify
+    /// the registry dep.
+    #[test]
+    fn parse_workspace_honours_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str, name: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
+            )
+            .unwrap();
+        };
+        mk("crates/a", "a");
+        mk("crates/b", "b");
+        mk("crates/excluded", "excluded");
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+            [workspace]
+            members = ["crates/*"]
+            exclude = ["crates/excluded"]
+            "#,
+        )
+        .unwrap();
+        let ws = parse_workspace(tmp.path()).unwrap();
+        let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"a"), "members = {names:?}");
+        assert!(names.contains(&"b"), "members = {names:?}");
+        assert!(
+            !names.contains(&"excluded"),
+            "[workspace].exclude must drop crates/excluded; members = {names:?}"
+        );
+    }
+
+    /// A `[workspace.dependencies]` path dep referenced only via
+    /// `workspace = true` must still be discovered by the path_deps walk
+    /// even if it isn't also a `[workspace].members` entry.
+    #[test]
+    fn parse_workspace_inherits_path_dep_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+            [workspace]
+            members = ["app"]
+            [workspace.dependencies]
+            vendored = { path = "vendor/vendored" }
+            "#,
+        )
+        .unwrap();
+        let mk = |rel: &str, body: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), body).unwrap();
+        };
+        // Member inherits via workspace = true; no direct path edge.
+        mk(
+            "app",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nvendored = { workspace = true }\n",
+        );
+        // Vendored crate is NOT in [workspace].members.
+        mk(
+            "vendor/vendored",
+            "[package]\nname = \"vendored\"\nversion = \"0.1.0\"\n",
+        );
+        let ws = parse_workspace(tmp.path()).unwrap();
+        assert!(
+            ws.path_deps.contains_key("vendored"),
+            "inherited path dep must be discoverable; path_deps = {:?}",
+            ws.path_deps.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Patterns past `prefix/*` (`serde_*`, `tokio-*`, `crates/**`) must
+    /// not silently produce an empty member set.
+    #[test]
+    fn expand_glob_partial_and_recursive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mk = |rel: &str| {
+            let dir = tmp.path().join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+            dir
+        };
+        let foo_a = mk("crates/foo-a");
+        let foo_b = mk("crates/foo-b");
+        let _bar = mk("crates/bar"); // must NOT match `foo-*`
+        let mut got = expand_glob(tmp.path(), "crates/foo-*");
+        got.sort();
+        assert_eq!(got, vec![foo_a.clone(), foo_b.clone()]);
+
+        let nested = mk("crates/nested/deep");
+        let mut got = expand_glob(tmp.path(), "crates/**");
+        got.sort();
+        assert!(
+            got.contains(&foo_a) && got.contains(&foo_b) && got.contains(&nested),
+            "crates/** must recurse, got {got:?}"
+        );
+    }
+
+    /// Cargo's `TomlTarget::proc_macro()` checks three spellings — a
+    /// member using any of them must not become a regular lib.
+    #[test]
+    fn parse_member_proc_macro_aliases() {
+        let probe = |toml_str: &str| {
+            let toml: toml::Value = toml::from_str(toml_str).unwrap();
+            let pkg = toml.get("package").unwrap();
+            parse_member_manifest(
+                &toml,
+                pkg,
+                Path::new("/nonexistent"),
+                &HashMap::new(),
+                &WorkspacePackage::default(),
+            )
+            .unwrap()
+            .proc_macro
+        };
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\nproc-macro = true\n"
+        ));
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\nproc_macro = true\n"
+        ));
+        assert!(probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\ncrate-type = [\"proc-macro\"]\n"
+        ));
+        assert!(!probe(
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[lib]\ncrate-type = [\"cdylib\"]\n"
+        ));
+        assert!(!probe("[package]\nname = \"a\"\nversion = \"0.1.0\"\n"));
     }
 
     #[test]

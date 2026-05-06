@@ -3,6 +3,7 @@ name = "build-rust-crate"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/anthropics/cargo-nix-plugin"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

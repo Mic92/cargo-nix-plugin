@@ -3,6 +3,7 @@ name = "cargo-nix-plugin-core"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/anthropics/cargo-nix-plugin"
 
 [lib]
 crate-type = ["staticlib", "rlib"]

@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # End-to-end: a workspace depending on a multi-crate git repo.
 #
 # Exercises the gitSources path added for `git+` lockfile entries: the

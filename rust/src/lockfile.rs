@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Parse Cargo.lock for sha256 checksums and convert hex to SRI format.
 
 use base64::{engine::general_purpose::STANDARD, Engine};

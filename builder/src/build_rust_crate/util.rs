@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 use std::io::IsTerminal;
 use std::process::Command;
 use std::sync::OnceLock;

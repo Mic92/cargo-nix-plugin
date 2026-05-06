@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Verify the crates.io index URL override mechanisms (#20).
 #
 # Unlike remote-sparse-test.nix, the workspace's Cargo.lock is left

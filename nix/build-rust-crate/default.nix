@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Code for buildRustCrate, a Nix function that builds Rust code, just
 # like Cargo, but using Nix instead.
 #
@@ -184,17 +187,26 @@ lib.makeOverridable
               # null when no rename applies to *this* version of the dep —
               # the un-renamed sibling must keep isRename=false so the
               # builder recovers `--extern` from the artifact filename.
-              findRename = dep:
-                let choices = crateRenames.${dep.crateName} or null;
+              findRename =
+                dep:
+                let
+                  choices = crateRenames.${dep.crateName} or null;
                 in
-                if choices == null then null
+                if choices == null then
+                  null
                 else if builtins.isList choices then
-                  let m = lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) null choices;
-                  in if m == null then null else normalizeName m.rename
-                else normalizeName choices;
-              mkExtern = dep:
-                let r = findRename dep;
-                in {
+                  let
+                    m = lib.findFirst (c: (!(c ? version) || c.version == dep.version or "")) null choices;
+                  in
+                  if m == null then null else normalizeName m.rename
+                else
+                  normalizeName choices;
+              mkExtern =
+                dep:
+                let
+                  r = findRename dep;
+                in
+                {
                   externName = if r != null then r else normalizeName dep.libName;
                   isRename = r != null;
                   stdlib = dep.stdlib or false;
@@ -226,7 +238,9 @@ lib.makeOverridable
           );
 
         crateFeaturesRaw = lib.optionals (crate ? features) (crate.features ++ features);
-        crateFeatures = builtins.filter (f: !(lib.hasInfix "/" f || lib.hasPrefix "dep:" f)) crateFeaturesRaw;
+        crateFeatures = builtins.filter (
+          f: !(lib.hasInfix "/" f || lib.hasPrefix "dep:" f)
+        ) crateFeaturesRaw;
 
         libName = if crate ? libName then crate.libName else crate.crateName;
         libPath = lib.optionalString (crate ? libPath) crate.libPath;
@@ -252,7 +266,9 @@ lib.makeOverridable
           lib.substring 0 10 hashedMetadata;
 
         build = crate.build or "";
-        workspace_member = crate.workspace_member or ".";
+        # lib/default.nix omits this for git deps with no known sub-path; null
+        # keeps it unset so the builder auto-scans for the matching Cargo.toml.
+        workspace_member = crate.workspace_member or null;
         # Strip the crate2nix "empty [[bin]]" sentinel so the builder doesn't
         # try to compile a binary named `,`.
         crateBin = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
@@ -281,12 +297,21 @@ lib.makeOverridable
         extraRustcOpts =
           lib.optionals (crate ? extraRustcOpts) crate.extraRustcOpts
           ++ extraRustcOpts_
-          ++ lib.optionals (edition != null) [ "--edition" edition ]
-          ++ lib.optionals (defaultMold != null) [ "-C" "link-arg=-fuse-ld=mold" ];
+          ++ lib.optionals (edition != null) [
+            "--edition"
+            edition
+          ]
+          ++ lib.optionals (defaultMold != null) [
+            "-C"
+            "link-arg=-fuse-ld=mold"
+          ];
         extraRustcOptsForBuildRs =
           lib.optionals (crate ? extraRustcOptsForBuildRs) crate.extraRustcOptsForBuildRs
           ++ extraRustcOptsForBuildRs_
-          ++ lib.optionals (edition != null) [ "--edition" edition ];
+          ++ lib.optionals (edition != null) [
+            "--edition"
+            edition
+          ];
         capLints = capLints_;
 
         # CARGO_CFG_TARGET_* are derived at build time from `rustc --print cfg`,

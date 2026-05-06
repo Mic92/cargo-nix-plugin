@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Full workspace resolution: tie together parsing, cfg eval, dep filtering, and feature resolution.
 
 use cargo_metadata::camino;
@@ -434,8 +437,11 @@ fn activated_optional_deps(
             // Don't continue — still need to follow feature rules below
         }
 
-        // A feature with the same name as an optional dep (effective name) implicitly activates it
-        if optional_dep_effective_names.contains(&feat) {
+        // cargo-metadata always materialises the implicit `feat = ["dep:feat"]`
+        // in `pkg.features`, so the `dep:` rule above already activates it.
+        // An explicit `[features]` key with the same name suppresses that
+        // implicit feature and must not over-activate the dep here.
+        if optional_dep_effective_names.contains(&feat) && !feature_map.contains_key(&feat) {
             activated.insert(feat.clone());
         }
 
@@ -501,10 +507,16 @@ fn resolve_dependencies(
             if candidates.len() == 1 {
                 Some(candidates[0].0)
             } else {
-                // Multiple candidates — match by version requirement
+                // semver::VersionReq won't match a pre-release unless the
+                // req names one, but cargo can lock one for a plain req via
+                // [patch]/--precise/git. Fall back to the stripped version
+                // (like find_lock_dep_by_name_and_req) so the edge isn't
+                // silently dropped.
                 candidates.iter().find_map(|(pkg_id, _)| {
                     let candidate_pkg = pkgs_by_id.get(pkg_id)?;
-                    if dep.req.matches(&candidate_pkg.version) {
+                    let v = &candidate_pkg.version;
+                    let stripped = semver::Version::new(v.major, v.minor, v.patch);
+                    if dep.req.matches(v) || dep.req.matches(&stripped) {
                         Some(*pkg_id)
                     } else {
                         None
@@ -569,6 +581,7 @@ mod tests {
             arch: "x86_64".to_string(),
             vendor: "unknown".to_string(),
             env: "gnu".to_string(),
+            abi: "".to_string(),
             family: vec!["unix".to_string()],
             pointer_width: "64".to_string(),
             endian: "little".to_string(),
@@ -910,6 +923,23 @@ mod tests {
         assert!(
             result.contains(&"serde".to_string()),
             "non-optional serde should always be included"
+        );
+    }
+
+    /// Enabling a feature that shadows an optional dep must not pull in
+    /// the dep — cargo suppresses the implicit `foo = ["dep:foo"]` when
+    /// `foo` is an explicit `[features]` key.
+    #[test]
+    fn explicit_feature_shadows_implicit_optional_dep() {
+        let pkg = make_package(
+            &[("foo", None, true)],
+            // `turbo = ["foo/feat"]` keeps the dep mentionable for cargo.
+            &[("foo", &["bar"]), ("bar", &[]), ("turbo", &["foo/feat"])],
+        );
+        let result = filtered_optional_dep_effective_names(&pkg, &["foo".into()]);
+        assert!(
+            !result.contains(&"foo".to_string()),
+            "shadowed feature `foo` must not activate optional dep `foo`, got: {result:?}"
         );
     }
 

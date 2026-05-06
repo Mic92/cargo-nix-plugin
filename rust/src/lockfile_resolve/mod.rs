@@ -1,3 +1,6 @@
+// Copyright 2026 Anthropic, PBC
+// SPDX-License-Identifier: Apache-2.0
+
 //! Resolve a cargo workspace from Cargo.lock + registry index, without cargo metadata.
 //!
 //! This avoids downloading crate sources at eval time. Fields that require
@@ -71,11 +74,18 @@ pub fn resolve_from_lockfile(
     let source_to_index_url =
         |source: Option<&str>| registry::source_to_index_url(source, crates_io_index);
 
+    // Workspace members never carry a `source` in Cargo.lock; registry/git
+    // crates always do. Cargo.lock can hold both a member and an external
+    // crate with the same name at different versions, so name alone is not
+    // enough.
+    let is_workspace_member =
+        |pkg: &LockPackage| pkg.source.is_none() && workspace_member_names.contains(&pkg.name);
+
     // Prefetch every (registry, name) the lockfile mentions before the
     // serial loop — cold-cache eval goes from O(n·RTT) to ~O(n/workers·RTT).
     let prefetch_jobs: Vec<registry::PrefetchJob> = lock_packages
         .iter()
-        .filter(|p| !workspace_member_names.contains(&p.name))
+        .filter(|p| !is_workspace_member(p))
         .filter_map(|p| {
             Some(registry::PrefetchJob {
                 url: source_to_index_url(p.source.as_deref())?,
@@ -95,9 +105,8 @@ pub fn resolve_from_lockfile(
 
     for pkg in &lock_packages {
         let sid = short_id.get(&pkg.name, &pkg.version);
-        let is_workspace_member = workspace_member_names.contains(&pkg.name);
 
-        if is_workspace_member {
+        if is_workspace_member(pkg) {
             // Use the workspace member info from parsed Cargo.toml
             let member = workspace
                 .members
@@ -160,6 +169,11 @@ pub fn resolve_from_lockfile(
                 })
                 .transpose()?;
 
+            // Set when we parsed a Cargo.toml at eval time (git/path deps).
+            // Registry crates stay None — buildRustCrate auto-detects those
+            // fields at build time, but procMacro is needed at eval time for
+            // lib/default.nix's cross-compile routing.
+            let mut manifest_member: Option<WorkspaceMember> = None;
             let (dependencies, build_dependencies, features_btree, links) =
                 if let Some(ref version) = index_version {
                     let (deps, build_deps) = resolve_index_deps(
@@ -215,6 +229,7 @@ pub fn resolve_from_lockfile(
                         rev: rev.clone(),
                         sub_path,
                     });
+                    manifest_member = Some(member.clone());
                     (
                         deps,
                         build_deps,
@@ -264,6 +279,7 @@ pub fn resolve_from_lockfile(
                     source_info = Some(SourceInfo::Local {
                         path: member.manifest_dir.clone(),
                     });
+                    manifest_member = Some(member.clone());
                     (
                         deps,
                         build_deps,
@@ -274,13 +290,9 @@ pub fn resolve_from_lockfile(
                     (Vec::new(), Vec::new(), BTreeMap::new(), None)
                 };
 
-            // For path deps we parsed the manifest ourselves — don't leave
-            // edition/proc_macro/lib_path for build-time auto-detect.
-            let path_member = pkg
-                .source
-                .is_none()
-                .then(|| workspace.path_deps.get(&pkg.name))
-                .flatten();
+            // For git and path deps we parsed the manifest ourselves — don't
+            // leave edition/proc_macro/lib_path for build-time auto-detect.
+            let path_member = manifest_member.as_ref();
 
             crates.insert(
                 sid,
@@ -595,14 +607,24 @@ fn find_lock_dep_by_name_and_req<'a>(
     // Fallback is only for unparseable versions.
     let mut unparseable_fallback = None;
     for dep_ref in dep_refs {
-        let mut parts = dep_ref.splitn(2, ' ');
+        // Cargo.lock dep refs are `"name"`, `"name version"`, or
+        // `"name version (source)"` — every entry in v1 lockfiles, only
+        // ambiguous entries in v2+. The source suffix must not poison
+        // the version comparison; use it as a tiebreaker when present.
+        let mut parts = dep_ref.splitn(3, ' ');
         if parts.next() != Some(name) {
             continue;
         }
-        let pkg = match parts.next() {
-            Some(version) => all_packages
-                .iter()
-                .find(|p| p.name == name && p.version == version),
+        let version = parts.next();
+        let source = parts
+            .next()
+            .map(|s| s.trim_start_matches('(').trim_end_matches(')'));
+        let pkg = match version {
+            Some(version) => all_packages.iter().find(|p| {
+                p.name == name
+                    && p.version == version
+                    && source.is_none_or(|s| p.source.as_deref() == Some(s))
+            }),
             None => all_packages.iter().find(|p| p.name == name),
         };
         let Some(pkg) = pkg else { continue };
@@ -767,6 +789,24 @@ dependencies = [
         assert_eq!(got.unwrap().version, "1.49.0+anthropic.1");
     }
 
+    /// `"name version (source)"` dep refs (every entry in v1 lockfiles)
+    /// must not break the name+version comparison.
+    #[test]
+    fn find_lock_dep_strips_source_suffix() {
+        let packages = vec![LockPackage {
+            name: "serde".into(),
+            version: "1.0.210".into(),
+            source: Some("registry+https://github.com/rust-lang/crates.io-index".into()),
+            dependencies: vec![],
+        }];
+        let dep_refs = vec![
+            "serde 1.0.210 (registry+https://github.com/rust-lang/crates.io-index)".to_string(),
+        ];
+        let req = semver::VersionReq::parse("^1").unwrap();
+        let got = find_lock_dep_by_name_and_req("serde", &req, &dep_refs, &packages);
+        assert_eq!(got.map(|p| p.version.as_str()), Some("1.0.210"));
+    }
+
     /// An index dep whose version req doesn't match any lockfile entry
     /// must return None — cargo dropped that edge. aws-smithy-http-client
     /// has both `hyper` (^1.6) and `hyper-0-14 = {package="hyper", ^0.14}`.
@@ -844,9 +884,19 @@ a = []
 "#,
         )
         .unwrap();
+        // bar is a proc-macro with a build script and non-default edition,
+        // exercising eval-time manifest field forwarding (asserted below).
         std::fs::write(
             checkout.join("crates/bar/Cargo.toml"),
-            "[package]\nname = \"bar\"\nversion = \"0.1.0\"\n",
+            r#"
+[package]
+name = "bar"
+version = "0.1.0"
+edition = "2018"
+build = "build.rs"
+[lib]
+proc-macro = true
+"#,
         )
         .unwrap();
 
@@ -895,6 +945,7 @@ source = "git+https://example.com/repo?branch=main#abc123"
             arch: "x86_64".into(),
             vendor: "unknown".into(),
             env: "gnu".into(),
+            abi: "".into(),
             family: vec!["unix".into()],
             pointer_width: "64".into(),
             endian: "little".into(),
@@ -938,6 +989,19 @@ source = "git+https://example.com/repo?branch=main#abc123"
             }
             other => panic!("expected Git source, got {other:?}"),
         }
+        // Manifest fields parsed from the git checkout must reach CrateInfo:
+        // procMacro especially is consumed at eval time by lib/default.nix to
+        // route proc-macro deps to the build platform under cross-compile.
+        assert!(
+            bar.proc_macro,
+            "bar's [lib] proc-macro=true must be forwarded"
+        );
+        assert_eq!(bar.edition, "2018", "bar's edition must be forwarded");
+        assert_eq!(
+            bar.build.as_deref(),
+            Some("build.rs"),
+            "bar's build script must be forwarded"
+        );
 
         // Feature resolution propagated through the git crate: consumer
         // pulls foo's default → "a".
@@ -1002,6 +1066,7 @@ version = "0.1.0"
             arch: "x86_64".into(),
             vendor: "unknown".into(),
             env: "gnu".into(),
+            abi: "".into(),
             family: vec!["unix".into()],
             pointer_width: "64".into(),
             endian: "little".into(),
@@ -1051,6 +1116,7 @@ version = "0.1.0"
             arch: "x86_64".into(),
             vendor: "unknown".into(),
             env: "gnu".into(),
+            abi: "".into(),
             family: vec!["unix".into()],
             pointer_width: "64".into(),
             endian: "little".into(),

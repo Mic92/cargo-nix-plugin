@@ -1,3 +1,17 @@
+# Copyright 2026 Anthropic, PBC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 {
   description = "Nix plugin for resolving Cargo workspaces — replaces generated Cargo.nix";
 
@@ -19,19 +33,26 @@
 
       # Nix versions to build the plugin against and test with.
       # Each entry maps a suffix to { components, binary } attribute paths
-      # under pkgs.nixVersions.
+      # under pkgs.nixVersions. Track what the locked nixpkgs still ships;
+      # nixpkgs aggressively removes EOL nix releases.
       nixVersions = {
-        "2_32" = {
-          components = "nixComponents_2_32";
-          binary = "nix_2_32";
+        "2_30" = {
+          components = "nixComponents_2_30";
+          binary = "nix_2_30";
         };
-        "2_33" = {
-          components = "nixComponents_2_33";
-          binary = "nix_2_33";
+        "2_31" = {
+          components = "nixComponents_2_31";
+          binary = "nix_2_31";
         };
         "2_34" = {
           components = "nixComponents_2_34";
           binary = "nix_2_34";
+        };
+        # Pre-release: catches plugin ABI breaks before the next stable
+        # nix release lands. Expected to break occasionally on nixpkgs bumps.
+        "git" = {
+          components = "nixComponents_git";
+          binary = "git";
         };
       };
 
@@ -114,32 +135,37 @@
         };
 
       # Build packages/tests for every nix version, suffixed with the version.
-      # e.g. eval-test-nix_2_32, torture-test-nix_2_33, etc.
-      perVersionPackages = pkgs: builtins.foldl' (
-        acc: ver:
-        let
-          cfg = nixVersions.${ver};
-          components = pkgs.nixVersions.${cfg.components};
-          nix = pkgs.nixVersions.${cfg.binary};
-          plugin = mkPlugin pkgs components;
-          tests = mkTests pkgs plugin nix;
-          # The UBSan build statically links compiler-rt's minimal
-          # runtime via GNU-ld --whole-archive from lib/linux/; no
-          # darwin equivalent is wired up, so keep it Linux-only.
-          sanitizedTests = nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
-            mkTests pkgs (mkPluginSanitized pkgs components) nix
-          );
-        in
-        acc
-        // { "cargo-nix-plugin-nix_${ver}" = plugin; }
-        // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
-        // nixpkgs.lib.mapAttrs' (
-          name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
-        ) sanitizedTests
-      ) { } (builtins.attrNames nixVersions);
+      # e.g. eval-test-nix_2_34, torture-test-nix_2_34, etc.
+      perVersionPackages =
+        pkgs:
+        builtins.foldl' (
+          acc: ver:
+          let
+            cfg = nixVersions.${ver};
+            components = pkgs.nixVersions.${cfg.components};
+            nix = pkgs.nixVersions.${cfg.binary};
+            plugin = mkPlugin pkgs components;
+            tests = mkTests pkgs plugin nix;
+            # The UBSan build statically links compiler-rt's minimal
+            # runtime via GNU-ld --whole-archive from lib/linux/; no
+            # darwin equivalent is wired up, so keep it Linux-only.
+            sanitizedTests = nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (
+              mkTests pkgs (mkPluginSanitized pkgs components) nix
+            );
+          in
+          acc
+          // {
+            "cargo-nix-plugin-nix_${ver}" = plugin;
+          }
+          // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
+          // nixpkgs.lib.mapAttrs' (
+            name: drv: nixpkgs.lib.nameValuePair "${name}-ubsan-nix_${ver}" drv
+          ) sanitizedTests
+        ) { } (builtins.attrNames nixVersions);
 
       # The default nix version used for the top-level plugin package.
-      defaultNixComponents = "nixComponents_2_32";
+      # Keep README.md (## Example, ## Compatibility) in sync when bumping.
+      defaultNixComponents = "nixComponents_2_34";
     in
     {
       packages = forAllSystems (
@@ -184,11 +210,15 @@
       apps = forAllSystems (pkgs: {
         cargo-nix-prefetch = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch}/bin/cargo-nix-prefetch";
+          program = "${
+            self.packages.${pkgs.stdenv.hostPlatform.system}.cargo-nix-prefetch
+          }/bin/cargo-nix-prefetch";
         };
         generate-metadata = {
           type = "app";
-          program = "${self.packages.${pkgs.stdenv.hostPlatform.system}.generate-metadata}/bin/generate-metadata";
+          program = "${
+            self.packages.${pkgs.stdenv.hostPlatform.system}.generate-metadata
+          }/bin/generate-metadata";
         };
       });
 
@@ -208,10 +238,7 @@
             plugin = mkPlugin pkgs components;
             tests = mkTests pkgs plugin nix;
           in
-          acc
-          // nixpkgs.lib.mapAttrs' (
-            name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv
-          ) tests
+          acc // nixpkgs.lib.mapAttrs' (name: drv: nixpkgs.lib.nameValuePair "${name}-nix_${ver}" drv) tests
         ) { } (builtins.attrNames nixVersions)
       );
 

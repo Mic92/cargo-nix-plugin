@@ -1,3 +1,6 @@
+# Copyright 2026 Anthropic, PBC
+# SPDX-License-Identifier: Apache-2.0
+
 # Regression test: building into a chroot store (nix build --store /tmp/...)
 # requires that the plugin remaps logical store paths to real filesystem paths
 # so cargo metadata can find Cargo.toml on the host during eval.
@@ -30,7 +33,7 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
       cargo = pkgs.cargo;
       stdenv = pkgs.stdenv;
       mold = pkgs.mold;
-      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix {};
+      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
       sampleProject = sampleProject;
       pluginSrc = pluginSrc;
       nixpkgs = pkgs.path;
@@ -74,7 +77,9 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
               rustc = builtins.storePath ${pkgs.rustc};
               cargo = builtins.storePath ${pkgs.cargo};
               mold = builtins.storePath ${pkgs.mold};
-              buildRustCrateBin = builtins.storePath ${pkgs.callPackage ../nix/build-rust-crate-bin.nix {}};
+              buildRustCrateBin = builtins.storePath ${
+                pkgs.callPackage ../nix/build-rust-crate-bin.nix { }
+              };
             };
           in (import ${pluginSrc}/lib {
             inherit pkgs;
