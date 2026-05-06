@@ -53,7 +53,11 @@ pub fn find_configs(start: &Path, cargo_home: &Path) -> Vec<std::path::PathBuf> 
             out.push(p);
         }
     };
-    let mut dir = Some(start);
+    // Cargo walks env::current_dir() (always absolute) up to "/". A relative
+    // `start` would bottom out at "" instead — Path::parent() doesn't know
+    // about cwd — so absolutize first to get the same ancestor coverage.
+    let start_abs = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = Some(start_abs.as_path());
     while let Some(d) = dir {
         push_if_file(d.join(".cargo").join("config.toml"));
         dir = d.parent();
