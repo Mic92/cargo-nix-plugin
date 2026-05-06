@@ -255,7 +255,9 @@ lib.makeOverridable
           lib.substring 0 10 hashedMetadata;
 
         build = crate.build or "";
-        workspace_member = crate.workspace_member or ".";
+        # lib/default.nix omits this for git deps with no known sub-path; null
+        # keeps it unset so the builder auto-scans for the matching Cargo.toml.
+        workspace_member = crate.workspace_member or null;
         # Strip the crate2nix "empty [[bin]]" sentinel so the builder doesn't
         # try to compile a binary named `,`.
         crateBin = lib.filter (bin: !(bin ? name && bin.name == ",")) (crate.crateBin or [ ]);
