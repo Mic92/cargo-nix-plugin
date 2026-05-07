@@ -6,7 +6,7 @@ license = "MIT"
 repository = "https://github.com/anthropics/cargo-nix-plugin"
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["staticlib", "rlib", "cdylib"]
 
 [dependencies]
 cargo_metadata = "0.23"
