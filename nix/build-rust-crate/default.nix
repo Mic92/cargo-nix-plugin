@@ -4,8 +4,9 @@
 # Code for buildRustCrate, a Nix function that builds Rust code, just
 # like Cargo, but using Nix instead.
 #
-# This version uses __structuredAttrs and a Rust binary (build-rust-crate)
-# instead of bash scripts for the configure/build/install phases.
+# Configure/build/install run in the build-rust-crate Rust binary, which
+# reads its config as JSON from NIX_ATTRS_JSON_FILE. Plain (non-structured)
+# derivation: some remote builders don't support __structuredAttrs.
 
 {
   lib,
@@ -69,7 +70,7 @@ lib.makeOverridable
       buildDependencies_ = buildDependencies;
       # Every input-`crate` key we re-derive below. Anything not listed
       # leaks through extraDerivationAttrs and //-overrides the computed
-      # value, which the builder reads from NIX_ATTRS_JSON_FILE.
+      # value in the JSON config the builder reads from NIX_ATTRS_JSON_FILE.
       processedAttrs = [
         "src"
         "nativeBuildInputs"
@@ -132,10 +133,8 @@ lib.makeOverridable
       buildTests_ = buildTests;
 
     in
-    stdenv.mkDerivation (
-      rec {
-        __structuredAttrs = true;
-
+    let
+      allAttrs = rec {
         inherit (crate) crateName;
         inherit
           release
@@ -365,8 +364,8 @@ lib.makeOverridable
             ];
         outputDev = if buildTests then [ "out" ] else [ "lib" ];
 
-        # Exposed for downstream introspection (cross tests etc.). passthru
-        # keeps __structuredAttrs from JSON-serialising the full drvs.
+        # Downstream introspection (cross tests etc.). Not in the JSON: it
+        # carries derivation closures the builder has no use for.
         passthru = {
           dependencies = dependencies_;
           buildDependencies = buildDependencies_;
@@ -379,8 +378,26 @@ lib.makeOverridable
             lib.systems.inspect.patterns.isMips64n32
           ];
         };
+      } // extraDerivationAttrs;
+
+      # `derivation` can't coerce these to env strings; the builder reads
+      # them from the JSON instead.
+      nestedAttrs = [ "depExterns" "buildDepExterns" "crateBin" "hostPlatform" "buildPlatform" ];
+      # passthru/meta are stdenv-only; keep them out of the JSON to avoid
+      # serialising whole drv closures via outPath.
+      jsonAttrs = removeAttrs allAttrs [ "passthru" "meta" ];
+    in
+    stdenv.mkDerivation (
+      removeAttrs allAttrs nestedAttrs
+      // {
+        # passAsFile dodges env-var size limits; toJSON keeps store-path
+        # context on embedded dep paths.
+        configJson = builtins.toJSON jsonAttrs;
+        passAsFile = [ "configJson" ];
+        configurePhase = ''
+          export NIX_ATTRS_JSON_FILE="$configJsonPath"
+        '' + allAttrs.configurePhase;
       }
-      // extraDerivationAttrs
     )
   )
   {
