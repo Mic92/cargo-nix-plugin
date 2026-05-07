@@ -27,9 +27,11 @@ if(NIX_PRIMOP_HAS_IMPL)
 endif()
 target_link_libraries(cargo_nix_plugin nlohmann_json::nlohmann_json)
 
-# Link the Rust static library
-target_link_directories(cargo_nix_plugin PRIVATE ${RUST_LIB_DIR})
-target_link_libraries(cargo_nix_plugin cargo_nix_plugin_core)
+# Link the Rust staticlib explicitly. The crate emits both staticlib
+# and cdylib; an unqualified `-lcargo_nix_plugin_core` would let the
+# linker pick the .so, which isn't on the Nix plugin's runtime loader
+# path.
+target_link_libraries(cargo_nix_plugin ${RUST_LIB_DIR}/libcargo_nix_plugin_core.a)
 
 if(ENABLE_SANITIZERS)
   # UBSan only — ASan requires whole-program instrumentation which is
