@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "Mic92",
+      "id": 96200,
+      "comment_id": 4407418808,
+      "created_at": "2026-05-08T14:57:38Z",
+      "repoId": 1171698112,
+      "pullRequestNo": 34
+    }
+  ]
 }
