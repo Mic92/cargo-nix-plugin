@@ -23,7 +23,7 @@ jobs:
         # and adds: an impersonation guard (PR opener must be an author or
         # co-author of at least one commit), Co-authored-by trailer support,
         # and actionable unlinked-email guidance.
-        uses: iainmcgin/cla-github-action@1ecf0d2f19b665777f5b0cda149104238cc6c493
+        uses: iainmcgin/cla-github-action@3e58ace6af840f66fcd80f68c08d76559140df5e # v3.0.0 (sha-pinned)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
