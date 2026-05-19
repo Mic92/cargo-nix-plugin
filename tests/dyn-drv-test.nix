@@ -8,10 +8,6 @@
 # `builtins.resolveCargoWorkspace` is missing, builds a planner
 # derivation (vendor -> cargo metadata -> cargo-nix-resolve ->
 # nix-instantiate), and emits a buildable .drv via builtins.outputOf.
-#
-# Mirrors tests/chroot-store-test.nix: seed the toolchain into the
-# chroot store, pin via builtins.storePath so the inner eval reuses
-# the seeded paths instead of re-deriving (and rebuilding) from source.
 {
   pkgs,
   pluginSrc,
@@ -22,6 +18,7 @@
 }:
 
 let
+  mkChrootStoreTest = import ./lib/chroot-store.nix { inherit pkgs nix; };
   buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
   cargoNixResolve = pkgs.callPackage ../nix/cargo-nix-resolve.nix { };
   vendorDir = pkgs.rustPlatform.importCargoLock {
@@ -29,51 +26,40 @@ let
     allowBuiltinFetchGit = true;
   };
 in
-pkgs.runCommand "cargo-nix-plugin-dyn-drv-test"
-  {
-    nativeBuildInputs = [ nix ];
-    requiredSystemFeatures = [ "recursive-nix" ];
-    seed = pkgs.linkFarm "dyn-drv-seed" {
-      inherit (pkgs)
-        rustc
-        cargo
-        mold
-        jq
-        stdenv
-        stdenvNoCC
-        ;
-      inherit
-        buildRustCrateBin
-        cargoNixResolve
-        vendorDir
-        sampleProject
-        pluginSrc
-        nix
-        ;
-      nixpkgs = pkgs.path;
-    };
-  }
-  ''
+mkChrootStoreTest {
+  name = "cargo-nix-plugin-dyn-drv-test";
+  seed = {
+    inherit (pkgs)
+      rustc
+      cargo
+      mold
+      jq
+      stdenv
+      stdenvNoCC
+      ;
+    inherit
+      buildRustCrateBin
+      cargoNixResolve
+      vendorDir
+      sampleProject
+      pluginSrc
+      nix
+      ;
+    nixpkgs = pkgs.path;
+  };
+  # recursive-nix is both an experimental feature and a system feature --
+  # the latter lets the chroot store's builder accept the planner drv.
+  nixConfig = ''
+    experimental-features = nix-command flakes ca-derivations dynamic-derivations recursive-nix
+    system-features = recursive-nix
+  '';
+  script = ''
     set -euo pipefail
-    export HOME=$(mktemp -d)
-    CHROOT=$(mktemp -d)
-
-    # No nix.conf in the sandbox: opt the inner nix into everything the
-    # fallback path needs. recursive-nix is both an experimental feature
-    # and a system feature -- the latter lets the chroot store's builder
-    # accept the planner derivation.
-    export NIX_CONFIG="
-      experimental-features = nix-command flakes ca-derivations dynamic-derivations recursive-nix
-      system-features = recursive-nix
-      substituters =
-    "
 
     # The test is meaningless if the test nix has the plugin loaded.
     if [[ "$(${nix}/bin/nix eval --expr 'builtins ? resolveCargoWorkspace')" != "false" ]]; then
       echo "FAIL: test nix has the plugin loaded; cannot exercise dyn-drv mode"; exit 1
     fi
-
-    ${nix}/bin/nix copy --no-check-sigs --to "local?root=$CHROOT" "$seed"
 
     # Pin everything the planner + crate builds touch to the seeded paths
     # via builtins.storePath, so the inner eval never re-derives jq/perl/
@@ -113,4 +99,5 @@ pkgs.runCommand "cargo-nix-plugin-dyn-drv-test"
     echo "PASS: dyn-drv mode built and ran nodeps-bin"
 
     echo "ALL DYN-DRV FALLBACK TESTS PASSED" > $out
-  ''
+  '';
+}
