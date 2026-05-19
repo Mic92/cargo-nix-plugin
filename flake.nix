@@ -132,6 +132,12 @@
             # crates.io, and the remap logic under test doesn't need it to.
             sampleProject = ./tests/sample-project-nodeps;
           };
+          # No `plugin` arg: this test is the no-plugin path.
+          dyn-drv-test = pkgs.callPackage ./tests/dyn-drv-test.nix {
+            inherit nix;
+            pluginSrc = ./.;
+            sampleProject = ./tests/sample-project-nodeps;
+          };
         };
 
       # Build packages/tests for every nix version, suffixed with the version.
