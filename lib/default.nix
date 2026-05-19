@@ -56,6 +56,12 @@
   # Optional: crate overrides
   # If omitted, the default crate overrides from nixpkgs will be used
   crateOverrides ? null,
+  # Optional: path to a Nix file evaluating to `pkgs: { <crate> = attrs:
+  # { … }; }`. Equivalent to `crateOverrides`, but as a file so the
+  # dynamic-derivations planner can re-import it across the derivation
+  # boundary. Works in every resolve mode; mutually exclusive with
+  # `crateOverrides`.
+  crateOverridesFile ? null,
 
   # Optional: target platform description (auto-detected from stdenv)
   target ? null,
@@ -117,18 +123,53 @@
   # checkout fetchGit can't reach (private repo, vendored fixture) or to
   # set `submodules = true` per-source.
   gitSources ? null,
-}:
+  # Optional: path to a JSON file holding the WorkspaceResult envelope
+  # `{ apiLevel, result }` as emitted by `cargo-nix-resolve`. When set,
+  # the plugin primop is bypassed entirely. Used internally by the
+  # dynamic-derivations mode (the planner derivation re-evaluates
+  # this file with `resolvedJson` pointing at its own resolver output);
+  # exposed for debugging / fully offline evaluation.
+  resolvedJson ? null,
+}@args:
 
 let
+  crateOverrides' =
+    if crateOverrides != null && crateOverridesFile != null then
+      throw "cargo-nix-plugin: pass either `crateOverrides` or `crateOverridesFile`, not both."
+    else if crateOverridesFile != null then
+      import crateOverridesFile pkgs
+    else
+      crateOverrides;
+
   # Contract version between this wrapper and the Rust resolver (input
   # attrset + WorkspaceResult). Must match API_LEVEL in
   # rust/src/resolve.rs; bump both on incompatible changes.
   apiLevel = 2;
 
+  hasPlugin = builtins ? resolveCargoWorkspace;
+
+  # Three resolve modes, in order of preference:
+  #   1. Plugin primop (fast, eval-time).
+  #   2. Pre-resolved JSON file (planner output / debug).
+  #   3. Dynamic-derivations mode (no plugin, no JSON — build a planner
+  #      derivation that re-enters this file with resolvedJson).
+  # Mode 3 has a structurally different output and is split out below.
+  resolveMode =
+    if hasPlugin then
+      "plugin"
+    else if resolvedJson != null then
+      "json"
+    else
+      "dyn-drv";
+
+  jsonEnvelope =
+    if resolveMode == "json" then builtins.fromJSON (builtins.readFile resolvedJson) else null;
+
   # Probe the loaded plugin before calling it so skew surfaces as a
   # clear message, not a serde/attr error. `or 0` covers plugins
   # predating the primop. Warn-only until the first real bump.
-  resolverApiLevel = builtins.cargoNixApiLevel or 0;
+  resolverApiLevel =
+    if resolveMode == "json" then jsonEnvelope.apiLevel or 0 else builtins.cargoNixApiLevel or 0;
   apiLevelGuard =
     if resolverApiLevel == apiLevel then
       x: x
@@ -286,25 +327,30 @@ let
     else
       defaultBuildRustCrateForPkgs;
 
-  # Call the plugin builtin — auto-detect mode based on metadata presence
-  resolved = apiLevelGuard builtins.resolveCargoWorkspace (
-    {
-      target = resolvedTarget;
-      inherit rootFeatures noDefaultFeatures;
-    }
-    // (
-      if metadata != null then
+  # Call the plugin builtin — auto-detect mode based on metadata presence.
+  # In "json" mode the planner already did this; unwrap the envelope.
+  resolved =
+    if resolveMode == "json" then
+      apiLevelGuard jsonEnvelope.result
+    else
+      apiLevelGuard builtins.resolveCargoWorkspace (
         {
-          inherit metadata cargoLock;
+          target = resolvedTarget;
+          inherit rootFeatures noDefaultFeatures;
         }
-      else
-        {
-          manifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
-        }
-        // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
-    )
-    // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
-  );
+        // (
+          if metadata != null then
+            {
+              inherit metadata cargoLock;
+            }
+          else
+            {
+              manifestPath = if manifestPath != null then manifestPath else "${src}/Cargo.toml";
+            }
+            // lib.optionalAttrs (cargoHome != null) { inherit cargoHome; }
+        )
+        // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
+      );
 
   # Source resolution: given a crate's source info, produce a src path
   # buildRustCrate always needs a src — for crates-io it uses fetchurl
@@ -389,7 +435,10 @@ let
         let
           base = effectiveBuildRustCrateForPkgs cratePkgs;
         in
-        if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
+        if crateOverrides' != null then
+          args: (base args).override { crateOverrides = crateOverrides'; }
+        else
+          base;
 
       mkCrates =
         libOnly:
@@ -573,7 +622,10 @@ let
         let
           base = effectiveBuildRustCrateForPkgs cratePkgs;
         in
-        if crateOverrides != null then args: (base args).override { inherit crateOverrides; } else base;
+        if crateOverrides' != null then
+          args: (base args).override { crateOverrides = crateOverrides'; }
+        else
+          base;
 
       # Clippy buildRustCrate: use clippy-driver as the compiler. The default
       # cap-lints=allow neutralises every lint (including -D warnings from
@@ -614,80 +666,98 @@ let
   clippyCrates = mkClippyBuiltByPkgs pkgs;
 
 in
-{
-  # Public interface matching crate2nix
-  workspaceMembers = lib.mapAttrs (
-    name: packageId:
-    let
-      testsDrv = builtCrates.crates.${packageId}.override { buildTests = true; };
-    in
-    {
-      inherit packageId;
-      build = builtCrates.crates.${packageId};
-      # Compile tests with dev-dependencies wired in. Equivalent to
-      # `.build.override { buildTests = true; }` — buildRustCrate folds
-      # devDependencies into the --extern set only when buildTests is set.
-      buildTests = testsDrv;
-      # Batteries-included runner: sequential across test binaries (matches
-      # `cargo test`), libtest parallelism inside each. nativeCheckInputs
-      # set via crateOverrides are forwarded so tests that shell out to
-      # external tools find them on PATH at runtime too.
-      runTests =
-        pkgs.runCommand "${name}-tests"
-          {
-            nativeBuildInputs = testsDrv.nativeCheckInputs;
-            passthru = { inherit testsDrv; };
-          }
-          ''
-            export CARGO_TARGET_TMPDIR="$(mktemp -d)"
-            export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
-            shopt -s nullglob
-            for t in ${testsDrv}/tests/*; do
-              echo "── running $(basename "$t")"
-              "$t"
-            done
-            touch $out
-          '';
-    }
-  ) resolved.workspaceMembers;
-
-  rootCrate =
-    if resolved.root != null then
+if resolveMode == "dyn-drv" then
+  # No plugin, no pre-resolved JSON. Build a planner derivation that
+  # vendors the lockfile, runs `cargo-nix-resolve`, then re-evaluates
+  # this file with `resolvedJson` set, emitting a `.drv` consumed via
+  # `builtins.outputOf`. Reduced interface: per-member `.build` and
+  # `allWorkspaceMembers` only — no `.override`-based variants from the
+  # caller side.
+  import ../nix/dyn-drv.nix {
+    inherit
+      pkgs
+      lib
+      stdenv
+      apiLevel
+      ;
+    libArgs = args;
+    target = resolvedTarget;
+  }
+else
+  {
+    # Public interface matching crate2nix
+    workspaceMembers = lib.mapAttrs (
+      name: packageId:
+      let
+        testsDrv = builtCrates.crates.${packageId}.override { buildTests = true; };
+      in
       {
-        packageId = resolved.root;
-        build = builtCrates.crates.${resolved.root};
+        inherit packageId;
+        build = builtCrates.crates.${packageId};
+        # Compile tests with dev-dependencies wired in. Equivalent to
+        # `.build.override { buildTests = true; }` — buildRustCrate folds
+        # devDependencies into the --extern set only when buildTests is set.
+        buildTests = testsDrv;
+        # Batteries-included runner: sequential across test binaries (matches
+        # `cargo test`), libtest parallelism inside each. nativeCheckInputs
+        # set via crateOverrides are forwarded so tests that shell out to
+        # external tools find them on PATH at runtime too.
+        runTests =
+          pkgs.runCommand "${name}-tests"
+            {
+              nativeBuildInputs = testsDrv.nativeCheckInputs;
+              passthru = { inherit testsDrv; };
+            }
+            ''
+              export CARGO_TARGET_TMPDIR="$(mktemp -d)"
+              export RUST_BACKTRACE=''${RUST_BACKTRACE-1}
+              shopt -s nullglob
+              for t in ${testsDrv}/tests/*; do
+                echo "── running $(basename "$t")"
+                "$t"
+              done
+              touch $out
+            '';
       }
-    else
-      null;
-
-  allWorkspaceMembers = pkgs.symlinkJoin {
-    name = "all-workspace-members";
-    paths = lib.mapAttrsToList (
-      _name: packageId: builtCrates.crates.${packageId}
     ) resolved.workspaceMembers;
-  };
 
-  # Clippy: workspace members checked with clippy-driver, dependencies
-  # compiled normally (cached).  Build any member to get clippy diagnostics;
-  # the build fails if clippy reports errors.
-  clippy = {
-    workspaceMembers = lib.mapAttrs (name: packageId: {
-      inherit packageId;
-      build = clippyCrates.crates.${packageId};
-    }) resolved.workspaceMembers;
+    rootCrate =
+      if resolved.root != null then
+        {
+          packageId = resolved.root;
+          build = builtCrates.crates.${resolved.root};
+        }
+      else
+        null;
 
     allWorkspaceMembers = pkgs.symlinkJoin {
-      name = "all-workspace-members-clippy";
+      name = "all-workspace-members";
       paths = lib.mapAttrsToList (
-        _name: packageId: clippyCrates.crates.${packageId}
+        _name: packageId: builtCrates.crates.${packageId}
       ) resolved.workspaceMembers;
     };
-  };
 
-  # Expose internals for debugging
-  inherit resolved;
-  inherit builtCrates;
-  # apiLevel = this lib/, resolverApiLevel = loaded plugin (0 if
-  # unknown). Lets callers hard-assert instead of relying on the warn.
-  inherit apiLevel resolverApiLevel;
-}
+    # Clippy: workspace members checked with clippy-driver, dependencies
+    # compiled normally (cached).  Build any member to get clippy diagnostics;
+    # the build fails if clippy reports errors.
+    clippy = {
+      workspaceMembers = lib.mapAttrs (name: packageId: {
+        inherit packageId;
+        build = clippyCrates.crates.${packageId};
+      }) resolved.workspaceMembers;
+
+      allWorkspaceMembers = pkgs.symlinkJoin {
+        name = "all-workspace-members-clippy";
+        paths = lib.mapAttrsToList (
+          _name: packageId: clippyCrates.crates.${packageId}
+        ) resolved.workspaceMembers;
+      };
+    };
+
+    # Expose internals for debugging
+    inherit resolved;
+    inherit builtCrates;
+    # apiLevel = this lib/, resolverApiLevel = loaded plugin (0 if
+    # unknown). Lets callers hard-assert instead of relying on the warn.
+    inherit apiLevel resolverApiLevel;
+  }

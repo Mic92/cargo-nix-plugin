@@ -20,43 +20,30 @@
   nix,
 }:
 
-pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
-  {
-    nativeBuildInputs = [ nix ];
-    requiredSystemFeatures = [ "recursive-nix" ];
-    # Pre-seed the chroot store via `nix copy`. Wrap in linkFarm so we can
-    # copy the whole toolchain closure in one shot. Can't pre-build the
-    # actual crate here — the wrapper lib calls builtins.resolveCargoWorkspace
-    # unconditionally, and the flake evaluator doesn't have the plugin loaded.
-    buildClosureSeed = pkgs.linkFarm "chroot-store-seed" {
-      rustc = pkgs.rustc;
-      cargo = pkgs.cargo;
-      stdenv = pkgs.stdenv;
-      mold = pkgs.mold;
-      buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
-      sampleProject = sampleProject;
-      pluginSrc = pluginSrc;
-      nixpkgs = pkgs.path;
-    };
-  }
-  ''
-    export HOME=$(mktemp -d)
-    # The build sandbox has no nix.conf, so the new CLI refuses `nix build`
-    # with "experimental feature nix-command is disabled".
-    export NIX_CONFIG="experimental-features = nix-command"
-    CHROOT=$(mktemp -d)
-
+let
+  mkChrootStoreTest = import ./lib/chroot-store.nix { inherit pkgs nix; };
+in
+mkChrootStoreTest {
+  name = "cargo-nix-plugin-chroot-store-test";
+  # Can't pre-build the actual crate here — the wrapper lib calls
+  # builtins.resolveCargoWorkspace unconditionally, and the flake
+  # evaluator doesn't have the plugin loaded.
+  seed = {
+    rustc = pkgs.rustc;
+    cargo = pkgs.cargo;
+    stdenv = pkgs.stdenv;
+    mold = pkgs.mold;
+    buildRustCrateBin = pkgs.callPackage ../nix/build-rust-crate-bin.nix { };
+    sampleProject = sampleProject;
+    pluginSrc = pluginSrc;
+    nixpkgs = pkgs.path;
+  };
+  script = ''
     # --- Test: default manifestPath with chroot store ---
     # Uses nix build --store to exercise the remapStorePath() codepath.
     # Without the fix, this fails with:
     #   "cargo metadata failed: manifest path /nix/store/xxx/Cargo.toml does not exist"
     echo "Test: chroot store with auto-remapped manifest path"
-
-    # Seed the chroot store. `nix copy` reads from the outer /nix/store
-    # (visible in the recursive-nix sandbox) and registers the closure in
-    # the chroot store's db. The linkFarm bundles everything the inner
-    # build needs so a single copy covers it.
-    ${nix}/bin/nix copy --no-check-sigs --to "local?root=$CHROOT" "$buildClosureSeed"
 
     # Pin the inner buildRustCrate to the exact store paths copied above so
     # the derivations match what's in the chroot store — `import pkgs.path`
@@ -141,4 +128,5 @@ pkgs.runCommand "cargo-nix-plugin-chroot-store-test"
     echo "PASS: buildTests=true produces runnable lib + integration tests"
 
     echo "ALL CHROOT STORE TESTS PASSED" > $out
-  ''
+  '';
+}
