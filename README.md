@@ -161,6 +161,63 @@ progress noise. Set `CARGO_NIX_DEBUG=1` to surface the informational logs
 stderr. Warnings about misconfiguration and hard errors are always printed
 regardless of this flag.
 
+### No plugin: dynamic-derivations mode
+
+Without the plugin loaded, the same `cargo-nix-plugin.lib { … }` call
+uses
+[experimental dynamic-derivations](https://github.com/NixOS/nix/milestone/39)
+instead: a *planner* derivation vendors `Cargo.lock`, runs `cargo metadata
+--offline`, resolves with `cargo-nix-resolve`, then re-evaluates `lib/`
+with the result and emits the crate `.drv` graph at build time. Same
+per-crate caching, no plugin, no checked-in `Cargo.nix`.
+
+Requires bleeding-edge Nix with experimental features enabled and a
+builder with the `recursive-nix` system feature:
+
+```nix
+# nix.conf
+experimental-features = nix-command flakes ca-derivations dynamic-derivations recursive-nix
+system-features      = recursive-nix
+```
+
+Reduced interface vs. the plugin path (the build output is a deferred
+placeholder, not a derivation attrset, so `.override` is unavailable):
+
+- `workspaceMembers.<name>.{build,buildTests,runTests}`
+- `allWorkspaceMembers`, `rootCrate.build`
+- `clippy.workspaceMembers.<name>.build`, `clippy.allWorkspaceMembers`
+- Workspace member globs in `[workspace.members]` are limited to a
+  trailing `dir/*`. Anything fancier needs explicit member listing.
+- `crateOverrides` must be passed as a file (`crateOverridesFile`), not
+  an inline value — Nix functions cannot cross the planner derivation
+  boundary, so the planner re-imports the file with its own `pkgs`.
+
+```nix
+# overrides.nix
+pkgs: pkgs.defaultCrateOverrides // {
+  openssl-sys = attrs: {
+    nativeBuildInputs = [ pkgs.pkg-config ];
+    buildInputs = [ pkgs.openssl ];
+  };
+}
+```
+
+```nix
+cargoNix = cargo-nix-plugin.lib {
+  inherit pkgs;
+  src = ./.;
+  crateOverridesFile = ./overrides.nix;
+};
+```
+
+The file shape is `pkgs: { <crateName> = attrs: { … }; }` — same
+override attrset as the plugin path's `crateOverrides`, just wrapped in
+a `pkgs:` lambda so the planner can supply its own nixpkgs evaluation.
+`crateOverridesFile` also works in plugin mode if you want one config
+file for both.
+
+Need `.override`, fast eval, or stable Nix? Use the plugin.
+
 ## Example
 
 The plugin must be loaded by the same Nix version it was compiled against

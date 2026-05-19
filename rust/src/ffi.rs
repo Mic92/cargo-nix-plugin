@@ -21,35 +21,41 @@ pub extern "C" fn cargo_nix_api_level() -> u32 {
 /// Two modes:
 /// 1. Explicit: `metadata` + `cargoLock` provided (pre-generated cargo metadata JSON)
 /// 2. Lockfile: `manifestPath` provided (parses Cargo.lock + registry index, no cargo subprocess)
+///
+/// Also consumed by `cargo-nix-resolve` (the standalone CLI used by the
+/// dynamic-derivations mode) so the plugin and the no-plugin path
+/// share one input contract.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PluginInput {
+pub struct PluginInput {
     /// Explicit cargo metadata JSON (mode 1)
-    metadata: Option<String>,
+    pub metadata: Option<String>,
     /// Explicit Cargo.lock contents (required with metadata)
-    cargo_lock: Option<String>,
+    pub cargo_lock: Option<String>,
     /// Path to Cargo.toml (mode 2 — lockfile resolve)
-    manifest_path: Option<String>,
-    target: TargetDescription,
+    pub manifest_path: Option<String>,
+    pub target: TargetDescription,
     /// Features to enable on the root package.
     #[serde(default)]
-    root_features: Vec<String>,
+    pub root_features: Vec<String>,
     /// Disable default features on root packages.
     #[serde(default)]
-    no_default_features: bool,
+    pub no_default_features: bool,
     /// Path to CARGO_HOME (for registry index lookup in lockfile resolve mode).
     /// Defaults to $CARGO_HOME or ~/.cargo.
     #[serde(default)]
-    cargo_home: Option<String>,
+    pub cargo_home: Option<String>,
     /// Pre-fetched git checkouts, keyed by `"${url}#${rev}"` (url stripped of
     /// `git+` prefix and `?query`). Supplied by `lib/default.nix` so the
     /// resolver can read each git crate's Cargo.toml without doing IO itself.
     #[serde(default)]
-    git_sources: std::collections::HashMap<String, std::path::PathBuf>,
+    pub git_sources: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
 /// Validate input and resolve the workspace using the appropriate mode.
-fn validate_and_resolve(input: &PluginInput) -> Result<crate::resolve::WorkspaceResult, String> {
+pub fn validate_and_resolve(
+    input: &PluginInput,
+) -> Result<crate::resolve::WorkspaceResult, String> {
     match (&input.metadata, &input.manifest_path) {
         (Some(_), Some(_)) => {
             Err("Provide either 'metadata' or 'manifestPath', not both.".to_string())

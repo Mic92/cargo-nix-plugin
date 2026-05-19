@@ -177,6 +177,7 @@
           default = defaultPlugin;
           cargo-nix-plugin = defaultPlugin;
           cargo-nix-prefetch = pkgs.callPackage ./nix/cargo-nix-prefetch.nix { };
+          cargo-nix-resolve = pkgs.callPackage ./nix/cargo-nix-resolve.nix { };
           # Optional: helper for generating metadata JSON explicitly.
           # Not needed when using the automatic subprocess mode (just pass src).
           # Useful for offline/pure evaluation workflows.
