@@ -109,5 +109,46 @@ pkgs.runCommand "cargo-nix-plugin-offline-build-test"
     }
 
     echo "PASS: offline build succeeded"
+
+    # --- Clippy all-features: with clippyAllFeatures = true, sample-lib's
+    # all-features-probe feature must be active in the clippy drv only.
+    instantiate() {
+      nix-instantiate \
+        --option plugin-files "${plugin}/lib/nix/plugins" \
+        --expr "$1"
+    }
+
+    allFeaturesExpr='
+      let
+        pkgs = import ${pkgs.path} { system = "${pkgs.stdenv.hostPlatform.system}"; };
+      in import ${pluginSrc}/lib {
+        inherit pkgs;
+        src = ${sampleProject};
+        cargoHome = "${cargoHome}";
+        clippyAllFeatures = true;
+      }
+    '
+    clippy_lib_drv=$(instantiate "($allFeaturesExpr).clippy.workspaceMembers.sample-lib.build")
+    grep -q 'all-features-probe' "$clippy_lib_drv" || {
+      echo "FAIL: all-features clippy drv lacks all-features-probe"
+      exit 1
+    }
+
+    lib_drv=$(instantiate "($allFeaturesExpr).workspaceMembers.sample-lib.build")
+    if grep -q 'all-features-probe' "$lib_drv"; then
+      echo "FAIL: normal build drv enables all-features-probe"
+      exit 1
+    fi
+
+    default_clippy_drv=$(instantiate "($cargoNixExpr).clippy.workspaceMembers.sample-lib.build")
+    if grep -q 'all-features-probe' "$default_clippy_drv"; then
+      echo "FAIL: default clippy drv enables all-features-probe"
+      exit 1
+    fi
+
+    # Realize so the feature-gated code is actually compiled by clippy-driver.
+    nix-store --realize "$clippy_lib_drv" > /dev/null
+    echo "PASS: clippyAllFeatures lints feature-gated code"
+
     echo "$out_json" > $out
   ''

@@ -11,6 +11,12 @@ pub use fnv::FnvHashMap;
 #[allow(unused_imports)]
 use debug_unreachable::debug_unreachable;
 
+/// Only compiled when `all-features-probe` is enabled (clippy all-features path).
+#[cfg(feature = "all-features-probe")]
+pub fn all_features_probe() -> &'static str {
+    "all-features-probe"
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Greeting {
     pub message: String,
