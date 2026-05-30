@@ -213,6 +213,10 @@ are compiled once with `rustc` and cached in the Nix store; only workspace
 members are re-checked with `clippy-driver`. This means running clippy on a
 large workspace is as fast as compiling just your local crates.
 
+Pass `clippyAllFeatures = true` (lockfile-resolve mode only) to lint with
+every workspace feature enabled, like `cargo clippy --all-features`, so
+feature-gated code is checked too.
+
 ```nix
 cargoNix = cargo-nix-plugin.lib {
   inherit pkgs;
@@ -244,7 +248,9 @@ The wrapper creates a small shim package where `bin/rustc` calls
 `clippy-driver`, and passes it as the `rust` override to `buildRustCrate` for
 workspace members only. Non-workspace dependencies use the normal `rustc` and
 resolve to the **exact same Nix store paths** as a regular build — no redundant
-compilation.
+compilation. With `clippyAllFeatures = true`, dependencies whose feature set
+grows are rebuilt once for the clippy path; everything else is still shared
+with the regular build.
 
 ## Tests
 

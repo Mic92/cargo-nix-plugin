@@ -94,12 +94,11 @@
   extraRegistries ? { },
   # Optional: extra arguments passed to clippy-driver (e.g. ["-D" "warnings"])
   clippyArgs ? [ ],
-  # Optional: when true, build the clippy crates with every feature of
-  # every workspace member enabled (analogous to
-  # `cargo clippy --all-features`). Re-resolves the workspace under
-  # all-features selection so optional deps activated by those features
-  # are compiled and wired in. The normal build is unaffected.
-  # Only supported in lockfile-resolve mode (i.e. when `metadata` is null).
+  # Optional: build clippy crates with all workspace features enabled,
+  # like `cargo clippy --all-features`. Normal build is unaffected, but
+  # dependencies whose feature set grows under all-features are rebuilt
+  # for the clippy path instead of shared with the normal build.
+  # Lockfile-resolve mode only (metadata must be null).
   clippyAllFeatures ? false,
 
   # Optional: path to Cargo.toml for lockfile resolve. Backwards compat:
@@ -313,20 +312,17 @@ let
     // lib.optionalAttrs (gitSources' != { }) { gitSources = gitSources'; }
   );
 
-  # Union of every feature key across every workspace member. Used as
-  # `rootFeatures` for the all-features re-resolve below. Per-member,
-  # features absent from that member's map are silently dropped by the
-  # resolver's `is_valid_feature` guard, so the union is safe.
+  # Union of all workspace members' features, used as rootFeatures for
+  # the all-features re-resolve. The resolver drops features unknown to
+  # a given member, so the union is safe.
   allWorkspaceFeatures = lib.unique (
     lib.concatMap (packageId: lib.attrNames (resolved.crates.${packageId}.features or { })) (
       lib.attrValues resolved.workspaceMembers
     )
   );
 
-  # All-features resolution, used by the clippy build path when
-  # `clippyAllFeatures = true`. Re-resolving (rather than just adding
-  # `--cfg feature=…` flags) is what makes optional deps activated by
-  # those features actually appear in the dep graph.
+  # Re-resolve (rather than just add `--cfg feature=…`) so optional deps
+  # activated by those features actually appear in the dep graph.
   clippyResolved =
     if !clippyAllFeatures then
       resolved
@@ -426,9 +422,8 @@ let
   # Build a crate using buildRustCrate
   # Memoization via the `self` pattern (builtByPackageId)
   mkBuiltByPackageIdByPkgs =
-    # `resolved'` is the resolver output to read crates/deps from. Threaded
-    # explicitly so the clippy path can substitute an all-features resolution
-    # without touching the normal build.
+    # resolved' is threaded so the clippy path can substitute an
+    # all-features resolution without touching the normal build.
     resolved': cratePkgs:
     let
       buildRustCrate =
@@ -607,12 +602,10 @@ let
       '';
 
   # Build workspace members under clippy, reusing the normal dependency builds.
-  # Non-workspace crates are taken directly from builtCrates so they are
-  # identical Nix store paths — no redundant rebuilds.
+  # Non-workspace crates are built with plain rustc; unless an all-features
+  # re-resolution changed their feature set, they are the same store paths
+  # as the normal build.
   mkClippyBuiltByPkgs =
-    # `resolved'` is the resolver output the clippy build reads from. When
-    # `clippyAllFeatures = true` this is the all-features re-resolution
-    # (which may include extra optional deps); otherwise it's `resolved`.
     resolved': cratePkgs:
     let
       normalBuilt = mkBuiltByPackageIdByPkgs resolved' cratePkgs;
