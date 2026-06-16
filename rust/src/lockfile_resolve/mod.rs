@@ -361,11 +361,39 @@ pub fn resolve_from_lockfile(
         );
     }
 
-    // Roots: workspace members with requested features
+    // Roots: workspace members with requested features.
+    //
+    // root_features accepts two forms, mirroring `cargo build --workspace
+    // --features …` at the workspace root:
+    //   - "feat"      — seeded on every workspace member that defines it
+    //   - "pkg/feat"  — seeded on workspace member `pkg` only
+    // An unknown `pkg` is a hard error: previously the entry fell through
+    // expand_features' optional-dep branch and was discarded silently,
+    // leaving the target member with no features at all.
+    let mut bare: Vec<String> = Vec::new();
+    let mut scoped: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for entry in root_features {
+        match entry.split_once('/') {
+            Some((pkg, feat)) if workspace_members.contains_key(pkg) => {
+                scoped.entry(pkg).or_default().push(feat.to_string());
+            }
+            Some((pkg, _)) => {
+                return Err(format!(
+                    "rootFeatures entry {entry:?}: {pkg:?} is not a workspace member. \
+                     Use a bare feature name to enable it on every member, or the \
+                     correct member name for package-scoped selection."
+                ));
+            }
+            None => bare.push(entry.clone()),
+        }
+    }
     let root_packages: Vec<(String, Vec<String>)> = workspace_members
-        .values()
-        .map(|pkg_id| {
-            let mut features: Vec<String> = root_features.to_vec();
+        .iter()
+        .map(|(name, pkg_id)| {
+            let mut features = bare.clone();
+            if let Some(extra) = scoped.get(name.as_str()) {
+                features.extend(extra.iter().cloned());
+            }
             if !no_default_features {
                 features.push("default".to_string());
             }
@@ -1276,6 +1304,100 @@ version = "0.1.0"
         assert!(
             err.contains("sibling") && err.contains("outside the workspace root"),
             "error should name the crate and the reason: {err}"
+        );
+    }
+
+    /// `rootFeatures = ["pkg/feat"]` enables `feat` on workspace member
+    /// `pkg` only — not on every member, and not as an optional-dep rule
+    /// on every member (the previous behaviour, which discarded it
+    /// silently when no member had an optional dep named `pkg`).
+    #[test]
+    fn root_features_package_scoped_targets_named_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        for d in ["a/src", "b/src"] {
+            std::fs::create_dir_all(ws.join(d)).unwrap();
+        }
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("a/Cargo.toml"),
+            r#"
+[package]
+name = "a"
+version = "0.1.0"
+[features]
+shared = []
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("b/Cargo.toml"),
+            r#"
+[package]
+name = "b"
+version = "0.1.0"
+[features]
+shared = []
+only-b = []
+"#,
+        )
+        .unwrap();
+        let cargo_lock = r#"
+version = 4
+[[package]]
+name = "a"
+version = "0.1.0"
+[[package]]
+name = "b"
+version = "0.1.0"
+"#;
+
+        let result = resolve_from_lockfile(
+            ws,
+            cargo_lock,
+            ws,
+            "sparse+https://index.crates.io/",
+            &linux_target(),
+            &["shared".into(), "b/only-b".into()],
+            true, // noDefaultFeatures — isolate the seeding under test
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let mut a = result.crates["a"].resolved_default_features.clone();
+        a.sort();
+        let mut b = result.crates["b"].resolved_default_features.clone();
+        b.sort();
+        // bare "shared" reaches both; scoped "b/only-b" reaches b only.
+        assert_eq!(a, vec!["shared"], "a got: {a:?}");
+        assert_eq!(b, vec!["only-b", "shared"], "b got: {b:?}");
+    }
+
+    /// `rootFeatures = ["pkg/feat"]` where `pkg` is not a workspace member
+    /// must error rather than silently resolve to nothing.
+    #[test]
+    fn root_features_unknown_package_scoped_errors() {
+        let ws =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-project-features");
+        let cargo_lock = std::fs::read_to_string(ws.join("Cargo.lock")).unwrap();
+        let err = resolve_from_lockfile(
+            &ws,
+            &cargo_lock,
+            &ws,
+            "sparse+https://index.crates.io/",
+            &linux_target(),
+            &["nope/x".into()],
+            false,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("nope") && err.contains("workspace member"),
+            "error should name the unknown package: {err}"
         );
     }
 
