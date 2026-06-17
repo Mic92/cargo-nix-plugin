@@ -48,7 +48,11 @@
   cargoLock ? null,
   # Required: workspace source root (used for buildRustCrate src)
   src ? null,
-  # Optional: features to enable on the root package.
+  # Optional: features to enable on workspace members. Either bare
+  # ("feat", enabled on every member that defines it) or package-scoped
+  # ("member/feat", enabled on that member only — same as
+  # `cargo build --workspace --features member/feat`). An unknown member
+  # name fails evaluation.
   rootFeatures ? [ ],
   # Optional: disable default features on root packages.
   noDefaultFeatures ? false,
