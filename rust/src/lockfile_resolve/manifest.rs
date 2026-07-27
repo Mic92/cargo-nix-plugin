@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::resolve::BinTarget;
+use crate::resolve::{BinTarget, TestTarget};
 
 /// Parsed workspace Cargo.toml — just what we need for workspace member info.
 #[derive(Debug)]
@@ -53,6 +53,7 @@ pub(super) struct WorkspaceMember {
     pub(super) lib_name: Option<String>,
     pub(super) lib_crate_types: Vec<String>,
     pub(super) bin_targets: Vec<BinTarget>,
+    pub(super) test_targets: Vec<TestTarget>,
     pub(super) authors: Vec<String>,
 }
 
@@ -370,6 +371,8 @@ fn parse_member_manifest(
         })
         .unwrap_or_default();
 
+    let test_targets = discover_test_targets(toml, pkg, manifest_dir);
+
     // Parse features
     let features: BTreeMap<String, Vec<String>> = toml
         .get("features")
@@ -421,8 +424,86 @@ fn parse_member_manifest(
         lib_name,
         lib_crate_types,
         bin_targets,
+        test_targets,
         authors,
     })
+}
+
+/// Cargo's integration-test target autodiscovery (`autotests` on:
+/// `tests/*.rs`, `tests/<dir>/main.rs`) merged with `[[test]]` entries;
+/// an explicit entry with `test = false` is dropped, and one whose name
+/// matches a discovered target overrides it.
+fn discover_test_targets(
+    toml: &toml::Value,
+    pkg: &toml::Value,
+    manifest_dir: &Path,
+) -> Vec<TestTarget> {
+    let mut by_name: BTreeMap<String, TestTarget> = BTreeMap::new();
+    let autotests = pkg
+        .get("autotests")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let entries = if autotests {
+        std::fs::read_dir(manifest_dir.join("tests")).ok()
+    } else {
+        None
+    };
+    for e in entries.into_iter().flatten().flatten() {
+        let path = e.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let target = if fname.ends_with(".rs") && path.is_file() {
+            Some((fname.trim_end_matches(".rs"), format!("tests/{fname}")))
+        } else if path.join("main.rs").is_file() {
+            Some((fname, format!("tests/{fname}/main.rs")))
+        } else {
+            None
+        };
+        if let Some((name, path)) = target {
+            by_name.insert(
+                name.to_string(),
+                TestTarget {
+                    name: name.to_string(),
+                    path,
+                    harness: true,
+                },
+            );
+        }
+    }
+    for item in toml
+        .get("test")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if item.get("test").and_then(|v| v.as_bool()) == Some(false) {
+            by_name.remove(name);
+            continue;
+        }
+        let discovered = by_name.remove(name);
+        let path = item
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| discovered.as_ref().map(|d| d.path.clone()))
+            .unwrap_or_else(|| format!("tests/{name}.rs"));
+        by_name.insert(
+            name.to_string(),
+            TestTarget {
+                name: name.to_string(),
+                path,
+                harness: item
+                    .get("harness")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+            },
+        );
+    }
+    by_name.into_values().collect()
 }
 
 /// Parse a `[dependencies]` table from Cargo.toml.
@@ -710,6 +791,87 @@ mod tests {
         assert_eq!(result[0], member);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Test-target discovery mirrors cargo: `tests/*.rs` and
+    /// `tests/<dir>/main.rs` autodiscovered unless `autotests = false`,
+    /// explicit `[[test]]` entries always, `test = false` dropped.
+    #[test]
+    fn parse_member_discovers_test_targets_like_cargo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        std::fs::create_dir_all(dir.join("tests/multi")).unwrap();
+        std::fs::write(dir.join("tests/flat.rs"), "").unwrap();
+        std::fs::write(dir.join("tests/multi/main.rs"), "").unwrap();
+        // A helper module dir without main.rs and a non-.rs file are ignored.
+        std::fs::create_dir_all(dir.join("tests/common")).unwrap();
+        std::fs::write(dir.join("tests/common/mod.rs"), "").unwrap();
+        std::fs::write(dir.join("tests/data.txt"), "").unwrap();
+        std::fs::create_dir_all(dir.join("t")).unwrap();
+        std::fs::write(dir.join("t/explicit.rs"), "").unwrap();
+        std::fs::write(dir.join("t/off.rs"), "").unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            r#"
+            [package]
+            name = "p"
+            version = "0.1.0"
+
+            [[test]]
+            name = "explicit"
+            path = "t/explicit.rs"
+            harness = false
+
+            [[test]]
+            name = "off"
+            path = "t/off.rs"
+            test = false
+            "#,
+        )
+        .unwrap();
+        let ws = parse_workspace(dir).unwrap();
+        let root = ws.root_package.expect("root package");
+        let mut got: Vec<(String, String, bool)> = root
+            .test_targets
+            .iter()
+            .map(|t| (t.name.clone(), t.path.clone(), t.harness))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("explicit".into(), "t/explicit.rs".into(), false),
+                ("flat".into(), "tests/flat.rs".into(), true),
+                ("multi".into(), "tests/multi/main.rs".into(), true),
+            ]
+        );
+
+        // autotests = false keeps only the explicit table entries.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            r#"
+            [package]
+            name = "p"
+            version = "0.1.0"
+            autotests = false
+
+            [[test]]
+            name = "explicit"
+            path = "t/explicit.rs"
+            "#,
+        )
+        .unwrap();
+        let ws = parse_workspace(dir).unwrap();
+        let names: Vec<String> = ws
+            .root_package
+            .unwrap()
+            .test_targets
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["explicit".to_string()]);
     }
 
     /// An excluded crate matching `crates/*` must not become a member —

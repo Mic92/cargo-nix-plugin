@@ -19,7 +19,7 @@ use crate::lockfile::parse_lockfile;
 /// `resolved.apiLevel == apiLevel`, so consumers that statically link an
 /// older resolver into nix but evaluate a newer `lib/` get a clear error
 /// instead of a confusing attribute-missing failure deep in buildRustCrate.
-pub const API_LEVEL: u32 = 2;
+pub const API_LEVEL: u32 = 3;
 
 /// The result of resolving a cargo workspace.
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +59,11 @@ pub struct CrateInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lib_name: Option<String>,
     pub crate_bin: Vec<BinTarget>,
+    /// Integration-test targets (workspace members only): cargo's
+    /// autodiscovery plus explicit `[[test]]` entries, for consumers that
+    /// synthesize `cargo metadata` output (e.g. nextest reuse-build).
+    #[serde(default)]
+    pub test_targets: Vec<TestTarget>,
     pub lib_crate_types: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub links: Option<String>,
@@ -87,6 +92,17 @@ impl DepInfo {
     pub fn local_name(&self) -> &str {
         self.rename.as_deref().unwrap_or(&self.name)
     }
+}
+
+/// An integration-test target: `tests/foo.rs` / `tests/foo/main.rs`
+/// autodiscovery or a `[[test]]` table entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TestTarget {
+    pub name: String,
+    /// Source path relative to the manifest directory.
+    pub path: String,
+    /// `[[test]] harness = false` disables libtest for that target.
+    pub harness: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -276,6 +292,22 @@ pub fn resolve_workspace(
             Vec::new()
         };
 
+        let test_targets: Vec<TestTarget> = if is_workspace_member {
+            pkg.targets
+                .iter()
+                .filter(|t| t.kind.contains(&TargetKind::Test))
+                .map(|t| TestTarget {
+                    name: t.name.clone(),
+                    path: relative_src_path(&t.src_path, &pkg.manifest_path),
+                    // cargo_metadata's Target does not expose `harness`; libtest
+                    // is the default and the metadata path has no override info.
+                    harness: true,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         let lib_crate_types: Vec<String> = pkg
             .targets
             .iter()
@@ -329,6 +361,7 @@ pub fn resolve_workspace(
                 lib_path,
                 lib_name,
                 crate_bin: binaries,
+                test_targets,
                 lib_crate_types,
                 links: pkg.links.clone(),
                 authors: pkg.authors.clone(),
