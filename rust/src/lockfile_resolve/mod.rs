@@ -140,6 +140,7 @@ pub fn resolve_from_lockfile(
                     lib_path: member.lib_path.clone(),
                     lib_name: member.lib_name.clone(),
                     crate_bin: member.bin_targets.clone(),
+                    test_targets: member.test_targets.clone(),
                     lib_crate_types: member.lib_crate_types.clone(),
                     links: member.links.clone(),
                     authors: member.authors.clone(),
@@ -316,6 +317,7 @@ pub fn resolve_from_lockfile(
                     lib_path: path_member.and_then(|m| m.lib_path.clone()),
                     lib_name: path_member.and_then(|m| m.lib_name.clone()),
                     crate_bin: Vec::new(), // Not needed for external crates
+                    test_targets: Vec::new(),
                     lib_crate_types: path_member
                         .map(|m| m.lib_crate_types.clone())
                         .unwrap_or_default(),

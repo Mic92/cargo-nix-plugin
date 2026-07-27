@@ -1107,7 +1107,9 @@ mod tests {
             Some("index.crates.io")
         );
         assert_eq!(
-            host_from_url("sparse+https://artifactory.example.com/artifactory/api/cargo/crates-mirror/index/"),
+            host_from_url(
+                "sparse+https://artifactory.example.com/artifactory/api/cargo/crates-mirror/index/"
+            ),
             Some("artifactory.example.com")
         );
         assert_eq!(

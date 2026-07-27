@@ -148,7 +148,7 @@ let
   # Contract version between this wrapper and the Rust resolver (input
   # attrset + WorkspaceResult). Must match API_LEVEL in
   # rust/src/resolve.rs; bump both on incompatible changes.
-  apiLevel = 2;
+  apiLevel = 3;
 
   # Probe the loaded plugin before calling it so skew surfaces as a
   # clear message, not a serde/attr error. `or 0` covers plugins
@@ -733,6 +733,10 @@ in
     in
     {
       inherit packageId;
+      # Raw resolver output for this member (name, version, libPath,
+      # crateBin, testTargets, source.path). Lets consumers synthesize
+      # cargo-metadata-shaped data without running cargo.
+      crateInfo = resolved.crates.${packageId};
       build = builtCrates.crates.${packageId};
       # Compile tests with dev-dependencies wired in. Equivalent to
       # `.build.override { buildTests = true; }` — buildRustCrate folds
