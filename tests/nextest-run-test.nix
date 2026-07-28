@@ -36,11 +36,18 @@ pkgs.runCommand "cargo-nix-plugin-nextest-run-test"
     report=$(nix-store --realize "$drv")
 
     # A manifest bug that drops a binary would still exit 0. Check
-    # that the report in $out names both integration binaries.
-    for id in "nodeps-lib::integration" "nodeps-lib::multi"; do
+    # that the report in $out names every test binary.
+    for id in "tests::unit" "nodeps-lib::integration" "nodeps-lib::multi"; do
       grep -q "$id" "$report" || { echo "FAIL: $id not in report"; exit 1; }
     done
-    echo "PASS: nextestRun ran all integration test binaries"
+    echo "PASS: nextestRun ran all test binaries"
+
+    # The builder records the host libdir, so nextest does not warn
+    # that it failed to detect one.
+    if grep -q "failed to detect the rustc libdir" "$report"; then
+      echo "FAIL: libdir not recorded in binaries-metadata"
+      exit 1
+    fi
 
     # A failing test must fail the derivation. pipefail makes
     # nextest's exit code survive the tee into $out.
