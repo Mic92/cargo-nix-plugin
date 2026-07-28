@@ -144,8 +144,6 @@ let
 
   metadataFile = pkgs.writeText "cargo-metadata.json" metadataJson;
 
-in
-{
   # Like runTests, but via cargo-nextest. That adds per-test-process
   # isolation, retries, and .config/nextest.toml profiles.
   mkRun =
@@ -158,7 +156,7 @@ in
       workspaceSrc,
       # Extra `cargo-nextest run` args, e.g. ["--profile" "ci"].
       extraArgs ? [ ],
-    }:
+    }@args:
     pkgs.stdenvNoCC.mkDerivation {
       name = "${name}-nextest";
 
@@ -193,6 +191,12 @@ in
         runHook postInstall
       '';
 
-      passthru = { inherit testsDrv; };
+      passthru = {
+        inherit testsDrv;
+        withArgs = extra: mkRun (args // { extraArgs = extra; });
+      };
     };
+in
+{
+  inherit mkRun;
 }

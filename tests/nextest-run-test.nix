@@ -36,11 +36,11 @@ pkgs.runCommand "cargo-nix-plugin-nextest-run-test"
     report=$(nix-store --realize "$drv")
 
     # A manifest bug that drops a binary would still exit 0. Check
-    # that the report in $out names both integration binaries.
-    for id in "nodeps-lib::integration" "nodeps-lib::multi"; do
+    # that the report in $out names every test binary.
+    for id in "tests::unit" "nodeps-lib::integration" "nodeps-lib::multi"; do
       grep -q "$id" "$report" || { echo "FAIL: $id not in report"; exit 1; }
     done
-    echo "PASS: nextestRun ran all integration test binaries"
+    echo "PASS: nextestRun ran all test binaries"
 
     # A failing test must fail the derivation. pipefail makes
     # nextest's exit code survive the tee into $out.
