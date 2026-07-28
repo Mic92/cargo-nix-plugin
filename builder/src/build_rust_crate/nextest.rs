@@ -9,6 +9,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::process::Command;
 
 use super::build::{resolve_bins, resolve_tests};
 use super::config::BuildConfig;
@@ -55,10 +56,26 @@ struct Platform {
     target_features: &'static str,
 }
 
+/// nextest extends the dynamic-linker path with the host libdir so
+/// tests linking Rust dylibs (proc-macros, std under -Cprefer-dynamic)
+/// find them. Without one it warns on every run.
 #[derive(Serialize)]
 struct Libdir {
     status: &'static str,
-    reason: &'static str,
+    path: String,
+}
+
+fn host_libdir(config: &BuildConfig) -> Libdir {
+    let out = Command::new("rustc")
+        .args(["--print", "target-libdir", "--target"])
+        .arg(&config.host_platform.rustc_target_spec)
+        .output()
+        .expect("failed to spawn `rustc --print target-libdir`");
+    assert!(out.status.success(), "`rustc --print target-libdir` failed");
+    Libdir {
+        status: "available",
+        path: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    }
 }
 
 #[derive(Serialize)]
@@ -136,10 +153,7 @@ pub fn write_binaries_metadata(
             platforms: Platforms {
                 host: HostPlatform {
                     platform: platform.clone(),
-                    libdir: Libdir {
-                        status: "unavailable",
-                        reason: "not-requested",
-                    },
+                    libdir: host_libdir(config),
                 },
                 targets: [],
             },
