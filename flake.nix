@@ -125,6 +125,14 @@
         # `nix build --store local?root=…` needs the bind-mount-based
         # chroot store, which only exists on Linux.
         // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nextest-run-test = pkgs.callPackage ./tests/nextest-run-test.nix {
+            inherit plugin nix;
+            pluginSrc = ./.;
+            # nodeps variant: the test workspace resolves without
+            # registry access inside the sandbox.
+            sampleProject = ./tests/sample-project-nodeps;
+          };
+
           chroot-store-test = pkgs.callPackage ./tests/chroot-store-test.nix {
             inherit plugin nix;
             pluginSrc = ./.;
