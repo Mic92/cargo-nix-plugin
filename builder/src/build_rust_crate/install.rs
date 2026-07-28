@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use super::config::{BuildConfig, CrateMetadata};
@@ -143,6 +143,8 @@ fn install_tests(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>>
             fs::copy(&p, format!("{dst}/{name}"))?;
         }
     }
+
+    super::nextest::write_binaries_metadata(config, &tests_dst)?;
     Ok(())
 }
 
@@ -157,7 +159,10 @@ fn copy_if_nonempty(src: &str, dst: &str) -> Result<(), Box<dyn std::error::Erro
 }
 
 fn dir_has_files(dir: &str) -> bool {
-    Path::new(dir).is_dir() && fs::read_dir(dir).map(|mut d| d.next().is_some()).unwrap_or(false)
+    Path::new(dir).is_dir()
+        && fs::read_dir(dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
 }
 
 fn copy_tree(src: &str, dst: &str) -> Result<(), Box<dyn std::error::Error>> {

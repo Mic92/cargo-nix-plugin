@@ -505,9 +505,10 @@ let
         let
           depCrateInfo = resolved'.crates.${dep.packageId} or null;
         in
-        if depCrateInfo != null
-           && ((depCrateInfo.procMacro or false)
-               || lib.elem depCrateInfo.crateName procMacroCrates) then
+        if
+          depCrateInfo != null
+          && ((depCrateInfo.procMacro or false) || lib.elem depCrateInfo.crateName procMacroCrates)
+        then
           self.build.cratesLibOnly.${dep.packageId}
         else
           self.cratesLibOnly.${dep.packageId};
@@ -558,8 +559,7 @@ let
           crateRenames
           ;
         features = crateInfo.resolvedDefaultFeatures or [ ];
-        procMacro = (crateInfo.procMacro or false)
-                    || lib.elem crateInfo.crateName procMacroCrates;
+        procMacro = (crateInfo.procMacro or false) || lib.elem crateInfo.crateName procMacroCrates;
       }
       # Only ever pass crateBin to *suppress* bins on the lib-only variant.
       # Never forward crateInfo.crateBin: that is only the explicit [[bin]]
@@ -630,23 +630,22 @@ let
         exit $status
       '';
     in
-    pkgs.runCommand "clippy-as-rustc" { }
-      ''
-        mkdir -p $out/bin $out/lib
-        # Symlink the real rustc's libs (sysroot) so clippy-driver finds them
-        ln -s ${rustc}/lib/* $out/lib/
+    pkgs.runCommand "clippy-as-rustc" { } ''
+      mkdir -p $out/bin $out/lib
+      # Symlink the real rustc's libs (sysroot) so clippy-driver finds them
+      ln -s ${rustc}/lib/* $out/lib/
 
-        # Wrap clippy-driver as "rustc" so buildRustCrate's `noisily rustc`
-        # invocations run clippy and retain JSON diagnostics in the build dir.
-        ln -s ${reportingDriver} $out/bin/rustc
+      # Wrap clippy-driver as "rustc" so buildRustCrate's `noisily rustc`
+      # invocations run clippy and retain JSON diagnostics in the build dir.
+      ln -s ${reportingDriver} $out/bin/rustc
 
-        # Forward other tools from the real toolchain.
-        for tool in rustdoc rustfmt; do
-          if [ -e ${rustc}/bin/$tool ]; then
-            ln -s ${rustc}/bin/$tool $out/bin/$tool
-          fi
-        done
-      '';
+      # Forward other tools from the real toolchain.
+      for tool in rustdoc rustfmt; do
+        if [ -e ${rustc}/bin/$tool ]; then
+          ln -s ${rustc}/bin/$tool $out/bin/$tool
+        fi
+      done
+    '';
 
   # Build workspace members under clippy, reusing the normal dependency builds.
   # Non-workspace crates are built with plain rustc; unless an all-features
@@ -667,20 +666,19 @@ let
       # Clippy buildRustCrate: use clippy-driver as the compiler.
       clippyBuildRustCrate =
         args:
-        (
-          (normalBuildRustCrate args).override {
-            rust = clippyRustcWrapper;
-            capLints = clippyCapLints;
-          }
-        ).overrideAttrs (old: {
-          postInstall = (old.postInstall or "") + ''
-            mkdir -p "$out/share/cargo-nix"
-            for report in "$NIX_BUILD_TOP"/clippy-diagnostics/*.jsonl; do
-              [ -e "$report" ] || continue
-              cat "$report"
-            done > "$out/share/cargo-nix/clippy-diagnostics.jsonl"
-          '';
-        });
+        ((normalBuildRustCrate args).override {
+          rust = clippyRustcWrapper;
+          capLints = clippyCapLints;
+        }).overrideAttrs
+          (old: {
+            postInstall = (old.postInstall or "") + ''
+              mkdir -p "$out/share/cargo-nix"
+              for report in "$NIX_BUILD_TOP"/clippy-diagnostics/*.jsonl; do
+                [ -e "$report" ] || continue
+                cat "$report"
+              done > "$out/share/cargo-nix/clippy-diagnostics.jsonl"
+            '';
+          });
 
       workspaceMemberIds = lib.attrValues resolved'.workspaceMembers;
 
@@ -722,6 +720,15 @@ let
       ''
     ) (lib.attrNames resolved.workspaceMembers)}
   '';
+
+  nextest = import ./nextest.nix {
+    inherit pkgs lib resolved;
+    # Package ids embed the workspace-relative dir. The builder takes
+    # it from the workspace_member attr, which a localSrc override can
+    # change, so the synthesized cargo-metadata.json must use the same
+    # value rather than re-deriving it from source.path.
+    memberDir = crateInfo: (resolveSrc crateInfo).workspace_member or ".";
+  };
 
 in
 {
@@ -781,6 +788,11 @@ in
         '';
 
         passthru = { inherit testsDrv; };
+      };
+      # Like runTests, but via cargo-nextest (see lib/nextest.nix).
+      nextestRun = nextest.mkRun {
+        inherit name testsDrv;
+        workspaceSrc = src;
       };
     }
   ) resolved.workspaceMembers;

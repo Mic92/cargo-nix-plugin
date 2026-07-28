@@ -14,7 +14,9 @@ pub fn find_by_metadata(dir: &str, metadata: &str) -> Option<String> {
     let mut dylib_match = None;
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some((_, ext)) = name.rsplit_once(&stem) else { continue };
+        let Some((_, ext)) = name.rsplit_once(&stem) else {
+            continue;
+        };
         match ext {
             "rlib" => return Some(entry.path().to_string_lossy().to_string()),
             "so" | "dylib" => {
@@ -116,7 +118,12 @@ fn base_rustc_flags(config: &BuildConfig) -> Vec<String> {
         flags.extend(v.split_whitespace().map(String::from));
     }
     // Omit when Nix supplied no linker (bare-metal/wasm); rustc's default is correct there.
-    if let Some(linker) = config.host_platform.linker_path.as_deref().filter(|s| !s.is_empty()) {
+    if let Some(linker) = config
+        .host_platform
+        .linker_path
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
         flags.extend_from_slice(&["-C".into(), format!("linker={linker}")]);
     }
 

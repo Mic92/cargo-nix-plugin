@@ -276,13 +276,21 @@ impl BuildConfig {
         {
             for (k, v) in obj {
                 if k.is_empty()
-                    || !k.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                    || !k
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
                 {
                     continue;
                 }
                 let s = match v {
                     serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Bool(b) => if *b { "1".into() } else { String::new() },
+                    serde_json::Value::Bool(b) => {
+                        if *b {
+                            "1".into()
+                        } else {
+                            String::new()
+                        }
+                    }
                     serde_json::Value::Number(n) => n.to_string(),
                     serde_json::Value::Array(a) => a
                         .iter()

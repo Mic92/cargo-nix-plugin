@@ -45,7 +45,9 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     // `target/lib` artifact set. Under plain nix-build the early write is
     // unobservable (dependents only start after install).
     if !config.build_tests {
-        let lib_out = config.lib_path_output().unwrap_or_else(|| config.out_path());
+        let lib_out = config
+            .lib_path_output()
+            .unwrap_or_else(|| config.out_path());
         CrateMetadata::provisional(config).write(lib_out)?;
     }
 
@@ -72,7 +74,15 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         run_cmd(
-            &mut flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, false, true),
+            &mut flags.cmd(
+                &crate_name,
+                &lib_src,
+                "target/lib",
+                &crate_types,
+                &extra,
+                false,
+                true,
+            ),
             config.verbose,
         )?;
 
@@ -91,8 +101,15 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 
         if config.build_tests {
             echo_colored(&format!("Building test lib {}", config.lib_name));
-            let mut cmd =
-                flags.cmd(&crate_name, &lib_src, "target/lib", &crate_types, &extra, true, true);
+            let mut cmd = flags.cmd(
+                &crate_name,
+                &lib_src,
+                "target/lib",
+                &crate_types,
+                &extra,
+                true,
+                true,
+            );
             let tmp = fs::canonicalize({
                 fs::create_dir_all("target/tmp")?;
                 "target/tmp"
@@ -120,7 +137,12 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let bb = BinBuilder { config, flags: &flags, lib_extern: &lib_extern, test_env: &test_env };
+    let bb = BinBuilder {
+        config,
+        flags: &flags,
+        lib_extern: &lib_extern,
+        test_env: &test_env,
+    };
 
     // Bins are always real executables so CARGO_BIN_EXE_<name> resolves.
     for (name, path) in &bins {
@@ -155,7 +177,9 @@ fn persist_bso_link_flags(
     }
 
     let cwd = std::env::current_dir()?.to_string_lossy().into_owned();
-    let lib_out = config.lib_path_output().unwrap_or_else(|| config.out_path());
+    let lib_out = config
+        .lib_path_output()
+        .unwrap_or_else(|| config.out_path());
 
     let mut link_append = String::new();
     let mut link_final_append = String::new();
@@ -163,10 +187,7 @@ fn persist_bso_link_flags(
     for search in &bso.link_search {
         link_append.push_str(&format!("-L {search}\n"));
         // Remap build sandbox paths to installed output paths
-        let remapped = search.replace(
-            &format!("{cwd}/target/build"),
-            &format!("{lib_out}/lib"),
-        );
+        let remapped = search.replace(&format!("{cwd}/target/build"), &format!("{lib_out}/lib"));
         link_final_append.push_str(&format!("-L {remapped}\n"));
     }
     for lib in &bso.link_libs {
@@ -209,9 +230,17 @@ struct BinBuilder<'a> {
 }
 
 impl BinBuilder<'_> {
-    fn build(&self, name: &str, path: &str, kind: BinKind) -> Result<(), Box<dyn std::error::Error>> {
+    fn build(
+        &self,
+        name: &str,
+        path: &str,
+        kind: BinKind,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let test = matches!(kind, BinKind::Test { .. });
-        echo_colored(&format!("Building {}{name}", if test { "test " } else { "" }));
+        echo_colored(&format!(
+            "Building {}{name}",
+            if test { "test " } else { "" }
+        ));
         let out_dir = if test { "target/tests" } else { "target/bin" };
         fs::create_dir_all(out_dir)?;
 
@@ -230,7 +259,9 @@ impl BinBuilder<'_> {
         extra.extend_from_slice(self.lib_extern);
         let crate_name_ = name.replace('-', "_");
         let harness = !matches!(kind, BinKind::Test { harness: false });
-        let mut cmd = self.flags.cmd(&crate_name_, path, out_dir, &["bin"], &extra, test, harness);
+        let mut cmd = self
+            .flags
+            .cmd(&crate_name_, path, out_dir, &["bin"], &extra, test, harness);
         cmd.env("CARGO_BIN_NAME", name);
         if test {
             for (k, v) in self.test_env {
@@ -263,7 +294,7 @@ fn resolve_lib_path(config: &BuildConfig) -> Option<String> {
     }
 }
 
-fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
+pub(super) fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
     let mut bins = Vec::new();
 
     if !config.crate_bin.is_empty() {
@@ -289,9 +320,7 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
 
             if let Some(ref path) = bin.path {
                 bins.push((name, path.clone()));
-            } else if let Some(path) =
-                search_bin_path(&name, &config.lib_path, &config.lib_name)
-            {
+            } else if let Some(path) = search_bin_path(&name, &config.lib_path, &config.lib_name) {
                 bins.push((name, path));
             } else {
                 eprintln!(
@@ -309,7 +338,7 @@ fn resolve_bins(config: &BuildConfig) -> Vec<(String, String)> {
 
 /// Merge explicit `[[test]]` with autotests-inferred targets, dedupe by
 /// name/path, filter on required-features, carry `harness` through.
-fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
+pub(super) fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
     let mut tests: Vec<(String, String, bool)> = Vec::new();
     for t in &config.crate_tests {
         if !t.required_features.is_empty()
@@ -326,9 +355,12 @@ fn resolve_tests(config: &BuildConfig) -> Vec<(String, String, bool)> {
             continue;
         }
         let Some(path) = t.path.clone().or_else(|| {
-            [format!("tests/{n}.rs", n = t.name), format!("tests/{n}/main.rs", n = t.name)]
-                .into_iter()
-                .find(|p| Path::new(p).exists())
+            [
+                format!("tests/{n}.rs", n = t.name),
+                format!("tests/{n}/main.rs", n = t.name),
+            ]
+            .into_iter()
+            .find(|p| Path::new(p).exists())
         }) else {
             eprintln!(
                 "\x1b[0;1;31mERROR: failed to find file for test target: {}\x1b[0m",

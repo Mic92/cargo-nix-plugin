@@ -56,7 +56,12 @@ pub fn locate(config: &BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
     detect_cargo_toml_info(config);
 
-    for dir in &["target/deps", "target/lib", "target/build", "target/buildDeps"] {
+    for dir in &[
+        "target/deps",
+        "target/lib",
+        "target/build",
+        "target/buildDeps",
+    ] {
         fs::create_dir_all(dir)?;
     }
 
@@ -139,7 +144,10 @@ pub fn run(config: &mut BuildConfig) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             cmd.args(["-C", "debuginfo=2"]);
         }
-        cmd.args(["-C", &format!("codegen-units={n}", n = config.codegen_units)]);
+        cmd.args([
+            "-C",
+            &format!("codegen-units={n}", n = config.codegen_units),
+        ]);
         for o in &config.extra_rustc_opts_for_build_rs {
             cmd.arg(o);
         }
@@ -269,10 +277,7 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
     let mut env = BTreeMap::from([
         ("CARGO_PKG_NAME".into(), config.crate_name.clone()),
         ("CARGO_PKG_VERSION".into(), config.crate_version.clone()),
-        (
-            "CARGO_PKG_AUTHORS".into(),
-            config.crate_authors.join(":"),
-        ),
+        ("CARGO_PKG_AUTHORS".into(), config.crate_authors.join(":")),
         (
             "CARGO_PKG_DESCRIPTION".into(),
             config.crate_description.clone(),
@@ -304,7 +309,10 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
             "OPT_LEVEL".into(),
             if config.release { "3" } else { "0" }.into(),
         ),
-        ("TARGET".into(), config.host_platform.rustc_target_spec.clone()),
+        (
+            "TARGET".into(),
+            config.host_platform.rustc_target_spec.clone(),
+        ),
         (
             "HOST".into(),
             config.build_platform.rustc_target_spec.clone(),
@@ -322,10 +330,7 @@ pub fn build_env(config: &BuildConfig, out_dir: &str) -> BTreeMap<String, String
         ("RUSTDOC".into(), "rustdoc".into()),
         // Always set, always empty: per-crate flags must not leak into build.rs probes.
         ("CARGO_ENCODED_RUSTFLAGS".into(), String::new()),
-        (
-            "CARGO_CRATE_NAME".into(),
-            config.lib_name.replace('-', "_"),
-        ),
+        ("CARGO_CRATE_NAME".into(), config.lib_name.replace('-', "_")),
         ("CARGO_CFG_FEATURE".into(), config.crate_features.join(",")),
     ]);
     if !config.crate_links.is_empty() {
@@ -373,10 +378,7 @@ fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
     let mut cfg: BTreeMap<String, Vec<&str>> = BTreeMap::new();
     for line in out.lines() {
         match line.split_once('=') {
-            Some((k, v)) => cfg
-                .entry(k.into())
-                .or_default()
-                .push(v.trim_matches('"')),
+            Some((k, v)) => cfg.entry(k.into()).or_default().push(v.trim_matches('"')),
             None => {
                 cfg.entry(line.into()).or_default();
             }
@@ -384,10 +386,7 @@ fn target_cfg_env(config: &BuildConfig) -> BTreeMap<String, String> {
     }
     cfg.into_iter()
         .map(|(k, vs)| {
-            let key = format!(
-                "CARGO_CFG_{}",
-                k.to_uppercase().replace(['-', '.'], "_")
-            );
+            let key = format!("CARGO_CFG_{}", k.to_uppercase().replace(['-', '.'], "_"));
             (key, vs.join(","))
         })
         .collect()
@@ -520,7 +519,9 @@ fn parse_links_metadata(stdout: &str) -> BTreeMap<String, String> {
         let line = line.trim();
         // cargo:: → only `metadata=` is data; cargo: → anything not in RESERVED_PREFIXES.
         let d = if let Some(rest) = line.strip_prefix("cargo::") {
-            let Some(kv) = rest.strip_prefix("metadata=") else { continue };
+            let Some(kv) = rest.strip_prefix("metadata=") else {
+                continue;
+            };
             kv
         } else if let Some(rest) = line.strip_prefix("cargo:") {
             if rest.starts_with("rustc-")
@@ -710,8 +711,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
         config.autolib = b;
     }
 
-    let has_edition =
-        |opts: &[String]| opts.iter().any(|o| o == "--edition" || o.starts_with("--edition="));
+    let has_edition = |opts: &[String]| {
+        opts.iter()
+            .any(|o| o == "--edition" || o.starts_with("--edition="))
+    };
     if let Some(ed) = pkg.and_then(|p| p.get("edition")).and_then(|v| {
         v.as_str()
             .map(String::from)
@@ -736,7 +739,9 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
 
     // CARGO_PKG_* recovery for lockfile-resolve mode (resolver emits "").
     let fill = |dst: &mut String, key: &str| {
-        if dst.is_empty() && let Some(v) = pkg_str(key) {
+        if dst.is_empty()
+            && let Some(v) = pkg_str(key)
+        {
             *dst = v;
         }
     };
@@ -756,8 +761,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
             })
         });
         if let Some(a) = a {
-            config.crate_authors =
-                a.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            config.crate_authors = a
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
         }
     }
 
@@ -809,7 +816,10 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
                 .collect();
             // Promote to rlib if not Rust-linkable: in lockfile mode we can't
             // tell at eval time which deps need --extern (cargo just omits it).
-            if !ts.iter().any(|t| t == "lib" || t == "rlib" || t == "proc-macro") {
+            if !ts
+                .iter()
+                .any(|t| t == "lib" || t == "rlib" || t == "proc-macro")
+            {
                 ts.push("rlib".into());
             }
             if !ts.is_empty() {
@@ -871,7 +881,11 @@ pub fn detect_cargo_toml_info(config: &mut BuildConfig) {
             let required_features = t
                 .get("required-features")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let harness = t.get("harness").and_then(|v| v.as_bool()).unwrap_or(true);
             config.crate_tests.push(super::config::CrateTest {
@@ -907,7 +921,10 @@ pub fn inferred_bins(crate_name: &str) -> Vec<(String, String)> {
                 let name = path.file_stem().unwrap().to_string_lossy().to_string();
                 bins.push((name, path.to_string_lossy().into_owned()));
             } else if path.is_dir() && path.join("main.rs").exists() {
-                bins.push((fname.into_owned(), path.join("main.rs").to_string_lossy().into_owned()));
+                bins.push((
+                    fname.into_owned(),
+                    path.join("main.rs").to_string_lossy().into_owned(),
+                ));
             }
         }
     }
@@ -995,8 +1012,7 @@ cargo:warning=heads up\n";
 
     #[test]
     fn build_script_output_rustc_flags_routes_to_link_fields() {
-        let bso =
-            parse_build_script_output("cargo:rustc-flags=-L /a -lfoo -L native=/b\n", "/out");
+        let bso = parse_build_script_output("cargo:rustc-flags=-L /a -lfoo -L native=/b\n", "/out");
         assert_eq!(bso.link_search, vec!["/a", "native=/b"]);
         assert_eq!(bso.link_libs, vec!["foo"]);
         assert_eq!(bso.rustc_flags, "");
