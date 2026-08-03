@@ -727,7 +727,7 @@ let
     # it from the workspace_member attr, which a localSrc override can
     # change, so the synthesized cargo-metadata.json must use the same
     # value rather than re-deriving it from source.path.
-    memberDir = crateInfo: (resolveSrc crateInfo).workspace_member or ".";
+    defaultMemberDir = crateInfo: (resolveSrc crateInfo).workspace_member or ".";
   };
 
 in
@@ -798,9 +798,10 @@ in
   ) resolved.workspaceMembers;
 
   # cargo-metadata.json for consumers with their own nextest runner;
-  # mkNextestCargoMetadata overrides memberDir (see lib/nextest.nix).
+  # mkNextestCargoMetadata takes memberDir / workspaceMembers
+  # overrides (see lib/nextest.nix).
   nextestCargoMetadata = nextest.metadataFile;
-  mkNextestCargoMetadata = { memberDir }: nextest.mkMetadataFile memberDir;
+  mkNextestCargoMetadata = nextest.mkMetadataFile;
 
   rootCrate =
     if resolved.root != null then

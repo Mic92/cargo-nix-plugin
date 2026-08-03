@@ -19,8 +19,9 @@
   pkgs,
   lib,
   resolved,
-  # crateInfo -> workspace-relative dir ("." for the root).
-  memberDir,
+  # crateInfo -> workspace-relative dir ("." for the root); matches the
+  # workspace_member the builder writes into package ids.
+  defaultMemberDir,
 }:
 let
   # Must match FAKE_ROOT in builder/src/build_rust_crate/nextest.rs.
@@ -47,11 +48,11 @@ let
   };
 
   memberOf =
-    memberDirOf: name: packageId:
+    memberDir: name: packageId:
     let
       info = resolved.crates.${packageId};
       dir = info.source.path;
-      member = memberDirOf info;
+      member = memberDir info;
       fakeDir = if member == "." then fakeRoot else "${fakeRoot}/${member}";
       id = "path+file://${fakeDir}#${name}@${info.version}";
       target =
@@ -129,12 +130,16 @@ let
       };
     };
 
-  # memberDirOf overrides the module-level memberDir for consumers
-  # whose --workspace-remap target is not rooted at workspaceRoot.
+  # Overrides for consumers whose --workspace-remap target is not
+  # rooted at workspaceRoot (memberDir) or whose runner covers a
+  # subset of the workspace (workspaceMembers).
   mkMetadataFile =
-    memberDirOf:
+    {
+      memberDir ? defaultMemberDir,
+      workspaceMembers ? resolved.workspaceMembers,
+    }:
     let
-      members = lib.attrValues (lib.mapAttrs (memberOf memberDirOf) resolved.workspaceMembers);
+      members = lib.attrValues (lib.mapAttrs (memberOf memberDir) workspaceMembers);
     in
     pkgs.writeText "cargo-metadata.json" (
       builtins.toJSON {
@@ -150,7 +155,7 @@ let
       }
     );
 
-  metadataFile = mkMetadataFile memberDir;
+  metadataFile = mkMetadataFile { };
 
   # Like runTests, but via cargo-nextest. That adds per-test-process
   # isolation, retries, and .config/nextest.toml profiles.
