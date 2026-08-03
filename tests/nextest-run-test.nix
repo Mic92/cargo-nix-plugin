@@ -49,6 +49,16 @@ pkgs.runCommand "cargo-nix-plugin-nextest-run-test"
       exit 1
     fi
 
+    # The metadata export evaluates on its own and with a memberDir
+    # override.
+    for expr in "($cargoNixExpr).nextestCargoMetadata" \
+                "(($cargoNixExpr).mkNextestCargoMetadata { memberDir = _: \".\"; })"; do
+      nix-store --realize "$(nix-instantiate \
+        --option plugin-files "${plugin}/lib/nix/plugins" \
+        --expr "$expr")" >/dev/null
+    done
+    echo "PASS: nextest cargo-metadata exports build"
+
     # A failing test must fail the derivation. pipefail makes
     # nextest's exit code survive the tee into $out.
     faildrv=$(nix-instantiate \

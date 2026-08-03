@@ -797,6 +797,11 @@ in
     }
   ) resolved.workspaceMembers;
 
+  # cargo-metadata.json for consumers with their own nextest runner;
+  # mkNextestCargoMetadata overrides memberDir (see lib/nextest.nix).
+  nextestCargoMetadata = nextest.metadataFile;
+  mkNextestCargoMetadata = { memberDir }: nextest.mkMetadataFile memberDir;
+
   rootCrate =
     if resolved.root != null then
       {
