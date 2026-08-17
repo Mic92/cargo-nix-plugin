@@ -176,7 +176,7 @@ pub fn resolve_from_lockfile(
             // fields at build time, but procMacro is needed at eval time for
             // lib/default.nix's cross-compile routing.
             let mut manifest_member: Option<WorkspaceMember> = None;
-            let (dependencies, build_dependencies, features_btree, links) =
+            let (dependencies, build_dependencies, features_btree) =
                 if let Some(ref version) = index_version {
                     let (deps, build_deps) = resolve_index_deps(
                         version,
@@ -186,8 +186,7 @@ pub fn resolve_from_lockfile(
                         target,
                     );
                     let features = registry::features_for_version(version);
-                    let links = version.links.as_deref().map(|s| s.to_string());
-                    (deps, build_deps, features.into_iter().collect(), links)
+                    (deps, build_deps, features.into_iter().collect())
                 } else if let Some(SourceInfo::Git { url, rev, .. }) = &source_info {
                     // Git dependency — read its Cargo.toml from the
                     // pre-fetched checkout the Nix wrapper handed us.
@@ -232,12 +231,7 @@ pub fn resolve_from_lockfile(
                         sub_path,
                     });
                     manifest_member = Some(member.clone());
-                    (
-                        deps,
-                        build_deps,
-                        member.features.clone(),
-                        member.links.clone(),
-                    )
+                    (deps, build_deps, member.features.clone())
                 } else if pkg.source.is_none() {
                     // Local path dependency that is NOT a [workspace] member.
                     // `parse_workspace` discovered it by following `path = "..."`
@@ -284,14 +278,9 @@ pub fn resolve_from_lockfile(
                         path: member.manifest_dir.clone(),
                     });
                     manifest_member = Some(member.clone());
-                    (
-                        deps,
-                        build_deps,
-                        member.features.clone(),
-                        member.links.clone(),
-                    )
+                    (deps, build_deps, member.features.clone())
                 } else {
-                    (Vec::new(), Vec::new(), BTreeMap::new(), None)
+                    (Vec::new(), Vec::new(), BTreeMap::new())
                 };
 
             // For git and path deps we parsed the manifest ourselves — don't
@@ -321,7 +310,9 @@ pub fn resolve_from_lockfile(
                     lib_crate_types: path_member
                         .map(|m| m.lib_crate_types.clone())
                         .unwrap_or_default(),
-                    links,
+                    // Deliberately not `version.links`: mirrors back-fill it
+                    // later, re-hashing dependents; the builder reads Cargo.toml.
+                    links: path_member.and_then(|m| m.links.clone()),
                     authors: Vec::new(),
                 },
             );

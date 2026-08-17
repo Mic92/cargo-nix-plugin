@@ -78,6 +78,7 @@ pkgs.runCommand "cargo-nix-plugin-remote-sparse-test"
         in {
           serdeDeps = map (d: d.name) cargoNix.resolved.crates.serde.dependencies;
           httpDeps  = map (d: d.name) cargoNix.resolved.crates.http.dependencies;
+          httpLinks = cargoNix.resolved.crates.http.links or null;
         }
       " | tee result.json
 
@@ -89,6 +90,9 @@ pkgs.runCommand "cargo-nix-plugin-remote-sparse-test"
     jq -e '.serdeDeps | length > 0' result.json
     jq -e '.httpDeps  | length > 0' result.json
     jq -e '.httpDeps  | index("bytes") != null' result.json
+
+    # Fixture sets links on http; build-rust-crate takes it from Cargo.toml.
+    jq -e '.httpLinks == null' result.json
 
     # And prove the server was actually hit — not a silent local cache read.
     grep -q '/se/rd/serde' "$ACCESS_LOG"
